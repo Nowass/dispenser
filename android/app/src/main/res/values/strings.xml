@@ -1,0 +1,65 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <string name="app_name">Dispenser</string>
+    <string name="app_brand">DISPENSER V2</string>
+
+    <!-- Demo badge -->
+    <string name="demo_badge">DEMO</string>
+    <string name="demo_badge_description">Ukázkový režim – data jsou simulovaná, nejde o skutečné zařízení</string>
+
+    <!-- Navigation -->
+    <string name="nav_dashboard">Přehled</string>
+    <string name="nav_calendar">Kalendář</string>
+    <string name="nav_history">Historie</string>
+    <string name="nav_settings">Nastavení</string>
+
+    <!-- Dashboard -->
+    <string name="dashboard_title">Moje akvárium</string>
+    <string name="dashboard_next_dose">Příští dávka</string>
+    <string name="dashboard_no_next_dose">Žádná naplánovaná dávka</string>
+    <string name="dashboard_when_today">Dnes v %1$s</string>
+    <string name="dashboard_when_tomorrow">Zítra v %1$s</string>
+    <string name="dashboard_when_other">%1$s v %2$s</string>
+
+    <string name="dashboard_reservoir">Zásobník</string>
+    <string name="dashboard_reservoir_capacity">z %1$s</string>
+    <string name="dashboard_reservoir_a11y">Zásobník: %1$d %%, odhad</string>
+    <string name="dashboard_reservoir_estimate_note">Odhad podle provedených dávek, hladina se neměří.</string>
+    <string name="dashboard_reservoir_low">Nízká odhadovaná zásoba. Zvažte doplnění.</string>
+    <string name="dashboard_reservoir_insufficient">Odhadovaná zásoba nepokryje příští dávku. Dávkování bude zablokováno do potvrzení doplnění.</string>
+
+    <string name="dashboard_battery">Baterie</string>
+    <string name="dashboard_battery_unknown">Neznámá</string>
+    <string name="dashboard_battery_a11y">Baterie: %1$d %%, simulace</string>
+    <string name="dashboard_battery_a11y_unknown">Baterie: stav neznámý</string>
+    <string name="dashboard_battery_simulated_note">Simulovaná hodnota, nejde o měření.</string>
+
+    <string name="dashboard_estimate_label">odhad</string>
+    <string name="dashboard_simulated_label">simulace</string>
+    <string name="dashboard_demo_clock">Simulovaný čas ukázky: %1$s</string>
+
+    <string name="dashboard_week_title">Nadcházejících 7 dní</string>
+    <string name="dashboard_week_action">Kalendář</string>
+    <string name="dashboard_week_empty">Žádné naplánované dávky</string>
+    <string name="dashboard_week_summary">%1$s · celkem %2$s</string>
+    <string name="dashboard_week_day_a11y">%1$s: %2$s</string>
+    <!-- Czech plural forms chosen in code (Format.czechPlural), independent of device locale. -->
+    <string name="dose_count_one" tools:ignore="PluralsCandidate">%d dávka</string>
+    <string name="dose_count_few" tools:ignore="PluralsCandidate">%d dávky</string>
+    <string name="dose_count_other" tools:ignore="PluralsCandidate">%d dávek</string>
+
+    <!-- Units / formats -->
+    <string name="unit_ml">%1$s ml</string>
+    <string name="unit_percent">%1$d %%</string>
+    <string name="today">dnes</string>
+
+    <!-- Placeholders -->
+    <string name="placeholder_coming_next">Tato obrazovka bude doplněna v další fázi vývoje.</string>
+
+    <!-- Settings -->
+    <string name="settings_mode">Režim</string>
+    <string name="settings_mode_demo">Ukázkový režim (bez zařízení)</string>
+    <string name="settings_timezone">Časové pásmo rozvrhu</string>
+    <string name="settings_device">Fyzické zařízení</string>
+    <string name="settings_device_connect">Připojit zařízení</string>
+    <string name="settings_device_coming_later">Připojení přes Bluetooth bude dostupné později.</string>
+</resources>
