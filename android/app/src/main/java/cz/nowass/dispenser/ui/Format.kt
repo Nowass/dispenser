@@ -2,6 +2,9 @@ package cz.nowass.dispenser.ui
 
 import java.text.NumberFormat
 import java.time.LocalDate
+import java.time.LocalTime
+import java.time.YearMonth
+import java.time.format.TextStyle
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -23,6 +26,13 @@ object Format {
             maximumFractionDigits = 1
             minimumFractionDigits = 0
         }.format(value)
+
+    /**
+     * Lossless value for an editable amount field: no rounding, no grouping,
+     * Czech decimal comma (e.g. 12.25 -> "12,25", 10.0 -> "10").
+     */
+    fun mlInput(value: Double): String =
+        java.math.BigDecimal.valueOf(value).stripTrailingZeros().toPlainString().replace('.', ',')
 
     fun time(at: ZonedDateTime): String = time.format(at)
 
@@ -51,13 +61,35 @@ object Format {
     /** e.g. "pondělí 16. listopadu" — for accessibility labels. */
     fun fullDate(date: LocalDate): String = fullDate.format(date)
 
-    enum class CzechPlural { ONE, FEW, OTHER }
+    /** e.g. "Pondělí 16. listopadu" — heading form. */
+    fun fullDateTitle(date: LocalDate): String = fullDate(date).capitalizeCzech()
 
-    /** Czech plural category for integers: 1 / 2–4 / everything else (incl. 0). */
-    fun czechPlural(n: Int): CzechPlural = when (n) {
-        1 -> CzechPlural.ONE
-        in 2..4 -> CzechPlural.FEW
-        else -> CzechPlural.OTHER
+    fun time(time: LocalTime): String = this.time.format(time)
+
+    /** Standalone month name + year, e.g. "Listopad 2026". */
+    fun monthYear(month: YearMonth): String =
+        month.month.getDisplayName(TextStyle.FULL_STANDALONE, CZECH).capitalizeCzech() + " " + month.year
+
+    private val shortDate = DateTimeFormatter.ofPattern("d. M.", CZECH)
+    private val shortDateYear = DateTimeFormatter.ofPattern("d. M. yyyy", CZECH)
+
+    /** e.g. "16. 11. 2026". */
+    fun date(date: LocalDate): String = shortDateYear.format(date)
+
+    /**
+     * Monday–Sunday range label. Same month uses [sameMonth] ("16.–22. 11. 2026");
+     * otherwise "30. 11. – 6. 12. 2026", with the year on both ends if it differs.
+     */
+    fun weekRange(
+        start: LocalDate,
+        end: LocalDate,
+        sameMonth: (startDay: Int, endDay: Int, month: Int, year: Int) -> String,
+        range: (String, String) -> String,
+    ): String = when {
+        start.month == end.month && start.year == end.year ->
+            sameMonth(start.dayOfMonth, end.dayOfMonth, start.monthValue, start.year)
+        start.year == end.year -> range(shortDate.format(start), shortDateYear.format(end))
+        else -> range(shortDateYear.format(start), shortDateYear.format(end))
     }
 
     private fun String.capitalizeCzech(): String =

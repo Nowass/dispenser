@@ -31,6 +31,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cz.nowass.dispenser.R
 import cz.nowass.dispenser.data.MockSeed
 import cz.nowass.dispenser.ui.Format
+import cz.nowass.dispenser.ui.czechPluralStringResource
+import java.time.LocalDate
 import cz.nowass.dispenser.ui.components.MetricProgress
 import cz.nowass.dispenser.ui.components.StatusCard
 import cz.nowass.dispenser.ui.components.StatusTone
@@ -48,7 +50,8 @@ private val TwoColumnMinWidth = 360.dp
 @Composable
 fun DashboardRoute(
     viewModel: DashboardViewModel,
-    onOpenCalendar: () -> Unit,
+    /** Opens the calendar; null date means "today / last state". */
+    onOpenCalendar: (LocalDate?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -58,7 +61,7 @@ fun DashboardRoute(
 @Composable
 fun DashboardScreen(
     state: DashboardUiState,
-    onOpenCalendar: () -> Unit,
+    onOpenCalendar: (LocalDate?) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     when (state) {
@@ -209,17 +212,10 @@ private fun BatteryCard(battery: BatteryUi, modifier: Modifier) {
 }
 
 @Composable
-private fun doseCountText(n: Int): String = stringResource(
-    when (Format.czechPlural(n)) {
-        Format.CzechPlural.ONE -> R.string.dose_count_one
-        Format.CzechPlural.FEW -> R.string.dose_count_few
-        Format.CzechPlural.OTHER -> R.string.dose_count_other
-    },
-    n,
-)
+private fun doseCountText(n: Int): String = czechPluralStringResource(R.plurals.dose_count, n, n)
 
 @Composable
-private fun Week(state: DashboardUiState.Ready, onOpenCalendar: () -> Unit) {
+private fun Week(state: DashboardUiState.Ready, onOpenCalendar: (LocalDate?) -> Unit) {
     val totalCount = state.week.sumOf { it.doseCount }
     val totalMl = state.week.sumOf { it.totalMl }
     val todayLabel = stringResource(R.string.today)
@@ -239,10 +235,12 @@ private fun Week(state: DashboardUiState.Ready, onOpenCalendar: () -> Unit) {
                 dayNumber = Format.dayOfMonth(day.date),
                 isToday = day.isToday,
                 doseCount = day.doseCount,
-                accessibilityLabel = stringResource(R.string.dashboard_week_day_a11y, dateLabel, doseCountText(day.doseCount)),
+                accessibilityLabel = stringResource(R.string.dashboard_week_day_a11y, dateLabel, doseCountText(day.doseCount)) +
+                    ". " + stringResource(R.string.dashboard_week_day_open_a11y),
             )
         },
-        onOpen = onOpenCalendar,
+        onOpen = { onOpenCalendar(null) },
+        onDayClick = { index -> onOpenCalendar(state.week[index].date) },
     )
 }
 

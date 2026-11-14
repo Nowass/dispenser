@@ -4,6 +4,9 @@ import cz.nowass.dispenser.domain.DeviceStatus
 import cz.nowass.dispenser.domain.DispenserEvent
 import cz.nowass.dispenser.domain.ReservoirEstimate
 import cz.nowass.dispenser.domain.Schedule
+import cz.nowass.dispenser.domain.ScheduleDraft
+import cz.nowass.dispenser.domain.SyncState
+import cz.nowass.dispenser.domain.ValidationError
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -11,13 +14,38 @@ import kotlinx.coroutines.flow.Flow
  *
  * Implemented now by [MockDispenserRepository] (DEMO); a future
  * `BleDispenserRepository` will implement the same contract.
- *
- * A1.1 exposes read-only streams. Mutations (schedule CRUD with expected
- * revision, simulated time, refill) are added in A1.2/A1.3.
  */
 interface DispenserRepository {
     fun observeDevice(): Flow<DeviceStatus>
     fun observeSchedules(): Flow<List<Schedule>>
     fun observeReservoir(): Flow<ReservoirEstimate>
     fun observeEvents(): Flow<List<DispenserEvent>>
+
+    /**
+     * Confirmation state per schedule id. A locally written change is
+     * [SyncState.PENDING] until acknowledged; DEMO only simulates acknowledgement
+     * ([SyncState.SIMULATED_ACK]) and must never be presented as device sync.
+     */
+    fun observeScheduleSync(): Flow<Map<String, SyncState>>
+
+    /** Creates a schedule with a new stable id and revision 1. */
+    suspend fun createSchedule(draft: ScheduleDraft): ScheduleWriteResult
+
+    /**
+     * Replaces the definition of schedule [id] if its current revision equals
+     * [expectedRevision]; the stored revision is then incremented.
+     */
+    suspend fun updateSchedule(id: String, expectedRevision: Int, draft: ScheduleDraft): ScheduleWriteResult
+
+    /** Deletes schedule [id] if its revision matches. Event history is kept. */
+    suspend fun deleteSchedule(id: String, expectedRevision: Int): ScheduleWriteResult
+}
+
+sealed interface ScheduleWriteResult {
+    /** [schedule] is the stored result, or null after a delete. */
+    data class Success(val schedule: Schedule?) : ScheduleWriteResult
+    data class Invalid(val errors: Set<ValidationError>) : ScheduleWriteResult
+    /** Stored revision differs from the expected one (concurrent edit). */
+    data object Conflict : ScheduleWriteResult
+    data object NotFound : ScheduleWriteResult
 }

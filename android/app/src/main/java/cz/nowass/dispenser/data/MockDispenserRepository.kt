@@ -9,7 +9,18 @@ import cz.nowass.dispenser.domain.EventType
 import cz.nowass.dispenser.domain.Recurrence
 import cz.nowass.dispenser.domain.ReservoirEstimate
 import cz.nowass.dispenser.domain.Schedule
+import cz.nowass.dispenser.domain.ScheduleDraft
+import cz.nowass.dispenser.domain.ScheduleValidator
+import cz.nowass.dispenser.domain.SyncState
+import cz.nowass.dispenser.domain.toSchedule
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.UUID
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.time.DayOfWeek
@@ -24,18 +35,80 @@ import java.time.ZonedDateTime
  *
  * The demo uses its own simulated clock (seeded at [MockSeed.START]) so the
  * dashboard is reproducible regardless of the phone's real time.
+ *
+ * Schedule writes are serialized by a mutex, check the expected revision, and
+ * go PENDING -> SIMULATED_ACK after [simulatedAckDelay] (a stand-in for a
+ * future device round-trip; never presented as real device sync).
  */
-class MockDispenserRepository(seed: MockSeed = MockSeed.default()) : DispenserRepository {
+class MockDispenserRepository(
+    seed: MockSeed = MockSeed.default(),
+    private val idGenerator: () -> String = { "demo-" + UUID.randomUUID() },
+    private val simulatedAckDelay: Duration = 400.milliseconds,
+) : DispenserRepository {
 
     private val device = MutableStateFlow(seed.device)
     private val schedules = MutableStateFlow(seed.schedules)
     private val reservoir = MutableStateFlow(seed.reservoir)
     private val events = MutableStateFlow(seed.events)
+    private val sync = MutableStateFlow(seed.schedules.associate { it.id to SyncState.SIMULATED_ACK })
+    private val writeLock = Mutex()
 
     override fun observeDevice(): Flow<DeviceStatus> = device.asStateFlow()
     override fun observeSchedules(): Flow<List<Schedule>> = schedules.asStateFlow()
     override fun observeReservoir(): Flow<ReservoirEstimate> = reservoir.asStateFlow()
     override fun observeEvents(): Flow<List<DispenserEvent>> = events.asStateFlow()
+    override fun observeScheduleSync(): Flow<Map<String, SyncState>> = sync.asStateFlow()
+
+    override suspend fun createSchedule(draft: ScheduleDraft): ScheduleWriteResult {
+        val errors = ScheduleValidator.validate(draft)
+        if (errors.isNotEmpty()) return ScheduleWriteResult.Invalid(errors)
+        val created = writeLock.withLock {
+            var id = idGenerator()
+            while (schedules.value.any { it.id == id }) id = idGenerator()
+            val schedule = draft.toSchedule(id = id, revision = 1)
+            schedules.update { it + schedule }
+            sync.update { it + (id to SyncState.PENDING) }
+            schedule
+        }
+        simulateAck(created)
+        return ScheduleWriteResult.Success(created)
+    }
+
+    override suspend fun updateSchedule(id: String, expectedRevision: Int, draft: ScheduleDraft): ScheduleWriteResult {
+        val errors = ScheduleValidator.validate(draft)
+        if (errors.isNotEmpty()) return ScheduleWriteResult.Invalid(errors)
+        val updated = writeLock.withLock {
+            val current = schedules.value.firstOrNull { it.id == id } ?: return ScheduleWriteResult.NotFound
+            if (current.revision != expectedRevision) return ScheduleWriteResult.Conflict
+            val next = draft.toSchedule(id = id, revision = current.revision + 1)
+            schedules.update { list -> list.map { if (it.id == id) next else it } }
+            sync.update { it + (id to SyncState.PENDING) }
+            next
+        }
+        simulateAck(updated)
+        return ScheduleWriteResult.Success(updated)
+    }
+
+    override suspend fun deleteSchedule(id: String, expectedRevision: Int): ScheduleWriteResult =
+        writeLock.withLock {
+            val current = schedules.value.firstOrNull { it.id == id } ?: return ScheduleWriteResult.NotFound
+            if (current.revision != expectedRevision) return ScheduleWriteResult.Conflict
+            schedules.update { list -> list.filterNot { it.id == id } }
+            sync.update { it - id }
+            // Event history is intentionally kept (audit trail).
+            ScheduleWriteResult.Success(null)
+        }
+
+    /** Marks [schedule] acknowledged unless it was changed or deleted meanwhile. */
+    private suspend fun simulateAck(schedule: Schedule) {
+        delay(simulatedAckDelay)
+        writeLock.withLock {
+            val current = schedules.value.firstOrNull { it.id == schedule.id }
+            if (current?.revision == schedule.revision) {
+                sync.update { it + (schedule.id to SyncState.SIMULATED_ACK) }
+            }
+        }
+    }
 }
 
 /** Seed data for the DEMO backend. */

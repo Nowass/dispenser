@@ -1,4 +1,4 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
+<resources>
     <string name="app_name">Dispenser</string>
     <string name="app_brand">DISPENSER V2</string>
 
@@ -42,15 +42,131 @@
     <string name="dashboard_week_empty">Žádné naplánované dávky</string>
     <string name="dashboard_week_summary">%1$s · celkem %2$s</string>
     <string name="dashboard_week_day_a11y">%1$s: %2$s</string>
-    <!-- Czech plural forms chosen in code (Format.czechPlural), independent of device locale. -->
-    <string name="dose_count_one" tools:ignore="PluralsCandidate">%d dávka</string>
-    <string name="dose_count_few" tools:ignore="PluralsCandidate">%d dávky</string>
-    <string name="dose_count_other" tools:ignore="PluralsCandidate">%d dávek</string>
+    <!-- Resolved with Czech plural rules via czechPluralStringResource(), independent of device locale. -->
+    <plurals name="dose_count">
+        <item quantity="one">%d dávka</item>
+        <item quantity="few">%d dávky</item>
+        <item quantity="many">%d dávky</item>
+        <item quantity="other">%d dávek</item>
+    </plurals>
 
     <!-- Units / formats -->
     <string name="unit_ml">%1$s ml</string>
     <string name="unit_percent">%1$d %%</string>
     <string name="today">dnes</string>
+
+    <!-- Calendar -->
+    <string name="calendar_mode_month">Měsíc</string>
+    <string name="calendar_mode_week">Týden</string>
+    <string name="calendar_today">Dnes</string>
+    <string name="calendar_previous_month">Předchozí měsíc</string>
+    <string name="calendar_next_month">Další měsíc</string>
+    <string name="calendar_previous_week">Předchozí týden</string>
+    <string name="calendar_next_week">Další týden</string>
+    <string name="calendar_day_empty">Na tento den nejsou naplánované žádné dávky.</string>
+    <string name="calendar_day_summary">%1$s · celkem %2$s</string>
+    <string name="calendar_day_a11y">%1$s, %2$s</string>
+    <string name="calendar_day_a11y_total">%1$s, %2$s, celkem %3$s</string>
+    <string name="calendar_past_occurrence">Uplynulý termín</string>
+    <string name="calendar_legend_single">Jedna dávka</string>
+    <string name="calendar_legend_multiple">Více dávek</string>
+    <string name="calendar_week_range_same_month">%1$d.–%2$d. %3$d. %4$d</string>
+    <string name="calendar_week_range">%1$s – %2$s</string>
+    <string name="dashboard_week_day_open_a11y">Otevřít v kalendáři</string>
+
+    <string name="calendar_add_for_day">Přidat dávku na tento den</string>
+    <string name="occurrence_edit_a11y">Upravit rozvrh %1$s</string>
+
+    <!-- Schedule list -->
+    <string name="schedules_title">Rozvrhy</string>
+    <string name="schedules_empty">Zatím nemáte žádný rozvrh.</string>
+    <string name="schedules_add">Nový rozvrh</string>
+    <string name="schedule_unnamed">Dávka bez názvu</string>
+    <string name="schedule_enabled_switch_a11y">Rozvrh %1$s je aktivní</string>
+    <string name="schedule_disabled_tag">Vypnuto</string>
+    <string name="schedule_summary">%1$s · %2$s · %3$s</string>
+
+    <!-- Recurrence text -->
+    <string name="recurrence_once">Jednou, %1$s</string>
+    <string name="recurrence_with_days">%1$s · %2$s</string>
+    <plurals name="every_n_days">
+        <item quantity="one">Každý den</item>
+        <item quantity="few">Každé %d dny</item>
+        <item quantity="many">Každého %d dne</item>
+        <item quantity="other">Každých %d dní</item>
+    </plurals>
+    <plurals name="every_n_weeks">
+        <item quantity="one">Každý týden</item>
+        <item quantity="few">Každé %d týdny</item>
+        <item quantity="many">Každého %d týdne</item>
+        <item quantity="other">Každých %d týdnů</item>
+    </plurals>
+
+    <!-- Sync state (DEMO never claims device sync) -->
+    <string name="sync_pending">Čeká na potvrzení</string>
+    <string name="sync_simulated">Potvrzeno simulací (DEMO)</string>
+    <string name="sync_device">Potvrzeno zařízením</string>
+
+    <!-- Schedule editor -->
+    <string name="editor_title_new">Nová dávka</string>
+    <string name="editor_title_edit">Upravit rozvrh</string>
+    <string name="editor_close">Zavřít bez uložení</string>
+    <string name="editor_save">Uložit</string>
+    <string name="editor_saving">Ukládám…</string>
+    <string name="editor_save_disabled_unchanged">Žádné změny k uložení.</string>
+    <string name="editor_unsaved">Neuložené změny</string>
+    <string name="editor_revision">Revize %1$d</string>
+    <string name="editor_section_dose">Dávka</string>
+    <string name="editor_name_label">Název (nepovinné)</string>
+    <string name="editor_name_placeholder">např. Ranní dávka</string>
+    <string name="editor_amount_label">Množství</string>
+    <string name="editor_amount_suffix">ml</string>
+    <string name="editor_enabled">Aktivní rozvrh</string>
+    <string name="editor_enabled_off_note">Vypnutý rozvrh se neprovádí a v kalendáři se nezobrazuje.</string>
+    <string name="editor_section_time">Termín</string>
+    <string name="editor_start_date">Datum začátku</string>
+    <string name="editor_date_once">Datum</string>
+    <string name="editor_time">Čas</string>
+    <string name="editor_timezone">Časové pásmo: %1$s</string>
+    <string name="editor_change_a11y">%1$s: %2$s. Změnit</string>
+    <string name="editor_section_repeat">Opakování</string>
+    <string name="repeat_once">Jednou</string>
+    <string name="repeat_daily">Denně</string>
+    <string name="repeat_weekly">Týdně</string>
+    <string name="editor_interval_decrease">Snížit interval</string>
+    <string name="editor_interval_increase">Zvýšit interval</string>
+    <string name="editor_weekdays">Dny v týdnu</string>
+    <string name="editor_end_date_toggle">Datum ukončení</string>
+    <string name="editor_end_date">Poslední den</string>
+    <string name="editor_end_inclusive_note">Včetně tohoto dne.</string>
+    <string name="editor_section_preview">Nejbližších 5 termínů</string>
+    <string name="editor_preview_invalid">Opravte zvýrazněná pole a náhled se zobrazí.</string>
+    <string name="editor_preview_empty">Žádné budoucí termíny.</string>
+    <string name="editor_preview_disabled">Rozvrh je vypnutý – tyto termíny se neprovedou.</string>
+    <string name="editor_preview_note">Zmeškané termíny se nedoplňují. Čas, který při přechodu na letní čas neexistuje, se ten den přeskočí.</string>
+    <string name="editor_delete">Smazat rozvrh</string>
+    <string name="editor_delete_title">Smazat rozvrh?</string>
+    <string name="editor_delete_text">Rozvrh „%1$s“ a všechny jeho budoucí termíny budou odstraněny. Historie zůstane zachována.</string>
+    <string name="editor_delete_confirm">Smazat</string>
+    <string name="editor_discard_title">Zahodit změny?</string>
+    <string name="editor_discard_text">Neuložené úpravy budou ztraceny.</string>
+    <string name="editor_discard_confirm">Zahodit</string>
+    <string name="editor_discard_keep">Pokračovat v úpravách</string>
+    <string name="editor_err_amount_missing">Zadejte množství v ml.</string>
+    <string name="editor_err_amount_invalid">Zadejte platné číslo, např. 12,5.</string>
+    <string name="editor_err_amount_positive">Množství musí být větší než 0 ml.</string>
+    <string name="editor_err_interval">Interval musí být alespoň 1.</string>
+    <string name="editor_err_weekdays">Vyberte alespoň jeden den.</string>
+    <string name="editor_err_end_before_start">Datum ukončení nesmí být před datem začátku.</string>
+    <string name="editor_conflict">Rozvrh byl mezitím změněn. Načtěte aktuální verzi a úpravy zopakujte.</string>
+    <string name="editor_conflict_reload">Načíst aktuální verzi</string>
+    <string name="editor_deleted_meanwhile">Rozvrh byl mezitím smazán. Změny nelze uložit.</string>
+    <string name="editor_not_found">Rozvrh nebyl nalezen.</string>
+    <string name="editor_back">Zpět</string>
+    <string name="dialog_ok">OK</string>
+    <string name="dialog_cancel">Zrušit</string>
+    <string name="picker_date_title">Vyberte datum</string>
+    <string name="picker_time_title">Vyberte čas</string>
 
     <!-- Placeholders -->
     <string name="placeholder_coming_next">Tato obrazovka bude doplněna v další fázi vývoje.</string>

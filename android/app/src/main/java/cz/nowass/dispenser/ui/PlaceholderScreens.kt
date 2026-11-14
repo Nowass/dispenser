@@ -21,10 +21,6 @@ import cz.nowass.dispenser.R
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
 import cz.nowass.dispenser.ui.theme.Spacing
 
-/** A1.1 placeholder; the calendar is implemented in A1.2. */
-@Composable
-fun CalendarScreen(modifier: Modifier = Modifier) = ComingNext(modifier)
-
 /** A1.1 placeholder; history is implemented in A1.3. */
 @Composable
 fun HistoryScreen(modifier: Modifier = Modifier) = ComingNext(modifier)

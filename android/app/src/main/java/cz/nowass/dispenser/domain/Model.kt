@@ -51,7 +51,7 @@ data class Schedule(
     val zone: ZoneId = DEFAULT_ZONE,
 ) {
     init {
-        require(amountMl > 0.0) { "amountMl must be positive" }
+        require(amountMl.isFinite() && amountMl > 0.0) { "amountMl must be finite and positive" }
         require(endDate == null || !endDate.isBefore(startDate)) { "endDate before startDate" }
     }
 }
@@ -64,7 +64,27 @@ data class DoseOccurrence(
     val localDate: LocalDate,
     val scheduledAt: Instant,
     val amountMl: Double,
-)
+) {
+    /**
+     * Deterministic occurrence identity: schedule id + local date.
+     *
+     * Deliberately revision-independent: editing a schedule (new revision) must
+     * not create a second occurrence for a date already handled (FR-013b,
+     * FR-014 at-most-once). Consequence: at most one occurrence per schedule per
+     * local date; multiple doses per day use multiple schedules.
+     */
+    val id: String get() = occurrenceId(scheduleId, localDate)
+
+    companion object {
+        fun occurrenceId(scheduleId: String, localDate: LocalDate): String = "$scheduleId@$localDate"
+    }
+}
+
+/**
+ * Whether a schedule configuration is confirmed. Demo mode only ever reaches
+ * [SIMULATED_ACK]; [DEVICE_APPLIED] is reserved for a future BLE read-back.
+ */
+enum class SyncState { PENDING, SIMULATED_ACK, DEVICE_APPLIED }
 
 /**
  * Reservoir state. The remaining volume is always a model estimate based on

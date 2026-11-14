@@ -1,20 +1,30 @@
 package cz.nowass.dispenser.ui
 
-import cz.nowass.dispenser.ui.Format.CzechPlural
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.time.LocalDate
+import java.time.YearMonth
 
 class FormatTest {
 
     @Test
-    fun czechPlural_categories() {
-        assertEquals(CzechPlural.OTHER, Format.czechPlural(0))
-        assertEquals(CzechPlural.ONE, Format.czechPlural(1))
-        assertEquals(CzechPlural.FEW, Format.czechPlural(2))
-        assertEquals(CzechPlural.FEW, Format.czechPlural(4))
-        assertEquals(CzechPlural.OTHER, Format.czechPlural(5))
-        assertEquals(CzechPlural.OTHER, Format.czechPlural(22))
+    fun monthYear_isStandaloneNominative() {
+        assertEquals("Listopad 2026", Format.monthYear(YearMonth.of(2026, 11)))
+        assertEquals("Prosinec 2026", Format.monthYear(YearMonth.of(2026, 12)))
+    }
+
+    @Test
+    fun weekRange_variants() {
+        val same: (Int, Int, Int, Int) -> String = { a, b, m, y -> "$a.–$b. $m. $y" }
+        val range: (String, String) -> String = { a, b -> "$a – $b" }
+        assertEquals("16.–22. 11. 2026", Format.weekRange(LocalDate.of(2026, 11, 16), LocalDate.of(2026, 11, 22), same, range))
+        assertEquals("30. 11. – 6. 12. 2026", Format.weekRange(LocalDate.of(2026, 11, 30), LocalDate.of(2026, 12, 6), same, range))
+        assertEquals("28. 12. 2026 – 3. 1. 2027", Format.weekRange(LocalDate.of(2026, 12, 28), LocalDate.of(2027, 1, 3), same, range))
+    }
+
+    @Test
+    fun fullDateTitle_isCapitalized() {
+        assertEquals("Pondělí 16. listopadu", Format.fullDateTitle(LocalDate.of(2026, 11, 16)))
     }
 
     @Test

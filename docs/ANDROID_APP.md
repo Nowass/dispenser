@@ -124,6 +124,16 @@ Use Czech for default UI strings (user's primary language), structured string re
 
 > Work only on Android milestone **A1 — offline demo application**. Read this specification, `REQUIREMENTS_DRAFT.md` and `ARCHITECTURE.md` before editing. Start by presenting a concise plan, module design and pinned Android toolchain choices. Create the Android Studio Gradle project under `android/` in the Dispenser monorepo. Implement Kotlin/Jetpack Compose with a mock repository and a pure recurrence engine. Build the calendar-first flow, create/edit recurrence form, simulated stock and event history; add unit tests. Do not implement BLE transport or cloud/backend yet. Keep all firmware-facing APIs behind interfaces and distinguish local pending edits from applied settings. Avoid claiming successful device synchronization in demo. Run the available Gradle verification tasks and report exact results, gaps and any toolchain blockers. Stop at the milestone boundary for review before adding features.
 
+## Implementation status (2026-11-15)
+
+Implemented in `android/` (see `android/README.md`): A1.1 shell and dashboard, A1.1.1 dark Material 3 design system, A1.2a calendar (month/week, selected-day details, dashboard deep link) and A1.2b schedule editor.
+
+- **Calendar journey (B):** month/week views and day details are done. Tapping an occurrence opens the editor for the whole recurring schedule. A **Rozvrhy** list under the day details shows all schedules, including disabled ones, with enable/disable switches. Disabled schedules have no calendar occurrences. There is no separate per-schedule visibility setting.
+- **Create/edit (C):** ONCE, DAILY every N days and WEEKLY every N weeks with weekdays, optional inclusive end date, enabled flag, next-5 preview, and validation without physical pump limits. The start date is prefilled from the selected day. Delete asks for confirmation; leaving with unsaved changes asks to discard. A floating Save button stays disabled while the form is invalid or unchanged. MONTHLY is not offered (missing-date rule undecided).
+- **Sync semantics:** schedule writes are PENDING until the mock's simulated acknowledgement (`SIMULATED_ACK`). DEMO is always shown, and nothing claims device confirmation.
+- **Not yet done:** time simulation, history, refill and stock blocking (A1.3); onboarding screen (A); Historie screen (E).
+- **Known limitation:** the M3 date picker grid follows the device language for month/day names.
+
 ## Open questions for next product review
 
 1. Is `every N hours` (duration from anchor time) needed in addition to calendar recurrence? This differs across DST.

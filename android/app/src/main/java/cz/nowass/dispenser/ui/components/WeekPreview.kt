@@ -3,6 +3,7 @@ package cz.nowass.dispenser.ui.components
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,12 +19,16 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import cz.nowass.dispenser.ui.theme.Spacing
@@ -41,8 +46,9 @@ data class WeekDayItem(
 private const val MAX_DOTS = 3
 
 /**
- * Seven-day strip with a dot per planned dose. Whole card is one click target
- * (>= 48 dp) that opens the calendar. Presentation only — no editing.
+ * Seven-day strip with a dot per planned dose. Each day is its own tap target
+ * that opens that date in the calendar; the header action opens the calendar
+ * at today. Presentation only — no editing.
  */
 @Composable
 fun WeekPreview(
@@ -51,16 +57,19 @@ fun WeekPreview(
     summary: String,
     days: List<WeekDayItem>,
     onOpen: () -> Unit,
+    onDayClick: (index: Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Card(
-        onClick = onOpen,
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
     ) {
-        Column(Modifier.padding(Spacing.m), verticalArrangement = Arrangement.spacedBy(Spacing.m)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(
+            Modifier.padding(start = Spacing.s, end = Spacing.s, top = Spacing.s, bottom = Spacing.m),
+            verticalArrangement = Arrangement.spacedBy(Spacing.s),
+        ) {
+            Row(Modifier.padding(start = Spacing.s), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(title, style = MaterialTheme.typography.titleMedium)
                     Text(
@@ -69,21 +78,20 @@ fun WeekPreview(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Text(
-                    actionLabel,
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                )
+                TextButton(onClick = onOpen) { Text(actionLabel) }
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-                days.forEach { DayCell(it, Modifier.weight(1f)) }
+            // No gaps between cells so the whole strip width is touchable.
+            Row(Modifier.fillMaxWidth()) {
+                days.forEachIndexed { i, day ->
+                    DayCell(day, onClick = { onDayClick(i) }, modifier = Modifier.weight(1f).padding(horizontal = 2.dp))
+                }
             }
         }
     }
 }
 
 @Composable
-private fun DayCell(day: WeekDayItem, modifier: Modifier) {
+private fun DayCell(day: WeekDayItem, onClick: () -> Unit, modifier: Modifier) {
     val primary = MaterialTheme.colorScheme.primary
     val shape = MaterialTheme.shapes.medium
     Column(
@@ -96,8 +104,13 @@ private fun DayCell(day: WeekDayItem, modifier: Modifier) {
                     .border(BorderStroke(1.dp, primary.copy(alpha = 0.7f)), shape)
                 else Modifier.background(MaterialTheme.colorScheme.surfaceContainerHigh)
             )
-            .padding(vertical = Spacing.s)
-            .clearAndSetSemantics { contentDescription = day.accessibilityLabel },
+            .clickable(onClick = onClick)
+            .clearAndSetSemantics {
+                contentDescription = day.accessibilityLabel
+                role = Role.Button
+                onClick { onClick(); true }
+            }
+            .padding(vertical = Spacing.s),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {

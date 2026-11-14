@@ -29,7 +29,7 @@
 | FR-013a | **CONFIRMED:** multiple independent schedules; frequency can differ between schedules. `PROPOSED` v1 rule subset: daily every N days, weekly every N weeks with selected weekdays, monthly on day-of-month, and one-off. Optional end date. Full arbitrary iCalendar RRULE syntax is out of scope unless explicitly approved. |
 | FR-013b | **CONFIRMED:** editing recurrence must not re-run old occurrences or catch up missed ones. Schedule identity and revision must be reflected in occurrence deduplication and history. |
 | FR-014 | `PROPOSED`: each schedule occurrence gets a stable ID (slot + local date + occurrence discriminator). Mark attempt durably before motor start, and never retry an uncertain/incomplete occurrence automatically after reset. |
-| FR-015 | `PROPOSED`: if local wall-clock time jumps backward (DST fall-back), do not administer the same scheduled occurrence twice. If skipped forward (spring), define deterministic skip rule. |
+| FR-015 | **CONFIRMED (A1.2b brief, 2026-11-15):** a scheduled local time that does not exist because of the spring-forward transition is skipped that day (not shifted). A local time repeated by the autumn fall-back produces exactly one occurrence, at the earlier instant, and is never administered twice. Implemented and tested in the Android recurrence engine; firmware must follow the same rule. |
 | FR-016 | `PROPOSED`: limits: maximum amount per individual action, maximum sum per day, maximum continuous pump runtime, cooldown between starts. Exact values TBD after pump tests. |
 
 ### Stock and notifications
