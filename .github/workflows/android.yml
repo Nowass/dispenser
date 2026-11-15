@@ -23,19 +23,23 @@ jobs:
       run:
         working-directory: android
     steps:
-      - uses: actions/checkout@v4
+      # Node.js 24 action majors (Node.js 20 actions are deprecated on GitHub-hosted runners).
+      - uses: actions/checkout@v7
 
       # The build requires JDK 25: android/gradle/gradle-daemon-jvm.properties pins the Gradle
       # daemon to toolchainVersion=25 (the app itself targets Java 11 bytecode).
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '25'
 
-      # Dependency/wrapper caching and Gradle wrapper checksum validation.
-      - uses: gradle/actions/setup-gradle@v4
+      # Gradle wrapper checksum validation and dependency caching. `cache-provider: basic` is the
+      # open-source (MIT) cache on actions/cache; the default "enhanced" provider of v6 is a
+      # proprietary component whose use requires accepting Gradle's Terms of Use.
+      - uses: gradle/actions/setup-gradle@v6
         with:
           validate-wrappers: true
+          cache-provider: basic
           cache-read-only: ${{ github.event_name == 'pull_request' }}
 
       - name: Install Android SDK platform 37
@@ -72,7 +76,7 @@ jobs:
 
       - name: Upload test and lint reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reports
           retention-days: 7
