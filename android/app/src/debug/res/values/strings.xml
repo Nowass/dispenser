@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug builds (cz.nowass.dispenser.debug) are clearly distinguishable from release installs. -->
+<resources>
+    <string name="app_name" translatable="false">Dispenser DEBUG</string>
+</resources>

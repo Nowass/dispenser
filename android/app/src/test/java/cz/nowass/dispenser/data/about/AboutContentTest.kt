@@ -35,6 +35,7 @@ class AboutContentTest {
         assertTrue(c.sections[0].isUnreleased)
         assertEquals(listOf("Položka A"), c.sections[0].groups[0].items)
         assertEquals("0.5.0", c.relevantFor("0.5.0")!!.label)
+        assertEquals("debug build metadata is ignored", "0.5.0", c.relevantFor("0.5.0+debug")!!.label)
         assertTrue(c.relevantFor("0.4.0")!!.isUnreleased)
     }
 

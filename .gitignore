@@ -1,0 +1,20 @@
+# Release artifacts are attached to GitHub Releases, never committed
+*.apk
+*.aab
+*.apks
+/dist/
+
+# Signing material must never be committed (see docs/RELEASING.md)
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+signing.properties
+
+# Private configuration backups exported from the app (user data)
+dispenser-zaloha-*.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db

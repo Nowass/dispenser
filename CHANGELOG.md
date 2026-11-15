@@ -21,6 +21,7 @@ milníky; nejde o publikovaná vydání. Při prvním vydání se přesunou pod 
 - Obrazovka O aplikaci, Co je nového, licence knihoven třetích stran a kontrola aktualizací přes GitHub Releases (A1.4b).
 - Záloha a obnovení konfigurace (rozvrhy a název akvária, volitelně simulace a historie) do souboru JSON přes systémový výběr souborů; obnovení s potvrzením, kontrolou souboru a bezpečným návratem při chybě (A1.4c.1).
 - Aplikace je vydávána pod licencí Apache License 2.0; text licence je dostupný v obrazovce O aplikaci (A1.5).
+- Vývojová verze se instaluje jako samostatná aplikace „Dispenser DEBUG“ vedle vydané verze (A1.5).
 
 ### Změněno
 - Automatická záloha Androidu (Google účet) a přenos do nového telefonu jsou pro data aplikace vypnuté; data se přenášejí jen ruční zálohou (A1.5).

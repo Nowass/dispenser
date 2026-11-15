@@ -26,9 +26,14 @@ data class ChangelogSection(
 )
 
 data class Changelog(val intro: List<String>, val sections: List<ChangelogSection>) {
-    /** Section for the installed version if released, else the unreleased section. */
-    fun relevantFor(versionName: String): ChangelogSection? =
-        sections.firstOrNull { !it.isUnreleased && it.label == versionName } ?: sections.firstOrNull { it.isUnreleased }
+    /**
+     * Section for the installed version if released, else the unreleased section. SemVer build
+     * metadata (e.g. the debug suffix "+debug") is ignored.
+     */
+    fun relevantFor(versionName: String): ChangelogSection? {
+        val version = versionName.substringBefore('+')
+        return sections.firstOrNull { !it.isUnreleased && it.label == version } ?: sections.firstOrNull { it.isUnreleased }
+    }
 }
 
 object ChangelogParser {

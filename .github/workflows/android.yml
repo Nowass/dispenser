@@ -1,0 +1,83 @@
+# Android CI (A1.5): build, JVM unit tests, lint, instrumented-test compilation, unsigned
+# release build and bundled license validation. No secrets, no signing, no APK artifacts.
+name: Android CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      # The build requires JDK 25: android/gradle/gradle-daemon-jvm.properties pins the Gradle
+      # daemon to toolchainVersion=25 (the app itself targets Java 11 bytecode).
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      # Dependency/wrapper caching and Gradle wrapper checksum validation.
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          validate-wrappers: true
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Install Android SDK platform 37
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.0" > /dev/null
+
+      - name: Build, unit tests, lint, instrumented test compilation, unsigned release, licenses
+        run: >-
+          ./gradlew --no-daemon --stacktrace
+          assembleDebug test lintDebug assembleDebugAndroidTest assembleRelease
+          checkThirdPartyLicenses
+
+      - name: Verify the release build is unsigned (no credentials in CI)
+        run: test -f app/build/outputs/apk/release/app-release-unsigned.apk
+
+      - name: Test summary
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, re
+          tests = failures = errors = skipped = 0
+          for path in glob.glob("app/build/test-results/*/TEST-*.xml"):
+              head = open(path, encoding="utf-8").read(2000)
+              m = re.search(r'tests="(\d+)" skipped="(\d+)" failures="(\d+)" errors="(\d+)"', head)
+              if m:
+                  t, s, f, e = map(int, m.groups())
+                  tests += t; skipped += s; failures += f; errors += e
+          print("## Android CI")
+          print(f"- JVM unit tests: **{tests} executed**, {failures} failed, {errors} errors, {skipped} skipped")
+          print("- Instrumented tests: **compiled, NOT executed** (no device/emulator in CI)")
+          print("- Release APK: built **unsigned** (no signing secrets in CI)")
+          PY
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          retention-days: 7
+          path: |
+            android/app/build/reports/tests/
+            android/app/build/reports/lint-results-debug.*
+            android/app/build/test-results/
+          if-no-files-found: ignore

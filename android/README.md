@@ -15,7 +15,7 @@ Product and architecture sources of truth live in [`../docs`](../docs).
 |---|---|
 | Android Gradle Plugin | 9.5.1 (built-in Kotlin) |
 | Kotlin / Compose compiler plugin | 2.2.10 |
-| Gradle wrapper | 9.6.0 |
+| Gradle wrapper | 9.6.0 (JAR and distribution checksums verified against gradle.org) |
 | Gradle daemon JVM | 25 (`gradle/gradle-daemon-jvm.properties`) |
 | compileSdk / targetSdk / minSdk | 37 / 37 / 26 |
 | Compose BOM | 2026.02.01 (Material 3 1.4.0) |
@@ -40,9 +40,22 @@ From this `android/` directory:
 ./gradlew test                     # JVM unit tests (domain, mock repository, ViewModels)
 ./gradlew lintDebug                # Android lint
 ./gradlew assembleDebugAndroidTest # compile instrumented UI tests
-./gradlew connectedDebugAndroidTest   # run UI tests (needs a running emulator/device)
-./gradlew installDebug             # install on a connected emulator/device
+./gradlew connectedDebugAndroidTest   # run UI tests (emulator only, see warning below)
+./gradlew installDebug             # install "Dispenser DEBUG" on a connected emulator/device
+./gradlew assembleRelease          # release APK: unsigned unless local signing is configured
+./gradlew checkThirdPartyLicenses  # bundled license data matches the dependencies
 ```
+
+**Build variants (A1.5):** debug builds are a separate app, `cz.nowass.dispenser.debug`
+("Dispenser DEBUG", versionName `…+debug`), next to the release app `cz.nowass.dispenser`
+("Dispenser"). Release signing is optional and configured only outside the repository (see
+`../docs/RELEASING.md`); without it `assembleRelease` produces `app-release-unsigned.apk`.
+
+**Warning:** run instrumented tests only on an emulator or a test device. A
+`connectedAndroidTest` run uninstalls the app under test afterwards, deleting its data.
+
+CI: `../.github/workflows/android.yml` (JDK 25, no secrets) runs the commands above except the
+connected tests and reports instrumented tests as compiled, not executed.
 
 Emulator: open the project in Android Studio and run on any API 26+ AVD, or start one
 headless, e.g. `emulator -avd <name> -no-window`, then `./gradlew installDebug`.
@@ -155,7 +168,8 @@ ViewModels and domain models have no database dependencies; Room types live only
 - **Branding:** adaptive launcher icon (navy background, turquoise droplet with a dosing-nozzle
   cut-out, monochrome themed variant; vector, no text) based on the approved reference image
   `docs/assets/app-icon-reference.png`; Android 12+
-  splash in the same colors. Launcher name "Dispenser"; version 0.4.0 (4).
+  splash in the same colors. Launcher name "Dispenser" (debug: "Dispenser DEBUG"); version
+  0.5.0-beta.1 (5). Asset provenance: `../docs/assets/README.md`.
 - **About (A1.4b):** Settings → O aplikaci opens a dedicated screen: icon, version and build
   from package metadata, update channel, "Co je nového" (bundled from the repository's
   `CHANGELOG.md`), "Licence a knihovny" (generated from the resolved runtime dependencies),

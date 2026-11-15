@@ -17,3 +17,7 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+
+# IDE project files (per-developer) and Kotlin compiler session data
+/.idea/
+.kotlin/

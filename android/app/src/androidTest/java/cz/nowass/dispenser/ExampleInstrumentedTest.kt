@@ -19,6 +19,7 @@ class ExampleInstrumentedTest {
     fun useAppContext() {
         // Context of the app under test.
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-        assertEquals("cz.nowass.dispenser", appContext.packageName)
+        // Instrumented tests run against the debug build, a separate app from the release install.
+        assertEquals("cz.nowass.dispenser.debug", appContext.packageName)
     }
 }

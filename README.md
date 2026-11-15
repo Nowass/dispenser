@@ -9,6 +9,26 @@ Android companion app.
 - [`docs/`](docs/) – requirements, architecture, [release process](docs/RELEASING.md) and the
   [backup file format](docs/BACKUP_FORMAT.md).
 
+## Installation (Android)
+
+No release has been published yet. The first planned release is `0.5.0-beta.1`, an APK attached
+to a GitHub Release together with its SHA-256 checksum:
+
+1. Download `dispenser-<version>.apk` and `dispenser-<version>.apk.sha256` from the release.
+2. Verify: `sha256sum -c dispenser-<version>.apk.sha256`.
+3. Install the APK (Android 8.0+, "install unknown apps" must be allowed for the browser or file
+   manager).
+
+Before replacing or reinstalling the app, export a backup (*Nastavení → Záloha a obnovení*):
+Android system backup is disabled for the app. Release process, signing and the migration from
+development builds: [docs/RELEASING.md](docs/RELEASING.md).
+
+## Development
+
+Build instructions and architecture notes: [android/README.md](android/README.md). CI
+(`.github/workflows/android.yml`) builds, runs the JVM unit tests and lint, compiles the
+instrumented tests (not executed in CI) and builds an unsigned release APK.
+
 ## Privacy
 
 The app has no analytics or telemetry and stores its data only on the phone. Android system
@@ -21,7 +41,7 @@ Copyright 2026 Nowass
 
 The Android application and the future ESP32 firmware are licensed under the
 [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for attributions, including
-third-party material.
+third-party material, and [docs/assets/README.md](docs/assets/README.md) for asset provenance.
 
 Hardware, PCB and mechanical design files are not covered by this license; their license
 has not been decided yet.
