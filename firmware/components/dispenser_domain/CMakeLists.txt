@@ -9,6 +9,8 @@
 # Keep the source list here only.
 set(DSP_DOMAIN_SRCS
     "src/dsp_identity.c"
+    "src/dsp_recurrence.c"
+    "src/dsp_time.c"
 )
 
 if(ESP_PLATFORM)

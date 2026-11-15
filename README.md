@@ -5,8 +5,10 @@ Android companion app.
 
 - [`android/`](android/README.md) – Android application (Kotlin, Jetpack Compose). Currently
   an offline **DEMO** build: schedules are stored on the phone, device values are simulated.
-- [`firmware/`](firmware/README.md) – ESP32-C3 firmware (ESP-IDF v6.1). Currently an M0.2
-  skeleton with host-side unit tests; not yet run on hardware.
+- [`firmware/`](firmware/README.md) – ESP32-C3 firmware (ESP-IDF v6.1). Currently a skeleton
+  plus the M1.1 recurrence engine (calculation only, host-tested); not yet run on hardware.
+- [`test-vectors/`](test-vectors/README.md) – shared test cases run by both the Android and
+  the firmware tests (scheduling parity).
 - [`docs/`](docs/) – requirements, architecture, [release process](docs/RELEASING.md) and the
   [backup file format](docs/BACKUP_FORMAT.md).
 

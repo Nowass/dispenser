@@ -139,6 +139,7 @@ Implemented in `android/` (see `android/README.md`): A1.1 shell and dashboard, A
 - **A1.4b app information:** About screen (version from package metadata, changelog, generated third-party licenses, app license — Apache-2.0 since A1.5, opens the bundled text), user-initiated GitHub Releases update check with explicit stable/beta channel rules; repository private for now, so the check reports unavailable metadata. Release process in `docs/RELEASING.md`.
 - **Not yet done:** onboarding screen (A); history filters (E); BLE, real battery measurement, service mode.
 - **Known limitation:** the M3 date picker grid follows the device language for month/day names.
+- **Known issue (found during firmware M1.1 review, 2026-11-15, not yet fixed):** `RecurrenceEngine.occurrencesBetween` can silently return a truncated list instead of `null` when its internal cap of 10,000 candidate dates ends the scan before `limit` is exceeded (e.g. daily schedule, simulation or reservoir prediction over more than about 27 years with the default budget of 10,000). Conditions, measurements and the recommended fix: `firmware/README.md`, "Known limitations and differences from the Android reference", item 7.
 
 ## Open questions for next product review
 

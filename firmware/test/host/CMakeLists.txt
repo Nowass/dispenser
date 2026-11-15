@@ -58,3 +58,19 @@ function(dsp_add_host_test name)
 endfunction()
 
 dsp_add_host_test(test_identity test_identity.c)
+
+# Shared recurrence vectors (repository root test-vectors/, also used by the Android
+# Kotlin tests). Read at run time; the path is fixed at configure time.
+set(DSP_VECTORS_DIR "${FW_ROOT}/../test-vectors")
+get_filename_component(DSP_VECTORS_DIR "${DSP_VECTORS_DIR}" ABSOLUTE)
+dsp_add_host_test(test_recurrence_vectors test_recurrence_vectors.c)
+target_compile_definitions(test_recurrence_vectors PRIVATE DSP_VECTORS_DIR="${DSP_VECTORS_DIR}")
+dsp_add_host_test(test_recurrence test_recurrence.c)
+
+# The engine never consults the C library timezone: identical results under any host TZ.
+foreach(tz "America/New_York" "Asia/Kathmandu")
+    string(REPLACE "/" "_" tz_name "${tz}")
+    add_test(NAME test_recurrence_vectors_TZ_${tz_name} COMMAND test_recurrence_vectors)
+    set_tests_properties(test_recurrence_vectors_TZ_${tz_name} PROPERTIES
+                         ENVIRONMENT "TZ=${tz}" TIMEOUT 30)
+endforeach()

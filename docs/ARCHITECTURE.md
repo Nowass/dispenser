@@ -82,9 +82,17 @@ Use a **bounded subset inspired by iCalendar RFC 5545**, with a user-friendly An
 - ONCE, DAILY every N days (anchored on the start date), WEEKLY every N weeks on selected weekdays (weeks counted from the Monday of the start week, never before the start date), and an inclusive optional end date.
 - DST per FR-015: spring-forward gap times are skipped; fall-back repeated times yield one occurrence at the earlier instant.
 - Queries return only occurrences strictly after a given instant, so missed doses are never caught up.
-- `PROPOSED`, pending review: occurrence ID = `scheduleId@localDate`, independent of revision. This means at most one occurrence per schedule per local date, and editing a schedule cannot create a second occurrence for a date already handled. Multiple daily doses use multiple schedules.
+- **Approved 2026-11-15 (FR-014):** occurrence ID = `<scheduleId>@<localDate>`, independent of revision. This means at most one occurrence per schedule per local date, and editing a schedule (time, volume) cannot create a second occurrence for a date already handled. Multiple daily doses use multiple schedules. **Mandatory invariant:** schedule IDs are unique within the device and IDs of deleted schedules are never reused; otherwise a new schedule could inherit the handled-occurrence history of a deleted one. Enforced by the future schedule-management/storage layer.
 - Schedule writes use optimistic concurrency (`expectedRevision`; the revision is incremented on every update, a mismatch is a conflict).
 - A1.2c: schedules are persisted on the phone (Room, `schedules` table) with amounts as integer microlitres and weekdays as `weekdays_mask` (bit 0 = Monday), matching the data model sketch above. Locally saved schedules are `PENDING` until a future device read-back; the phone copy is never treated as applied device configuration.
+
+**Firmware implementation status (M1.1, 2026-11-15).** The same rules (minus MONTHLY) are implemented in pure C11 in `firmware/components/dispenser_domain` (`dsp_recurrence.h`, `dsp_time.h`); details in `firmware/README.md` "Recurrence engine":
+
+- Instants are signed 64-bit UTC seconds. The timezone is an explicit rule value passed to every query, `Europe/Prague` = CET/CEST with the EU transition rule (last Sunday of March/October, 01:00 UTC), not the C library `TZ`. This matches IANA tzdata for the supported schedule dates 2000-01-01 … 2099-12-31 (approved). A change of DST legislation is handled by a firmware update.
+- Disabled schedules produce no occurrences in any firmware query (approved). Volumes are `uint32_t` microlitres; the maximum dispensing volume will be defined in the BLE protocol specification.
+- Queries: validation (all errors as a bitmask), next occurrence strictly after an instant, bounded range query into a caller buffer (overflow reported, never truncated silently), earliest across a set of schedules. No allocation, no global state, bounded work.
+- Parity with the Kotlin engine is enforced by shared test vectors (`test-vectors/`), run by both the firmware host tests and the Android unit tests.
+- Occurrence identity `<scheduleId>@<localDate>` (approved, see above) is reproduced unchanged. Durable deduplication, schedule-ID management and execution belong to M1.2/M1.3.
 
 RFC 5545 is a reference for recurrence vocabulary (`FREQ`, `INTERVAL`, `BYDAY`), **not** a requirement to implement an arbitrary text RRULE parser on the MCU.
 

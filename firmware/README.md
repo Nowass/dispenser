@@ -4,23 +4,28 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: milestone M0.2, a skeleton only.** The firmware logs its identification and does
-nothing else. It has **not been run on physical hardware**: the board has not arrived yet.
-All verification so far is Linux host tests and cross-compilation for `esp32c3`.
+**Status: milestone M1.1 (recurrence engine) approved and finalized, pending commit.** At run time
+the firmware still only logs its identification: the recurrence engine is compiled into
+the image's component library but not called by `app_main`, and nothing is dosed. It
+has **not been run on physical hardware**: the board has not arrived yet. All
+verification so far is Linux host tests and cross-compilation for `esp32c3`.
 
 ### Implemented
 
 - ESP-IDF project skeleton (`CMakeLists.txt`, `main/`, `sdkconfig.defaults`).
 - Cross-compilation for ESP32-C3 (`esp32c3`) with ESP-IDF v6.1.
-- Platform-independent C11 domain component `dispenser_domain` (currently only
-  firmware identification formatting).
+- Platform-independent C11 domain component `dispenser_domain`: firmware identification
+  formatting and (M1.1) the **recurrence engine** with explicit Europe/Prague DST handling
+  (see [Recurrence engine](#recurrence-engine-m11)).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
 ### Not implemented
 
-Scheduler, dosing coordinator, reservoir logic, event journal, NVS persistence, BLE and
-Wi-Fi, deep sleep and wake-up, GPIO and motor control, service mode, OTA.
+Dosing coordinator and durable occurrence deduplication (M1.2/M1.3), MONTHLY recurrence,
+reservoir logic, event journal, NVS persistence, BLE and Wi-Fi, clock synchronization,
+deep sleep and wake-up, GPIO and motor control, service mode, OTA. The recurrence engine
+only calculates planned occurrences; nothing acts on them yet.
 
 ### Not verified
 
@@ -109,13 +114,19 @@ firmware/
 ├── components/
 │   └── dispenser_domain/       pure C11 business logic, no ESP-IDF dependency
 │       ├── CMakeLists.txt      dual-mode: IDF component or plain host library
-│       ├── include/dsp_identity.h
-│       └── src/dsp_identity.c
+│       ├── include/dsp_identity.h    firmware identification
+│       ├── include/dsp_time.h        dates, UTC instants, timezone rule (M1.1)
+│       ├── include/dsp_recurrence.h  schedules and recurrence queries (M1.1)
+│       └── src/                      matching .c files
 ├── test/host/                  host unit tests (CMake + CTest, no ESP-IDF)
 │   ├── CMakeLists.txt
 │   ├── support/dsp_test.h      minimal header-only test harness
-│   └── test_identity.c
+│   ├── test_identity.c
+│   ├── test_recurrence.c          engine unit tests (C only)
+│   └── test_recurrence_vectors.c  runs ../../test-vectors/*.txt
 └── .devcontainer/              optional pinned ESP-IDF v6.1 build container
+
+../test-vectors/                shared C/Kotlin test vectors (see its README)
 ```
 
 ### Dependency rules
@@ -132,12 +143,193 @@ main (ESP-IDF APIs, wiring)  ──►  dispenser_domain (pure C)
 - Platform dependencies are passed in explicitly as structs of function pointers plus a
   context pointer, in the spirit of the `IClock` / `IActuator` / `IStorage` /
   `IBattery` / `INotifier` interfaces in ARCHITECTURE. No global mutable state.
-- **Planned and not yet created:** scheduler, dosing coordinator, reservoir estimator,
-  event journal and service-mode state machine go into `dispenser_domain` (split into a
-  separate `dispenser_scheduler` component only if size or build boundaries justify it).
+- **Planned and not yet created:** dosing coordinator, reservoir estimator, event journal
+  and service-mode state machine go into `dispenser_domain` next to the recurrence engine
+  (split into a separate component only if size or build boundaries justify it).
   Hardware adapters go into a `dispenser_platform` component once the first adapter
   exists (M0 deep sleep / safe-off GPIO, after the hardware review).
 - C11 only. No C++ until there is a concrete reason.
+
+## Recurrence engine (M1.1)
+
+Pure C11 in `components/dispenser_domain` (`dsp_time.h`, `dsp_recurrence.h`). Behavioral
+reference: the Android Kotlin `RecurrenceEngine`, `ScheduleValidator`,
+`NextDoseCalculator` and `OccurrenceCalendar`. Parity is enforced by the shared vectors in
+[`../test-vectors/`](../test-vectors/README.md), which both test suites run.
+
+**Safety boundary:** the engine only *calculates* planned occurrences. It never doses,
+touches GPIO, NVS, radios, timers or the system clock, and it has no catch-up: queries
+return only occurrences strictly after a given instant. Whether an occurrence may be
+executed (already handled, missed, reservoir, service mode, clock validity) is the job of
+the future dosing coordinator.
+
+### Rules (implemented, matching Android)
+
+- **ONCE:** on `start_date` only.
+- **DAILY:** every `interval` calendar days counted from `start_date`.
+- **WEEKLY:** selected weekdays (mask bit 0 = Monday … bit 6 = Sunday) in weeks whose
+  distance from the Monday of the start week is divisible by `interval`; days before
+  `start_date` never occur, even in the start week.
+- Optional inclusive end date. Disabled schedules have no occurrences.
+- **DST (FR-015, approved):** a local time that does not exist (spring forward) is skipped
+  that day, never shifted; a repeated local time (fall back) yields one occurrence at the
+  earlier UTC instant; a ONCE schedule at a nonexistent time fails validation
+  (`DSP_SCHED_E_TIME_NONEXISTENT`).
+- MONTHLY, hourly intervals and RRULE text are **not** supported (MONTHLY awaits a product
+  decision on missing dates).
+
+### Data model
+
+`dsp_schedule_t` is fixed-size and pointer-free (about 96 bytes): `id[65]` (1–64 chars of
+`[A-Za-z0-9._-]`, as in the Android backup format), `revision` ≥ 1, `enabled`,
+`amount_ul` (integer microlitres, `uint32_t`, ≥ 1, no floating point), `start_date`,
+`hour`/`minute`, `kind` (`uint8_t`), `interval` (1–2147483647), `weekday_mask`,
+optional `end_date`. Canonical form as in the Android backup codec: ONCE has interval 1,
+no weekdays and no end date; DAILY has no weekdays. The persistent/BLE encoding is not
+defined yet (M1.2+/M3); fixed-width fields keep it straightforward.
+
+### Public API (summary; contracts in the headers)
+
+| Function | Result |
+|---|---|
+| `dsp_schedule_validate(s, tz)` | bitmask of **all** problems (`DSP_SCHED_E_*`), 0 = valid; names follow Kotlin `ValidationError` where one exists |
+| `dsp_rec_next(s, tz, after, &occ)` | earliest occurrence strictly after `after`: `DSP_REC_OK` / `DSP_REC_NONE` |
+| `dsp_rec_between(s, tz, after, until, buf, cap, &n)` | all occurrences in (after, until] into a caller buffer; more than `cap` → `DSP_REC_ERR_BUFFER_FULL` with the earliest `cap` written, resumable from `buf[cap-1].at`; never a silent truncation |
+| `dsp_rec_occurrence_on(s, tz, date, &occ)` | occurrence on one local date, or `DSP_REC_NONE` |
+| `dsp_rec_next_of_set(arr, n, tz, after, &i, &occ)` | earliest across schedules; ties → smaller id, then smaller index; an invalid schedule fails the call with its index |
+| `dsp_occurrence_id_format(id, date, buf, len)` | `"<id>@YYYY-MM-DD"`; too-small buffer is an error, never a truncated id |
+
+Every query validates its schedule first and returns `DSP_REC_ERR_SCHEDULE` instead of
+evaluating an invalid one. No allocation, no global mutable state, no current-time input:
+the caller passes every instant.
+
+### Time representation and DST strategy
+
+- Instants are `dsp_utc_t`: `int64_t` seconds since 1970-01-01T00:00:00Z (POSIX time,
+  no leap seconds). Local times exist only as (date, hour, minute) inputs.
+- Calendar math is integer-only (Hinnant's `days_from_civil` / `civil_from_days`).
+- The timezone is an explicit `dsp_tz_t` value passed to every call:
+  `DSP_TZ_EUROPE_PRAGUE` = CET +1 h / CEST +2 h with the EU rule (DST from the last
+  Sunday of March 01:00 UTC to the last Sunday of October 01:00 UTC). Local → UTC tries
+  both offsets and keeps those consistent with the rule: two → overlap (earlier wins),
+  none → gap.
+- **Why not libc `TZ`/`mktime`:** `TZ` is process-global state, `mktime` resolves gaps and
+  overlaps differently in newlib (ESP-IDF) and glibc, and results would depend on the host
+  `TZ`. **Why not a tz database:** a full IANA database is large and unnecessary for one
+  zone. The EU rule matches IANA `Europe/Prague` exactly for every supported year
+  (verified against all 100 transition pairs of 2000–2099 from tzdata 2026e and against
+  Kotlin `java.time`). The engine references no libc time function (checked with `nm`).
+- **Legislation changes:** if the EU changes or abolishes DST, the rule is updated by a
+  firmware update (approved decision); there is no runtime timezone configuration.
+
+### Supported ranges (checked; no undefined or implementation-defined behavior)
+
+| Input | Supported range (inclusive) | Outside the range |
+|---|---|---|
+| Schedule dates (`start_date`, `end_date`) | 2000-01-01 … 2099-12-31 (approved) | `dsp_schedule_validate` error |
+| Query instants (`after`, `until` of `dsp_rec_*`) | any `int64_t` | clamped to 1999-12-30T00:00Z … 2100-01-02T00:00Z before any conversion; the bounds are a day away from every schedule date, so clamping never changes a result |
+| `dsp_tz_offset_at`, `dsp_utc_to_local_date` | `DSP_UTC_MIN` … `DSP_UTC_MAX` = 1999-01-01T00:00:00Z … 2100-12-31T23:59:59Z | return `false`, output untouched |
+| `dsp_date_from_days` | `DSP_DAYS_MIN` … `DSP_DAYS_MAX` = 1900-01-01 … 2199-12-31 | return `false`, output untouched |
+| `dsp_local_to_utc` | valid schedule date, hour 0–23, minute 0–59, valid timezone | `DSP_LOCAL_INVALID`, output untouched |
+| `dsp_tz_transitions` | years 1999 … 2100 | return `false` |
+| `dsp_date_to_days`, `dsp_weekday_from_days` | every input value (total, overflow-free) | — |
+
+Every narrowing conversion inside the module is preceded by one of these checks. Inside
+the engine an unexpected conversion failure is reported as `DSP_REC_ERR_INTERNAL`, never
+as "no occurrence". The boundary values are covered by `test_recurrence`
+(`test_time_api_range_boundaries`).
+
+### Occurrence identity (approved 2026-11-15, FR-014)
+
+Identity = `<scheduleId>@<localDate>`, e.g. `schedule-001@2026-11-16`, as in Android.
+
+- Independent of the schedule revision. Changing a schedule's time or volume never
+  creates a second identity for the same local date: an edit from 08:00 to 20:00 yields
+  the *same* identity for a day already handled, so a durable "handled" record keyed by
+  it (M1.2/M1.3) blocks a second automatic dose.
+- At most one occurrence per schedule per local date; multiple doses per day need
+  multiple schedules.
+- **Mandatory invariant:** schedule IDs are unique within the device, and the ID of a
+  deleted schedule is **never reused** for a new schedule. Otherwise a new schedule could
+  inherit (and be blocked by) the handled-occurrence history of a deleted one. This is
+  enforced by the future schedule-management/storage layer; M1.1 does not manage IDs.
+
+M1.1 only formats and tests the identity; there is no durable deduplication and no
+execution yet.
+
+### Approved decisions (2026-11-15)
+
+| Topic | Decision |
+|---|---|
+| Disabled schedules | All firmware recurrence queries return no occurrences |
+| Supported dates | 2000-01-01 through 2099-12-31 |
+| Volume representation | `uint32_t` microlitres for now |
+| Maximum dispensing volume | To be defined in the BLE protocol specification |
+| Timezone | Explicit Europe/Prague EU DST implementation |
+| Future DST legislation changes | Handled through a future firmware update |
+| Occurrence identity | `<scheduleId>@<localDate>`, IDs unique and never reused |
+| Shared test vectors | `test-vectors/` at the repository root |
+
+### Resource bounds
+
+- `dsp_rec_next`: O(1) date arithmetic per candidate, at most 8 candidate dates per
+  search (4 are provably enough: the search starts one day early, and a DST-gap day
+  is never followed by another); exceeding it returns `DSP_REC_ERR_INTERNAL` instead of
+  looping. Huge intervals jump directly, with no day-by-day scan (64-bit day numbers).
+- `dsp_rec_between`: at most `capacity + 1` searches; `dsp_rec_next_of_set`: one search
+  per schedule. No unbounded loop exists.
+- No heap, no recursion, no VLAs, no floating point. ESP32-C3 (IDF default build):
+  about 5.6 KB code for `dsp_time` + `dsp_recurrence`, no `.data`/`.bss`; largest
+  stack frame 128 bytes (`-Os`), deepest call chain well under 1 KB.
+
+### Known limitations and differences from the Android reference
+
+Parity holds for all shared vectors. The remaining differences follow from the approved
+decisions above and lie outside normal use:
+
+1. **Date range:** firmware rejects dates before 2000 or after 2099 and never generates
+   occurrences after 2099-12-31; Kotlin has no such bound (vectors with `scope=c`).
+2. **Timezone data:** firmware hard-codes the EU rule; Android uses the device's IANA
+   tzdata. A DST legislation change needs a firmware update, while Android follows its
+   tzdata updates; until both are updated the two can disagree.
+3. **Disabled schedules:** firmware queries return nothing for a disabled schedule (approved).
+   Kotlin `RecurrenceEngine` ignores `enabled`, but every Android consumer filters it
+   first (dashboard, calendar, simulation), so observable behavior is the same. Only the
+   editor preview shows dates of a disabled schedule.
+4. **Amount range:** `uint32_t` microlitres (max ≈ 4,295 l per dose) vs Kotlin's technical
+   maximum of 2^53−1 µl. Neither is a dosing limit; the maximum dispensing volume will be
+   defined in the BLE protocol specification (FR-016 still TBD).
+5. **Canonical form:** firmware validation also rejects non-canonical fields (ONCE with
+   interval ≠ 1, an end date or weekdays; DAILY with weekdays; bad id; revision 0),
+   which Android enforces through its types and backup codec instead.
+6. **Inverted range:** `dsp_rec_between` with until < after returns `DSP_REC_ERR_RANGE`;
+   Kotlin returns an empty list.
+7. **Android finding — silent truncation in Kotlin `occurrencesBetween`** (confirmed by the
+   independent review; Android production code deliberately unchanged in M1.1):
+   - *Cause:* the private `occurrencesAfter` sequence stops after `MAX_CANDIDATES` =
+     10,000 candidate dates. `occurrencesBetween` returns `null` only when it sees an
+     occurrence beyond `limit`; if the sequence ends first, the loop simply finishes and the
+     partial list is returned as if complete.
+   - *Conditions:* more than 10,000 rule-matching candidate dates lie in the range, and
+     `limit` is at least the number of occurrences among the first 10,000 candidates. That
+     number is 10,000 for most schedules, but lower when DST-gap days (which are candidates
+     without an occurrence) are among them. Example: a daily schedule over a range longer
+     than about 27 years with the default budget of 10,000 (`SimulationEngine` and
+     `ReservoirPredictor` both pass `maxOccurrences = 10_000` minus what they already
+     collected). Measured with a temporary probe on a 34-year range: daily 08:00 with
+     limit 10,000 returned 10,000 occurrences (correct result: `null`), while limit 9,999
+     returned `null`. Daily 02:30 with limit 9,990 returned 9,972 occurrences (correct
+     result: `null`). `nextOccurrence` is not affected in practice, since it needs only a
+     few candidates.
+   - *Effect:* a simulation "advance" or reservoir prediction over such a range would
+     silently use only the first 10,000 occurrences instead of reporting the budget as
+     exceeded.
+   - *Recommended fix (separate Android change):* make the candidate cap observable, e.g.
+     let `occurrencesAfter` signal exhaustion of the cap and have `occurrencesBetween`
+     return `null` in that case, or drop the cap from the range query and bound it by
+     `limit + 1` occurrences as the C engine does. Add a regression test with a daily
+     schedule, `limit = 10_000` and a 30-year range, expecting `null`.
+   - The C engine has no such cap and always reports `DSP_REC_ERR_BUFFER_FULL`.
 
 ## Build (ESP32-C3, native)
 
@@ -189,11 +381,19 @@ Harness (`support/dsp_test.h`, header-only, about 80 lines):
 The harness stays deliberately small. A test framework (e.g. vendored Unity, which would
 need a NOTICE entry) is added only when a concrete need is demonstrated.
 
-Planned host coverage (M1+): recurrence, DST transitions (Europe/Prague), missed-dose
-skipping, occurrence deduplication, dosing state transitions, reservoir depletion/refill,
-service-mode transitions, interrupted operations, simulated clock and storage failures.
-The Android domain (`android/app/src/main/java/cz/nowass/dispenser/domain/`) is the
-behavioral reference.
+Current host tests (CTest names):
+
+| Test | What it checks |
+|---|---|
+| `test_identity` | firmware identification formatting, version from `version.txt` |
+| `test_recurrence_vectors` | all shared vectors in `../test-vectors/` (also run by the Android Kotlin tests), incl. 100 years of DST transitions |
+| `test_recurrence_vectors_TZ_*` | the same vectors with host `TZ=America/New_York` and `TZ=Asia/Kathmandu` (host timezone has no effect) |
+| `test_recurrence` | day arithmetic vs a naive calendar walk 1999–2101, jump search vs brute force (600 random schedules), buffer paging, argument errors, extreme instants, identity across edits |
+
+Planned host coverage (M1.2+): occurrence deduplication, dosing state transitions,
+reservoir depletion/refill, service-mode transitions, interrupted operations, simulated
+clock and storage failures. The Android domain
+(`android/app/src/main/java/cz/nowass/dispenser/domain/`) is the behavioral reference.
 
 ## Devcontainer (optional)
 
@@ -233,8 +433,9 @@ alternative to the native setup, not a requirement.
 | Firmware identification formatting (`dsp_identity`) | implemented, unit-tested | yes | not tested |
 | `app_main` identification logging | n/a | yes | **not run** |
 | Firmware version from `version.txt` | validated at configure time | yes (app descriptor) | not run |
+| Recurrence engine (`dsp_recurrence`, `dsp_time`) | implemented, unit- and vector-tested, Kotlin parity | compiled, not called | not run |
 | Host test infrastructure (CMake/CTest, sanitizers) | working | n/a | n/a |
-| Scheduler, dosing, reservoir, journal, service mode | not started | — | — |
+| Dosing coordinator, deduplication, reservoir, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
 | Deep sleep and wake-up | not started | — | — |
 | NVS persistence, BLE, Wi-Fi/SNTP, OTA | not started | — | — |
@@ -252,6 +453,5 @@ alternative to the native setup, not a requirement.
 
 ## Next milestone
 
-**M1.1 — pure C recurrence engine** in `dispenser_domain`, reproducing the approved
-Android Kotlin scheduling behavior including Europe/Prague DST semantics (FR-015). Not
-started.
+M1.2/M1.3 — durable occurrence tracking and the dosing coordinator. Not started; scope to
+be defined after the M1.1 review.
