@@ -437,3 +437,94 @@ dsp_codec_status_t dsp_codec_decode_time(const uint8_t *buf, size_t len, dsp_tim
     *out = m;
     return DSP_CODEC_OK;
 }
+
+/* ---- Notification state ------------------------------------------------------------- */
+
+size_t dsp_codec_encode_notify(const dsp_notify_state_t *s, uint8_t *buf, size_t cap)
+{
+    if (s == NULL || buf == NULL || cap < DSP_NOTIFY_RECORD_BYTES || !dsp_notify_state_is_valid(s)) {
+        return 0;
+    }
+    memset(buf, 0, DSP_NOTIFY_RECORD_BYTES);
+    buf[0] = DSP_REC_TYPE_NOTIFY;
+    buf[1] = DSP_CODEC_VERSION;
+    put_u32(buf + 2, s->epoch);
+    put_u32(buf + 6, s->next_seq);
+    put_u16(buf + 10, s->dropped);
+    buf[12] = s->flags;
+    uint8_t *p = buf + DSP_NOTIFY_HEADER_BYTES;
+    for (size_t c = 0; c < DSP_COND_COUNT; c++, p += DSP_NOTIFY_COND_BYTES) {
+        p[0] = s->cond[c].flags;
+        p[1] = s->cond[c].reminders;
+        put_i64(p + 2, s->cond[c].opened_at);
+        put_i64(p + 10, s->cond[c].next_reminder_at);
+        put_u32(p + 18, s->cond[c].value);
+        put_u32(p + 22, s->cond[c].value2);
+    }
+    for (size_t i = 0; i < DSP_NOTIFY_QUEUE_CAPACITY; i++, p += DSP_NOTIFY_ENTRY_BYTES) {
+        const dsp_note_t *e = &s->queue[i];
+        put_u32(p, e->seq);
+        p[4] = e->type;
+        p[5] = e->severity;
+        p[6] = e->condition;
+        p[7] = e->flags;
+        p[8] = e->reminder_no;
+        put_u16(p + 10, e->attempts);
+        put_i64(p + 12, e->created_at);
+        put_u16(p + 20, e->code);
+        put_u32(p + 22, e->value);
+        put_u32(p + 26, e->value2);
+    }
+    return DSP_NOTIFY_RECORD_BYTES;
+}
+
+dsp_codec_status_t dsp_codec_decode_notify(const uint8_t *buf, size_t len, dsp_notify_state_t *out)
+{
+    dsp_codec_status_t st = check_header(buf, len, DSP_REC_TYPE_NOTIFY);
+    if (st != DSP_CODEC_OK) {
+        return st;
+    }
+    if (len != DSP_NOTIFY_RECORD_BYTES || out == NULL) {
+        return DSP_CODEC_ERR_SIZE;
+    }
+    if (buf[13] != 0) {
+        return DSP_CODEC_ERR_FIELD;
+    }
+    dsp_notify_state_t s;
+    memset(&s, 0, sizeof s);
+    s.epoch = get_u32(buf + 2);
+    s.next_seq = get_u32(buf + 6);
+    s.dropped = get_u16(buf + 10);
+    s.flags = buf[12];
+    const uint8_t *p = buf + DSP_NOTIFY_HEADER_BYTES;
+    for (size_t c = 0; c < DSP_COND_COUNT; c++, p += DSP_NOTIFY_COND_BYTES) {
+        s.cond[c].flags = p[0];
+        s.cond[c].reminders = p[1];
+        s.cond[c].opened_at = get_i64(p + 2);
+        s.cond[c].next_reminder_at = get_i64(p + 10);
+        s.cond[c].value = get_u32(p + 18);
+        s.cond[c].value2 = get_u32(p + 22);
+    }
+    for (size_t i = 0; i < DSP_NOTIFY_QUEUE_CAPACITY; i++, p += DSP_NOTIFY_ENTRY_BYTES) {
+        if (p[9] != 0 || p[30] != 0 || p[31] != 0) {
+            return DSP_CODEC_ERR_FIELD;
+        }
+        dsp_note_t *e = &s.queue[i];
+        e->seq = get_u32(p);
+        e->type = p[4];
+        e->severity = p[5];
+        e->condition = p[6];
+        e->flags = p[7];
+        e->reminder_no = p[8];
+        e->attempts = get_u16(p + 10);
+        e->created_at = get_i64(p + 12);
+        e->code = get_u16(p + 20);
+        e->value = get_u32(p + 22);
+        e->value2 = get_u32(p + 26);
+    }
+    if (!dsp_notify_state_is_valid(&s)) {
+        return DSP_CODEC_ERR_FIELD;
+    }
+    *out = s;
+    return DSP_CODEC_OK;
+}

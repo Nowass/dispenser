@@ -8,8 +8,8 @@ Android companion app.
 - [`firmware/`](firmware/README.md) – ESP32-C3 firmware (ESP-IDF v6.1). Currently a skeleton
   plus host-tested domain logic: recurrence engine (M1.1), execution history and
   deduplication (M1.2), persistent storage and configuration with an NVS adapter (M1.3),
-  time management with Wi-Fi/SNTP adapters (M1.4). Nothing drives hardware yet; not yet run
-  on hardware.
+  time management with Wi-Fi/SNTP adapters (M1.4), notification engine with a persistent
+  queue (M1.5, no transport yet). Nothing drives hardware yet; not yet run on hardware.
 - [`test-vectors/`](test-vectors/README.md) – shared test cases run by both the Android and
   the firmware tests (scheduling parity).
 - [`docs/`](docs/) – requirements, architecture, [release process](docs/RELEASING.md) and the

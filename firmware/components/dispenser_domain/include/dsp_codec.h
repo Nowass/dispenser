@@ -22,6 +22,7 @@
 #include "dsp_history.h"
 #include "dsp_schedule_set.h"
 #include "dsp_time.h"
+#include "dsp_notify_state.h"
 #include "dsp_time_meta.h"
 
 #ifdef __cplusplus
@@ -33,7 +34,8 @@ enum {
     DSP_REC_TYPE_HISTORY = 2,
     DSP_REC_TYPE_SCHEDULE_SET = 3,
     DSP_REC_TYPE_CONFIG = 4,
-    DSP_REC_TYPE_TIME = 5, /* layout v2 (M1.4) */
+    DSP_REC_TYPE_TIME = 5,   /* layout v2 (M1.4) */
+    DSP_REC_TYPE_NOTIFY = 6, /* layout v3 (M1.5) */
 };
 
 #define DSP_CODEC_VERSION 1 /* format version written by this firmware for every type */
@@ -48,6 +50,12 @@ enum {
      DSP_TOMBSTONE_CAPACITY * DSP_TOMBSTONE_ENTRY_BYTES)
 #define DSP_CONFIG_RECORD_BYTES 18
 #define DSP_TIME_RECORD_BYTES 42
+#define DSP_NOTIFY_HEADER_BYTES 14
+#define DSP_NOTIFY_COND_BYTES 26
+#define DSP_NOTIFY_ENTRY_BYTES 32
+#define DSP_NOTIFY_RECORD_BYTES                                                              \
+    (DSP_NOTIFY_HEADER_BYTES + DSP_COND_COUNT * DSP_NOTIFY_COND_BYTES +                      \
+     DSP_NOTIFY_QUEUE_CAPACITY * DSP_NOTIFY_ENTRY_BYTES)
 #define DSP_RECORD_MAX_BYTES DSP_SCHEDULE_SET_MAX_BYTES
 
 typedef enum {
@@ -91,6 +99,14 @@ dsp_codec_status_t dsp_codec_decode_config(const uint8_t *buf, size_t len, dsp_c
  * 26..33 last_correction | 34..41 not_before (all i64). */
 size_t dsp_codec_encode_time(const dsp_time_meta_t *meta, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_time(const uint8_t *buf, size_t len, dsp_time_meta_t *out);
+
+/* notify (682 B): header 0 type | 1 version | 2..5 epoch | 6..9 next_seq | 10..11 dropped |
+ * 12 flags | 13 zero; then 6 conditions x 26 B (flags, reminders, opened_at i64,
+ * next_reminder_at i64, value u32, value2 u32); then 16 entries x 32 B (0..3 seq | 4 type | 5 severity |
+ * 6 condition | 7 flags | 8 reminder_no | 9 zero | 10..11 attempts | 12..19 created_at |
+ * 20..21 code | 22..25 value | 26..29 value2 | 30..31 zero). */
+size_t dsp_codec_encode_notify(const dsp_notify_state_t *s, uint8_t *buf, size_t cap);
+dsp_codec_status_t dsp_codec_decode_notify(const uint8_t *buf, size_t len, dsp_notify_state_t *out);
 
 #ifdef __cplusplus
 }

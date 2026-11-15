@@ -4,8 +4,8 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: M1.1–M1.3 (recurrence, execution history, persistent storage) committed;
-M1.4 (time management, Wi-Fi and SNTP) implemented, awaiting review.**
+**Status: M1.1–M1.4 (recurrence, execution history, persistent storage, time management)
+committed; M1.5 (notification engine) implemented, awaiting review.**
 At run time the firmware still only logs its identification. The domain and platform
 components are compiled into the image's component libraries but not called by
 `app_main` (optional diagnostics exist, off by default), Wi-Fi is never started, and
@@ -35,6 +35,11 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   session manager, time-sync service, wake-up planner, `time` record (layout v2 with
   migration); ESP-IDF clock, Wi-Fi and SNTP adapters (compiled; not run on hardware). See
   [Time management, Wi-Fi and SNTP](#time-management-wi-fi-and-sntp-m14).
+- (M1.5) **Notification engine** (domain only): reservoir LOW/BLOCKED, battery LOW, dosing
+  and device errors; stable event IDs, deduplication, weekly reminders, a bounded
+  persistent queue (`notify` record, layout v3 with migration), at-least-once delivery over
+  a transport interface, and reservoir consumption accounting. No real transport. See
+  [Notification engine](#notification-engine-m15).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
@@ -42,7 +47,7 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
 
 Dosing service task (wiring of recurrence, coordinator, storage, time, stock, limits and
 pump), power manager and deep-sleep lifecycle, credential store and BLE provisioning,
-HTTPS notifications, MONTHLY recurrence, reservoir logic beyond storing the estimate, event
+the HTTPS/Cloudflare notification transport, battery measurement, MONTHLY recurrence, event
 journal, BLE, GPIO and motor control, service mode, OTA, a storage maintenance/repair tool. The domain code decides and records; nothing drives
 hardware yet.
 
@@ -148,6 +153,9 @@ firmware/
 │   │   ├── include/dsp_net.h         Wi-Fi session manager and connectivity interfaces (M1.4)
 │   │   ├── include/dsp_time_service.h  one bounded sync session (M1.4)
 │   │   ├── include/dsp_wakeup.h      next wake-up planning (M1.4)
+│   │   ├── include/dsp_notify_state.h  notification state and queue model (M1.5)
+│   │   ├── include/dsp_notify.h      notification engine, transport interface (M1.5)
+│   │   ├── include/dsp_reservoir.h   reservoir consumption accounting (M1.5)
 │   │   └── src/                      matching .c files
 │   └── dispenser_platform/     ESP-IDF adapters (never in the host build)
 │       ├── Kconfig                   DSP_SNTP_SERVER (M1.4)
@@ -163,8 +171,9 @@ firmware/
 │   ├── test_recurrence.c          engine unit tests (C only)
 │   ├── test_recurrence_vectors.c  runs ../../test-vectors/*.txt
 │   ├── test_exec.c                coordinator/history tests (M1.2)
-│   ├── test_storage.c             persistent storage tests (M1.3, + v2 migration)
-│   └── test_time.c                time management tests (M1.4)
+│   ├── test_storage.c             persistent storage tests (M1.3, + v2/v3 migrations)
+│   ├── test_time.c                time management tests (M1.4)
+│   └── test_notify.c              notification engine and reservoir tests (M1.5)
 └── .devcontainer/              optional pinned ESP-IDF v6.1 build container
 
 ../test-vectors/                shared C/Kotlin test vectors (see its README)
@@ -585,15 +594,16 @@ dosing service (future) ──► dsp_exec ──► dsp_history_store_t ─┐
   ESP-IDF docs note that its recovery may erase and rewrite some pages. This is internal
   library behavior that the firmware neither performs nor can prevent.
 
-### Storage layout v2 (one NVS namespace, `dispenser`, partition `nvs`)
+### Storage layout v3 (one NVS namespace, `dispenser`, partition `nvs`)
 
 | Key | Content | Size |
 |---|---|---|
-| `layout` | layout marker (version 2, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
+| `layout` | layout marker (version 3, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
 | `h00` … `h31` | execution history slot: M1.2 record or the explicit EMPTY record | 92 B each |
 | `sched` | the whole schedule set (schedules + deleted-ID tombstones + set revision) | 8 … 2,504 B |
 | `config` | device configuration | 18 B |
 | `time` | time metadata (M1.4): last sync, high-water time, rollback hold, last correction, dosing floor | 42 B |
+| `notify` | notification state (M1.5): ID epoch and sequence, condition latches, 16-entry queue | 682 B |
 
 **Explicit presence (approved):** on first boot every key is written with its
 provisioning value (EMPTY slots, empty set, default configuration), then the marker.
@@ -616,7 +626,8 @@ in place for maintenance (no repair tool exists yet).
 
 ### Persistent data format (all little-endian, explicit sizes, no structs)
 
-Every record: byte 0 = type (1 layout, 2 history, 3 schedule set, 4 config, 5 time), byte 1 =
+Every record: byte 0 = type (1 layout, 2 history, 3 schedule set, 4 config, 5 time,
+6 notify), byte 1 =
 format version (1). Decoders require the exact length, a known type and version, valid
 fields and zero padding. Encoders never produce an invalid record.
 
@@ -639,6 +650,14 @@ layout (7 B):         0 type | 1 ver | 2..3 layout version | 4 history slots |
                       5 schedule capacity | 6 tombstone capacity
 time (42 B):          0 type | 1 ver | 2..9 last_sync | 10..17 high_water | 18..25 hold_until |
                       26..33 last_correction_s | 34..41 not_before (all i64; instants 0 or in range)
+notify (682 B):       0 type | 1 ver | 2..5 epoch | 6..9 next_seq | 10..11 dropped |
+                      12 flags (1 = estimate uncertain) | 13 zero | 6 x condition | 16 x entry
+  condition (26 B):   0 flags (1 active, 2 raise pending) | 1 reminders | 2..9 opened_at |
+                      10..17 next_reminder_at (i64) | 18..21 value | 22..25 value2
+  entry (32 B):       0..3 seq (0 = empty, then all zero) | 4 type | 5 severity |
+                      6 condition (0xFF = one-shot) | 7 flags | 8 reminder_no | 9 zero |
+                      10..11 attempts | 12..19 created_at (i64, 0 = clock unknown) | 20..21 code |
+                      22..25 value | 26..29 value2 | 30..31 zero
 ```
 
 Golden byte vectors for history, configuration and schedule set (computed independently
@@ -658,7 +677,8 @@ extra CRC would only re-check what NVS already checks.
 | Future full schedule sync from Android | `sched` | yes (same record; acceptance test 8) |
 | Configuration change (e.g. refill: capacity + remaining) | `config` | yes |
 | Provisioning | all keys, marker last | resumable: a cut before the marker is completed at the next boot |
-| Dose outcome + reservoir decrement (future) | `hNN`, then `config` | **no**: two keys. Planned order: history first (dedup safety), then reservoir. A cut in between over-estimates the stock by one dose. |
+| Automatic dose: claim + reservoir consumption (M1.5 order) | `hNN` (claim), then `config`, then pump | **no**: two keys, ordered so that a cut is safe. The claim comes first (dedup safety). The full requested volume is subtracted **before** the pump runs, so a cut after the claim leaves the pump off and the estimate correct, and a cut after the consumption can only make the estimate too low, never too high. |
+| Notification event: latch + enqueue + sequence (M1.5) | `notify` | yes: one record |
 
 Every write is: encode → `set` → `commit` → read back → compare bytes. Any failure
 returns an error; the schedule repository then refuses changes until it re-reads the
@@ -706,11 +726,14 @@ notification milestones, never in `config` and never in logs.
 ### Capacity, flash layout and wear
 
 NVS entries are 32 B and blobs cost 2 entries plus 1 per 32 data bytes. History
-32 × 5 = 160 entries, schedule set ≤ 81, config 3, time 4 (M1.4, 42 B), marker 3, namespace 1:
-**≤ about 255 entries (8 KB)**, plus up to 81 free entries while the largest record is rewritten.
+32 × 5 = 160 entries, schedule set ≤ 81, config 3, time 4 (M1.4, 42 B), notify 24 (M1.5, 682 B),
+marker 3, namespace 1: **≤ about 279 entries (9 KB)**, plus up to 81 free entries while the
+largest record is rewritten.
 The current partition table (ESP-IDF default `partitions_singleapp.csv`: `nvs` 24 KB =
 6 pages, about 630 usable entries) fits this with about half left for ESP-IDF's own
-Wi-Fi/PHY/BLE data later. Wear: about 10 entries per automatic dose. Even at 16 doses a
+Wi-Fi/PHY/BLE data later. Wear: about 10 entries per automatic dose (plus 3 for the
+reservoir estimate since M1.5). Each notification change or delivery session costs 24 entries,
+plus 24 more for every notification's first transmission (freeze write). Even at 16 doses a
 day each NVS sector is erased only every few days, far inside flash endurance.
 
 **Unchanged in M1.3:** flash size 2 MB (ESP-IDF default) and the single-app partition
@@ -734,15 +757,16 @@ The present image is about 145 KB; Wi-Fi, BLE and TLS will grow it substantially
 
 ### Schema migration strategy
 
-**Layout v1 → v2 (M1.4, implemented and tested):** a v1 marker (M1.3) with valid v1 data
-and no `time` key, or an all-zero `time` key left by an interrupted migration, is migrated:
-- `time` is provisioned with zeros;
-- the marker is rewritten as v2 **last**;
+**Layout v1/v2 → v3 (M1.4 and M1.5, implemented and tested):** a v1 marker (M1.3: no
+`time`, no `notify`) or a v2 marker (M1.4: no `notify`) with valid data is migrated. The
+newer keys may be absent, or all-zero as left by an interrupted migration:
+- the missing keys are provisioned with zeros (`time`, then `notify`);
+- the marker is rewritten as v3 **last**;
 - a power cut before the marker is resumed at the next boot.
 
-Without write permission the open reports `ERR_MIGRATION_REQUIRED` and writes nothing. A v1
-marker next to a `time` record with real data is `CORRUPT`. M1.3 firmware reading v2 reports
-`UNSUPPORTED` (intended).
+Without write permission the open reports `ERR_MIGRATION_REQUIRED` and writes nothing. An old
+marker next to a newer key with real data is `CORRUPT`. Older firmware reading a newer layout
+reports `UNSUPPORTED` (intended).
 
 - Each record carries its own version, and the layout marker carries the layout version.
 - A newer firmware keeps decoders for older versions and writes records back in its own
@@ -879,7 +903,7 @@ time. This is intentional: a missed dose is preferable to a possible extra one.
 - **Production credential storage** is designed with BLE provisioning (proposal: a separate
   namespace with NVS encryption, which needs an eFuse/HMAC key decision).
 
-### Persistent time metadata (`time` record, layout v2)
+### Persistent time metadata (`time` record, since layout v2)
 
 `last_sync_utc`, `high_water_utc`, `hold_until_utc`, `last_correction_s`. Written only
 when they change: after an accepted sync (≤ once per interval) and when a hold starts or
@@ -920,6 +944,151 @@ early wake simply sleeps again.
   forward skip a dose.
 - Real Wi-Fi association and timing, SNTP over the network, failure reasons, energy per
   session, and the `sntp_sync_time` override at run time.
+
+## Notification engine (M1.5)
+
+Pure domain code (`dsp_notify`, `dsp_notify_state`, `dsp_reservoir`): it detects
+conditions, creates deduplicated events, schedules reminders, keeps the bounded persistent
+queue and hands pending notifications to an injected transport. **There is no real
+transport yet** (no HTTPS, no Cloudflare relay, no e-mail), no Wi-Fi activity and no
+battery measurement. Nothing calls the engine from `app_main`.
+
+### Events
+
+| Type | Severity | Kind | Payload |
+|---|---|---|---|
+| `RESERVOIR_LOW` | WARNING | condition: estimate below `low_stock_percent` | value = estimated µl, value2 = capacity µl |
+| `RESERVOIR_BLOCKED` | CRITICAL | condition: FR-022 (the estimate does not cover a dose) | same |
+| `BATTERY_LOW` | WARNING | condition from a future battery monitor (`OK`/`LOW`/`UNKNOWN`) | value = mV (0 = not provided) |
+| `DOSING_ERROR` | CRITICAL | **one-shot** event | code = start failed / pump failed / interrupted / storage / blocked; value = requested µl; flag MANUAL |
+| `DEVICE_ERROR` | CRITICAL | condition (storage, sync overdue, clock UNKNOWN with ≥ 4 failed syncs; a trusted HOLDOVER clock never raises it and stays usable for dosing) or one-shot `QUEUE_OVERFLOW` | code; value = detail or number of lost events |
+
+Entry flags: `REMINDER`, `TIME_VALID` (created_at is trusted UTC; otherwise 0),
+`UNCERTAIN` (reservoir estimate uncertain), `MANUAL`.
+
+### Approved policy (2026-11-15, confirmed in the M1.5 review)
+
+- **Conditions and deduplication:** a condition opens an episode once (one event). Repeated
+  observations do not create events and do not write flash (approved: RAM-only payload
+  updates). The episode closes on resolution, and its undelivered notifications are
+  withdrawn (stale). A new episode later gets a new ID.
+- **Payload freshness (M1.5 review):** a notification reports the **latest known value
+  at its first transmission attempt**, not necessarily the value that opened the episode.
+  - Until the first attempt, observations of the still active condition update the queued
+    entry in RAM: LOW at 19.99 %, then an observation at 8 %, then delivery transmits 8 %.
+  - **Freeze is durable before the first send.** Before an entry is transmitted for the
+    first time, its final payload and the freeze marker (`attempts > 0`; `attempts`
+    counts started attempts) are written to flash in one write. If that write fails,
+    nothing is sent (`ERR_STORAGE`, zero transport calls).
+  - From then on the payload is **frozen**: every retry with the same ID carries identical
+    content, also after a power cut between the receiver accepting the event and the
+    result being saved. Newer values reach the receiver with the next reminder, which is
+    a new event with a new ID.
+  - Cost: one extra 682 B write per notification, at its first transmission.
+  - A restart before the first attempt loses the RAM-only refresh. The entry then carries
+    its last persisted value until the caller's next observation refreshes it.
+  - Flags (`UNCERTAIN`) are fixed when the entry is created.
+- **Reservoir hysteresis (approved):** LOW opens when `remaining × 100 < capacity × threshold`
+  and closes at `threshold + 5` points (capped at 100 %). Capacity 0 means unconfigured:
+  unknown, never low.
+- **Reminders:** one every **7 days** while a condition is unresolved (reservoir LOW and
+  BLOCKED, battery LOW, persistent device errors). They are trusted-clock only, and the
+  next one is always scheduled from now: a forward jump gives one reminder, not a burst,
+  and a backward correction pulls the schedule in to at most 7 days. Dosing errors are
+  never reminded.
+- **Queue:** 16 entries in one atomic record. A new event goes, in order of preference:
+  - into the same condition's undelivered entry (the newer event replaces it);
+  - into a free slot;
+  - in place of the oldest entry of lower severity.
+
+  **CRITICAL entries are never evicted.** If nothing fits, a condition stays latched as
+  "raise pending" (raised when space frees, with its reminder number). One-shot events are
+  counted and reported later as one `DEVICE_ERROR/QUEUE_OVERFLOW` with the count. Nothing
+  is lost silently.
+- **Delivery (at-least-once):** `dsp_notify_deliver()` runs over an already open regular
+  Wi-Fi session. It sends the highest severity first, then the oldest, and removes an entry
+  **only on explicit ACK**. `FAILED` or `UNCERTAIN` (for example a timeout after sending)
+  keeps the entry with the **same ID** and `attempts + 1`, and ends the session. The
+  receiver deduplicates by ID.
+- **Durable before sent:** nothing is transmitted unless the queue state is in flash, so a
+  sequence number can never be reused for different content after a restart. An ACK
+  whose removal is lost (power cut) causes a re-send with the same ID.
+- **No extra wake-ups:** `dsp_notify_delivery_requested()` only says "deliver in the next
+  regular Wi-Fi session". No severity triggers an additional Wi-Fi wake-up, so the M1.4
+  wake planner's `has_notification` input is to stay unused for notifications.
+
+### Stable event IDs
+
+`dsp-<device 12 hex>-<epoch 8 hex>-<seq>`, for example `dsp-0123456789ab-a5a5a5a5-42`.
+- `epoch`: a random value from the platform RNG, assigned with the first event and then
+  persisted.
+- `seq`: a persisted monotonic counter, never reused within the epoch.
+- `device`: the factory MAC (48 bits, approved), supplied by the platform. It identifies,
+  it **never authenticates**: it is not a secret and must not be used as one.
+
+A storage reset gives a new epoch, so old and new IDs cannot collide at the receiver.
+
+### Reservoir accounting (approved: conservative)
+
+The remaining volume is an **estimate from dosing consumption**; there is no level sensor
+(FR-006/FR-020).
+- `dsp_reservoir_consume()` subtracts the **full requested volume** of every authorized
+  dose, automatic or **manual**, whatever the outcome; it saturates at 0 and bumps the
+  configuration revision.
+- **Consume before pump is part of the API contract, not just documentation.**
+  - A `dsp_dose_permit_t` is issued only by `dsp_reservoir_consume()`, and only after the
+    reduced estimate is durable. On any error it is cleared.
+  - `dsp_dose_permit_take()` redeems a permit exactly once.
+  - The future actuator interface must accept nothing but a redeemed permit, so the pump
+    cannot run for a volume that was not subtracted. The actuator does not exist yet; its
+    milestone must keep this rule.
+- **Uncertainty is set by the dosing error itself.** `dsp_notify_report_dosing_error()`
+  with `START_FAILED`, `PUMP_FAILED` or `INTERRUPTED` (the volume was already consumed)
+  sets the persistent uncertainty flag in the **same write** as the event, also when the
+  queue is full. `STORAGE` and `BLOCKED` (nothing consumed) do not set it. Reservoir
+  events then carry `UNCERTAIN`.
+- **Refill clears it:** `dsp_reservoir_refill()` (capacity and remaining, FR-023), then
+  `dsp_notify_on_refill()` clears the flag and the BLOCKED state and re-evaluates LOW, in
+  one write. If power is lost between the two calls, the flag remains set (conservative)
+  until the next refill.
+- `dsp_reservoir_covers()` is the FR-022 check: configured, and the estimate covers the
+  full dose.
+
+### Persistence and failures
+
+All engine state (epoch, next sequence, drop counter, uncertainty flag, 6 condition latches
+with reminder schedules, 16 entries) is the `notify` record (682 B), written only when
+something changes.
+- **A failed write never leads to transmitting a non-durable event.**
+  - The state stays in RAM, marked dirty.
+  - `dsp_notify_deliver()` first writes any dirty state, then freezes each entry durably
+    before its first transmission. If either write fails it sends **nothing more**.
+  - Every later call retries the write.
+  - The transport fake in the tests checks, at every send, that the entry is in flash,
+    already frozen, with exactly the content being sent.
+- **Observable by the caller:**
+  - Every call that cannot persist returns `DSP_NOTIFY_ERR_STORAGE`; the delivery report
+    carries the same status.
+  - `dsp_notify_storage_degraded()` stays true until a write succeeds, or while the record
+    could not be loaded.
+  - If the record cannot be loaded at boot, the engine refuses to run (`ERR_STORAGE`); it
+    never assumes an empty queue.
+- **When the `notify` record itself is the failing storage** (approved for M1.5), the
+  error cannot be queued durably and is only logged by the future integration.
+  **Requirement for a later milestone:** the BLE diagnostics must expose this state
+  (`dsp_notify_storage_degraded()`, together with the other storage statuses), so that the
+  user can see a notification failure that could not be notified.
+
+### Resources
+
+- Code (`-Os`, RISC-V): `dsp_notify` 4.2 KB, `dsp_notify_state` 0.9 KB, `dsp_reservoir` 0.4 KB.
+  None of it is linked into the default image yet (0x24400 bytes, unchanged), because
+  nothing calls it.
+- With the diagnostics enabled the image is 0xce970 bytes (19 % of the 1 MB app partition
+  free), so the partition change is still needed before BLE/TLS.
+- RAM (32-bit): `dsp_notify_t` is 864 B, caller-owned. The storage context grew by an 848 B
+  scratch buffer (8.5 KB in total). No heap, no globals; every loop is bounded by
+  16 entries × 6 conditions.
 
 ## Build (ESP32-C3, native)
 
@@ -980,11 +1149,12 @@ Current host tests (CTest names):
 | `test_recurrence_vectors_TZ_*` | the same vectors with host `TZ=America/New_York` and `TZ=Asia/Kathmandu` (host timezone has no effect) |
 | `test_recurrence` | day arithmetic vs a naive calendar walk 1999–2101, jump search vs brute force (600 random schedules), buffer paging, argument errors, extreme instants and API range boundaries, identity across edits |
 | `test_exec` | execution coordinator and history: normal run, duplicates, restarts, power loss before and after the durable claim, write/commit/read/read-back failures, edits, same-instant schedules, dates and clock rollback, invalid clock, due window, manual independence, capacity/retention, corruption, invalid input; a randomized 60-day run with injected faults and restarts (no duplicate or late authorization) and a fault-free 200-day run (every occurrence exactly once) |
-| `test_storage` | persistent storage: first boot and provisioning (incl. power loss after every write), configuration save/reload and validation, schedule create/edit/delete with revision and ID rules, capacity and tombstone ring, power loss before/after commit (NVS-like and staged modes), marker loss, invalid/truncated/oversized/foreign records, unsupported versions, duplicate IDs, M1.2 coordinator on persistent history (missing slot = corruption, never empty), read/write/commit/no-space/read-back failures, golden bytes, maximum record sizes, randomized operation sequences with faults (always old or new set) |
+| `test_storage` | persistent storage (including the v1→v3 and v2→v3 migrations): first boot and provisioning (incl. power loss after every write), configuration save/reload and validation, schedule create/edit/delete with revision and ID rules, capacity and tombstone ring, power loss before/after commit (NVS-like and staged modes), marker loss, invalid/truncated/oversized/foreign records, unsupported versions, duplicate IDs, M1.2 coordinator on persistent history (missing slot = corruption, never empty), read/write/commit/no-space/read-back failures, golden bytes, maximum record sizes, randomized operation sequences with faults (always old or new set) |
 | `test_time` | clock trust (first boot, deep sleep vs power loss, anomalies), sync interval 24/48 h, Wi-Fi and NTP failures with bounded backoff, implausible NTP, long outage (60 days of dosing in holdover), small/large forward/backward corrections, rollback hold (persisted, lifted), jumped-over protection, DST, restarts around a dose, late wake, storage and clock-step failures, Wi-Fi session lifecycle, wake planning; two randomized multi-year runs (realistic RTC; RTC glitches) with end-to-end dosing: never the same occurrence twice, never twice on the same true day under the trust assumption |
 
-Planned host coverage (later milestones): reservoir depletion/refill and blocking, dose
-limits, service-mode transitions, event journal, NVS adapter (on target). The Android domain
+| `test_notify` | notification engine (M1.5): reservoir threshold, hysteresis, refill, battery, dosing and device errors, deduplication without writes, payload freshness (latest value until the first attempt, frozen afterwards), freeze surviving power loss after the receiver accepted (same ID, same payload, nothing lost) and zero transport calls when the freeze write fails, Wi-Fi failure, ACK, uncertain delivery and retry with the identical ID, durable before sent, restarts, power loss during queue updates and after an ACK, weekly reminders, backward/forward clock corrections, unknown clock, capacity exhaustion and overflow report, priority and no CRITICAL eviction, 120-day outage, manual dose consumption, single-use dose permits, uncertainty set by dosing errors and cleared by refill, golden bytes and strict decoding of `notify`, and a randomized 4000-step run with faults and restarts (one content per ID) |
+
+Planned host coverage (later milestones): dose limits, service-mode transitions, event journal, NVS adapter (on target). The Android domain
 (`android/app/src/main/java/cz/nowass/dispenser/domain/`) is the behavioral reference.
 
 ## Devcontainer (optional)
@@ -1032,7 +1202,9 @@ alternative to the native setup, not a requirement.
 | Time management: trust, corrections, sync service, Wi-Fi manager, wake planning | implemented, tested with fakes (clock, Wi-Fi, NTP, storage) | compiled, not called | not run |
 | ESP-IDF clock / Wi-Fi / SNTP adapters | n/a (ESP-IDF only) | compiled; linked with the optional diagnostic | **not run** |
 | Host test infrastructure (CMake/CTest, sanitizers) | working | n/a | n/a |
-| Dosing service, reservoir logic, journal, service mode | not started | — | — |
+| Notification engine and reservoir accounting (`dsp_notify`, `dsp_reservoir`) | implemented, tested with fake key-value store and transport | compiled, not called | not run |
+| Notification transport (HTTPS/Cloudflare), battery monitor | not started | — | — |
+| Dosing service, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
 | Deep sleep and wake-up | not started | — | — |
 | BLE, credential store, HTTPS notifications, OTA, deep sleep | not started | — | — |
@@ -1054,4 +1226,4 @@ alternative to the native setup, not a requirement.
 
 ## Next milestone
 
-After the M1.4 review: M1.5, scope to be agreed. Not started.
+After the M1.5 review: next milestone to be agreed. Not started.

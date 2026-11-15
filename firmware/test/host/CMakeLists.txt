@@ -69,6 +69,7 @@ dsp_add_host_test(test_recurrence test_recurrence.c)
 dsp_add_host_test(test_exec test_exec.c support/fake_store.c)
 dsp_add_host_test(test_storage test_storage.c support/fake_kv.c)
 dsp_add_host_test(test_time test_time.c support/fake_kv.c)
+dsp_add_host_test(test_notify test_notify.c support/fake_kv.c)
 
 # The engine never consults the C library timezone: identical results under any host TZ.
 foreach(tz "America/New_York" "Asia/Kathmandu")

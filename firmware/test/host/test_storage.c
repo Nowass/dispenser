@@ -21,7 +21,7 @@ static dsp_storage_t st;
 static dsp_schedule_repo_t repo;
 static dsp_history_store_t hist;
 
-#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 3) /* + sched, config, time (layout v2) */
+#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 4) /* + sched, config, time, notify (layout v3) */
 #define ALL_KEYS (DATA_KEYS + 1)
 
 static dsp_storage_status_t reopen(bool allow)
@@ -419,7 +419,7 @@ static void expect_open(dsp_storage_status_t expected)
 
 static void test_invalid_serialized_data(void)
 {
-    const char *keys[] = {"layout", "h00", "h31", "sched", "config", "time"};
+    const char *keys[] = {"layout", "h00", "h31", "sched", "config", "time", "notify"};
     for (size_t k = 0; k < sizeof keys / sizeof keys[0]; k++) {
         fresh(true);
         const fake_kv_entry_t *e = fake_kv_find(&kv, keys[k]);
@@ -499,7 +499,7 @@ static void test_invalid_serialized_data(void)
 
 static void test_unsupported_versions(void)
 {
-    const char *keys[] = {"layout", "h12", "sched", "config", "time"};
+    const char *keys[] = {"layout", "h12", "sched", "config", "time", "notify"};
     for (size_t k = 0; k < sizeof keys / sizeof keys[0]; k++) {
         fresh(true);
         const fake_kv_entry_t *e = fake_kv_find(&kv, keys[k]);
@@ -511,8 +511,9 @@ static void test_unsupported_versions(void)
         expect_open(DSP_STORAGE_ERR_UNSUPPORTED);
     }
     /* Layout marker of another layout version / slot count. */
-    const dsp_layout_t layouts[] = {{3, 32, 16, 16}, {0, 32, 16, 16}, {2, 16, 16, 16},
-                                    {2, 32, 8, 16},  {2, 32, 16, 4},  {1, 16, 16, 16}};
+    const dsp_layout_t layouts[] = {{4, 32, 16, 16}, {0, 32, 16, 16}, {3, 16, 16, 16},
+                                    {3, 32, 8, 16},  {3, 32, 16, 4},  {1, 16, 16, 16},
+                                    {2, 32, 16, 4}};
     for (size_t i = 0; i < sizeof layouts / sizeof layouts[0]; i++) {
         fresh(true);
         uint8_t v[DSP_LAYOUT_RECORD_BYTES];
@@ -884,20 +885,31 @@ static void test_randomized_atomicity(void)
 
 /* ---- M1.4: layout v1 (M1.3) -> v2 migration ----------------------------------------- */
 
-/* Rewrites the current storage into exactly what M1.3 firmware wrote: no "time" key and a
- * layout marker with version 1 (all other records have identical formats). */
+/* Rewrites the current storage into exactly what older firmware wrote: M1.3 (v1: no "time",
+ * no "notify") or M1.4 (v2: no "notify"); all other records have identical formats. */
+static void make_old_storage(int version)
+{
+    if (version == 1) {
+        fake_kv_remove(&kv, "time");
+    }
+    fake_kv_remove(&kv, "notify");
+    const dsp_layout_t old = {(uint16_t)version, 32, 16, 16};
+    uint8_t m[DSP_LAYOUT_RECORD_BYTES];
+    DSP_CHECK_EQ_INT(DSP_LAYOUT_RECORD_BYTES, dsp_codec_encode_layout(&old, m, sizeof m));
+    fake_kv_put_raw(&kv, "layout", m, sizeof m);
+}
+
 static void make_v1_storage(void)
 {
-    fake_kv_remove(&kv, "time");
+    make_old_storage(1);
     const dsp_layout_t v1 = {1, 32, 16, 16};
     uint8_t m[DSP_LAYOUT_RECORD_BYTES];
     DSP_CHECK_EQ_INT(DSP_LAYOUT_RECORD_BYTES, dsp_codec_encode_layout(&v1, m, sizeof m));
     static const uint8_t golden_v1[] = {0x01, 0x01, 0x01, 0x00, 0x20, 0x10, 0x10};
     DSP_CHECK(memcmp(m, golden_v1, sizeof m) == 0); /* the M1.3 marker bytes */
-    fake_kv_put_raw(&kv, "layout", m, sizeof m);
 }
 
-static void test_layout_v1_migrates_to_v2(void)
+static void test_layout_migrations_to_v3(void)
 {
     fresh(true);
     dsp_schedule_t a = sched("mig-a", 8);
@@ -909,23 +921,23 @@ static void test_layout_v1_migrates_to_v2(void)
     cfg.reservoir_remaining_ul = 120000;
     DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_config(&st, &cfg));
     make_v1_storage();
-    DSP_CHECK_EQ_INT(ALL_KEYS - 1, fake_kv_count(&kv));
+    DSP_CHECK_EQ_INT(ALL_KEYS - 2, fake_kv_count(&kv));
 
     /* Read-only open never migrates. */
     fake_kv_clear_faults(&kv);
     DSP_CHECK_EQ_INT(DSP_STORAGE_ERR_MIGRATION_REQUIRED, reopen(false));
     DSP_CHECK_EQ_INT(0, kv.sets);
 
-    /* Migration: "time" provisioned, marker v2 written last, data preserved. */
+    /* Migration: "time" and "notify" provisioned, marker v3 written last, data preserved. */
     fake_kv_clear_faults(&kv);
     DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
     DSP_CHECK(st.migrated_now && !st.provisioned_now);
-    DSP_CHECK_EQ_INT(2, kv.sets); /* "time", then "layout" */
+    DSP_CHECK_EQ_INT(3, kv.sets); /* "time", "notify", then "layout" */
     DSP_CHECK_EQ_INT(ALL_KEYS, fake_kv_count(&kv));
     dsp_layout_t layout;
     const fake_kv_entry_t *m = fake_kv_find(&kv, "layout");
     DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_layout(m->value, m->len, &layout));
-    DSP_CHECK_EQ_INT(2, layout.layout_version);
+    DSP_CHECK_EQ_INT(3, layout.layout_version);
     dsp_time_meta_t meta;
     DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_time(&st, &meta));
     DSP_CHECK_EQ_INT(0, meta.last_sync_utc + meta.high_water_utc + meta.hold_until_utc);
@@ -939,11 +951,11 @@ static void test_layout_v1_migrates_to_v2(void)
     DSP_CHECK(!st.migrated_now);
     DSP_CHECK_EQ_INT(0, kv.sets);
 
-    /* Interrupted migration ("time" written, power lost before the marker): resumed. */
-    for (int mode = 0; mode < 2; mode++) {
-        fresh(mode == 1);
+    /* Interrupted migration (power lost after 1 or 2 new keys, before the marker): resumed. */
+    for (int mode = 0; mode < 4; mode++) {
+        fresh(mode % 2 == 1);
         make_v1_storage();
-        kv.power_cut_after_sets = 1;
+        kv.power_cut_after_sets = 1 + mode / 2;
         DSP_CHECK(reopen(true) != DSP_STORAGE_OK);
         fake_kv_power_cycle(&kv);
         DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
@@ -959,9 +971,45 @@ static void test_layout_v1_migrates_to_v2(void)
     DSP_CHECK_EQ_INT(DSP_LAYOUT_RECORD_BYTES, dsp_codec_encode_layout(&v1, mk, sizeof mk));
     fake_kv_put_raw(&kv, "layout", mk, sizeof mk);
     expect_open(DSP_STORAGE_ERR_CORRUPT);
-    /* v2 marker with the "time" key missing: corruption (explicit presence). */
+    /* v3 marker with the "time" or "notify" key missing: corruption (explicit presence). */
     fresh(true);
     fake_kv_remove(&kv, "time");
+    expect_open(DSP_STORAGE_ERR_CORRUPT);
+    fresh(true);
+    fake_kv_remove(&kv, "notify");
+    expect_open(DSP_STORAGE_ERR_CORRUPT);
+
+    /* v2 (M1.4) -> v3: "notify" provisioned, "time" metadata preserved. */
+    fresh(true);
+    dsp_time_meta_t tm = {1795158000, 1795158000, 0, 12, 1795158001};
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_time(&st, &tm));
+    make_old_storage(2);
+    DSP_CHECK_EQ_INT(ALL_KEYS - 1, fake_kv_count(&kv));
+    fake_kv_clear_faults(&kv);
+    DSP_CHECK_EQ_INT(DSP_STORAGE_ERR_MIGRATION_REQUIRED, reopen(false));
+    DSP_CHECK_EQ_INT(0, kv.sets);
+    fake_kv_clear_faults(&kv);
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
+    DSP_CHECK(st.migrated_now);
+    DSP_CHECK_EQ_INT(2, kv.sets); /* "notify", then "layout" */
+    DSP_CHECK_EQ_INT(ALL_KEYS, fake_kv_count(&kv));
+    dsp_time_meta_t tm_back;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_time(&st, &tm_back));
+    DSP_CHECK(dsp_time_meta_equal(&tm, &tm_back));
+    dsp_notify_state_t ns;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_notify(&st, &ns));
+    DSP_CHECK_EQ_INT(0, ns.epoch + ns.next_seq);
+    /* v2 marker next to a "notify" record with real data: inconsistent. */
+    fresh(true);
+    dsp_notify_state_t real_ns;
+    memset(&real_ns, 0, sizeof real_ns);
+    real_ns.epoch = 7;
+    real_ns.next_seq = 1;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_notify(&st, &real_ns));
+    const dsp_layout_t v2m = {2, 32, 16, 16};
+    uint8_t mk2[DSP_LAYOUT_RECORD_BYTES];
+    DSP_CHECK_EQ_INT(DSP_LAYOUT_RECORD_BYTES, dsp_codec_encode_layout(&v2m, mk2, sizeof mk2));
+    fake_kv_put_raw(&kv, "layout", mk2, sizeof mk2);
     expect_open(DSP_STORAGE_ERR_CORRUPT);
     /* Corrupted v1 data blocks the migration (nothing written). */
     fresh(true);
@@ -1022,7 +1070,7 @@ int main(void)
     DSP_RUN(test_codec_golden_bytes);
     DSP_RUN(test_codec_boundaries);
     DSP_RUN(test_randomized_atomicity);
-    DSP_RUN(test_layout_v1_migrates_to_v2);
+    DSP_RUN(test_layout_migrations_to_v3);
     DSP_RUN(test_time_record_codec_and_storage);
     return dsp_test_finish();
 }

@@ -209,7 +209,7 @@ The actual binary/wire format must be versioned; no schema above should be imple
   - Verified in the ESP-IDF v6.1 sources: NVS replaces a single key atomically and `nvs_set_blob` is durable on return. Nothing spanning several keys is atomic. NVS **silently drops items that fail its CRC checks**, which then read as "not found".
   - Hence **explicit presence** (approved): every key is provisioned at first boot (EMPTY history slots, empty schedule set, default configuration), with the layout marker written last. Keys are never deleted. A missing key afterwards means corruption, and storage errors disable automatic dosing.
   - **The firmware never requests an NVS erase**, not even on `ESP_ERR_NVS_NO_FREE_PAGES` or `NEW_VERSION_FOUND`. ESP-IDF's own init may still write or erase pages as part of its internal recovery; that is library behavior.
-  - Multi-record atomicity is avoided by design: the whole schedule set is **one record** (approved), so create, edit, delete and a future full sync are atomic (acceptance test 8). Configuration is one record too. Dose outcome plus reservoir decrement span two keys: history first, then reservoir.
+  - Multi-record atomicity is avoided by design: the whole schedule set is **one record** (approved), so create, edit, delete and a future full sync are atomic (acceptance test 8). Configuration is one record too. Claim and reservoir consumption span two keys: the history claim first, then the consumption (since M1.5 **before** the pump runs), so a cut can only under-estimate the stock.
   - Schedule IDs (approved: "UUID + bounded tombstones"): refused if active, among the 16 most recently deleted IDs, or present in the history. Beyond that, non-reuse relies on Android UUIDs.
   - Partition: unchanged (2 MB, single app, NVS 24 KB is sufficient). Recommended final layout for a confirmed 4 MB board: NVS 64 KB plus two OTA slots, decided before field data exists.
 
@@ -248,9 +248,19 @@ The actual binary/wire format must be versioned; no schema above should be imple
   - Backoff after failure: 15 min to 6 h while untrusted, 1 h up to the interval while trusted.
   - The ESP-IDF `sntp_sync_time()` hook is overridden, so SNTP never sets the clock without a domain decision.
 - **Wi-Fi credentials (approved: interface only).** A provider interface with an explicit "unavailable" result; no credentials exist until BLE provisioning. The driver keeps them in RAM (`WIFI_STORAGE_RAM`), and they are never logged. A connected session can be shared with future HTTPS notifications.
-- **Persistent time metadata (approved: storage layout v2).** A `time` record holds last sync, high-water time, rollback hold and last correction. It is written only when it changes (≤ once per interval). Layout v1 is migrated by adding the key and rewriting the marker last.
+- **Persistent time metadata (approved: storage layout v2, now part of v3).** A `time` record holds last sync, high-water time, rollback hold and last correction. It is written only when it changes (≤ once per interval). Layout v1 is migrated by adding the key and rewriting the marker last.
 - **Wake planning.** `dsp_wake_plan()` picks the earliest of dose, sync, notification and other, as a relative sleep duration. No timing guarantee until RTC drift and wake latency are measured.
 - **Flash budget.** Linking Wi-Fi brings the image to about 824 KiB (20 % of the 1 MB app partition left), so the OTA partition recommendation is needed before BLE/TLS.
+
+### Notification engine (firmware M1.5, implemented and host-tested; no transport yet)
+
+- **Events:** `RESERVOIR_LOW` and `BATTERY_LOW` (WARNING, conditions), `RESERVOIR_BLOCKED` (CRITICAL, condition), `DEVICE_ERROR` (CRITICAL; conditions for storage, sync overdue and clock UNKNOWN after 4 failed syncs (a trusted HOLDOVER clock never raises it and stays usable for dosing), plus a one-shot queue-overflow report), and `DOSING_ERROR` (CRITICAL, one-shot, MANUAL flag for manual doses).
+- **Deduplication and reminders (approved):** a condition creates one event per episode, then a reminder every 7 days while unresolved (trusted clock only; one reminder after a forward jump, pulled in after a backward correction). Resolution withdraws undelivered notifications of the episode. Repeated observations write nothing.
+- **Queue (approved):** 16 entries in one atomic `notify` record (storage layout v3, migrated from v1/v2). A new event replaces the same condition's pending entry, else takes a free slot, else evicts the oldest entry of lower severity; CRITICAL is never evicted. If nothing fits, a condition stays latched as raise-pending and one-shot events are counted into a later `QUEUE_OVERFLOW` report.
+- **Delivery (approved):** at-least-once over an injected transport (`ACK` / `FAILED` / `UNCERTAIN`), highest severity first, then oldest. An entry is removed only on ACK, keeps its stable ID `dsp-<device>-<epoch>-<seq>` across retries, and is never sent before it is durable. Delivery happens only in the next regular Wi-Fi session: **no extra wake-ups for any notification**.
+- **Payload freshness (M1.5 review):** an entry reports the latest known value until its first transmission attempt (RAM-only refresh). Its final payload and the freeze marker are persisted in one write before the first send (nothing is sent if that write fails), so retries with the same ID are identical even after a power cut.
+- **Storage failures:** a failed `notify` write never leads to transmitting a non-durable event. Every call returns `ERR_STORAGE`, and `dsp_notify_storage_degraded()` stays true until a write succeeds. The BLE diagnostics milestone must expose it.
+- **Reservoir estimate (approved: conservative):** consumption-based, no level sensor. Every authorized dose (automatic or manual) subtracts its full requested volume before the pump runs. This is enforced by a single-use `dsp_dose_permit_t` that only a durable consumption issues, and the future actuator must require it. Start/pump failures and interruptions set the persistent uncertainty flag in the same write as the dosing error; a refill (`dsp_notify_on_refill`) clears it. The estimate stays in the `config` record (revision + 1 per dose).
 
 ## Dependency boundaries and test doubles
 
@@ -277,7 +287,7 @@ Host-side deterministic tests must cover missed dose, multiple daily schedules, 
 
 - Maximum schedules and max ml/dose/day/time; recurrence subset, monthly short-month behavior, optional hourly repeat; calibration approach and voltage compensation.
 - Whether to hold blocked stock until refill even after manual adjustments; manual dosing under low stock.
-- Behavior of interrupted dose against estimated reservoir volume.
+- ~~Behavior of interrupted dose against estimated reservoir volume.~~ Decided in M1.5: full requested volume is subtracted, estimate marked uncertain until refill.
 - Clock synchronization frequency and fallback for full power loss.
 - BLE authentication mechanism and GATT payload protocol.
 - Storage partition sizing, alert backend/provider and OTA strategy.

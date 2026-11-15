@@ -10,6 +10,7 @@
  *   "sched"         the whole schedule set (one atomic record)
  *   "config"        device configuration
  *   "time"          time metadata (layout v2, M1.4)
+ *   "notify"        notification state and queue (layout v3, M1.5)
  *
  * Explicit presence (approved 2026-11-15): every key exists once provisioned and keys are
  * never deleted. Because ESP-IDF NVS drops items that fail its CRC checks, a missing key
@@ -29,13 +30,14 @@
 #include "dsp_history.h"
 #include "dsp_kv.h"
 #include "dsp_time.h"
+#include "dsp_notify_state.h"
 #include "dsp_time_meta.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define DSP_STORAGE_LAYOUT_VERSION 2 /* v1 (M1.3) is migrated: "time" added, marker last */
+#define DSP_STORAGE_LAYOUT_VERSION 3 /* v1/v2 are migrated: new keys added, marker last */
 #define DSP_STORAGE_HISTORY_SLOTS DSP_HISTORY_DEFAULT_SLOTS /* 32, fixed in layout v1 */
 
 typedef enum {
@@ -71,12 +73,14 @@ typedef struct {
     uint8_t buf[DSP_RECORD_MAX_BYTES];
     uint8_t readback[DSP_RECORD_MAX_BYTES];
     dsp_schedule_set_t set_scratch;
+    dsp_notify_state_t notify_scratch;
 } dsp_storage_t;
 
 /*
  * Opens the layout.
- *  - Marker v1 (M1.3): migrated to v2 if allow_provision ("time" provisioned, marker
- *    rewritten last; resumable), otherwise DSP_STORAGE_ERR_MIGRATION_REQUIRED.
+ *  - Marker v1 (M1.3) or v2 (M1.4): migrated to v3 if allow_provision (keys added since are
+ *    provisioned, marker rewritten last; resumable), otherwise
+ *    DSP_STORAGE_ERR_MIGRATION_REQUIRED.
  *  - Marker present and supported: every key is read and validated (history also through
  *    dsp_history_scan). Any missing or malformed key -> DSP_STORAGE_ERR_CORRUPT; a newer
  *    format -> DSP_STORAGE_ERR_UNSUPPORTED. Nothing is modified.
@@ -105,6 +109,10 @@ dsp_storage_status_t dsp_storage_save_config(dsp_storage_t *st, const dsp_config
  * only when the metadata changed, to limit flash wear). */
 dsp_storage_status_t dsp_storage_load_time(dsp_storage_t *st, dsp_time_meta_t *out);
 dsp_storage_status_t dsp_storage_save_time(dsp_storage_t *st, const dsp_time_meta_t *meta);
+
+/* Notification state (M1.5): one atomic record; save validates and confirms. */
+dsp_storage_status_t dsp_storage_load_notify(dsp_storage_t *st, dsp_notify_state_t *out);
+dsp_storage_status_t dsp_storage_save_notify(dsp_storage_t *st, const dsp_notify_state_t *s);
 
 /* ---- Internal helpers shared with the schedule repository ------------------------- */
 
