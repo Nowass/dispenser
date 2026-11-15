@@ -122,7 +122,11 @@ ViewModels and domain models have no database dependencies; Room types live only
   be left and the form is frozen. After saving, "Uloženo v telefonu" is shown.
 - **Persistence (A1.2c):** schedules survive app restarts; calendar and dashboard update
   immediately after every change.
-- **Navigation:** floating icon-only dock (Přehled, Kalendář, Historie, Nastavení).
+- **Navigation:** floating icon-only dock (Přehled, Kalendář, Historie, Nastavení) plus
+  horizontal swipe between these four screens (one `HorizontalPager` in the `main`
+  destination; the pager state is the single source of truth for dock, header and swipes).
+  All four pages stay composed, so state and scroll positions survive tab switches. Back
+  from another tab returns to Přehled. The schedule editor is a separate route (no swiping).
   Historie is a placeholder (milestone A1.3), and Nastavení is static.
 
 ### Scheduling rules (pure domain, unit-tested)
