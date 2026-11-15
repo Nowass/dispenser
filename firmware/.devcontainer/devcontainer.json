@@ -1,0 +1,21 @@
+{
+	// Optional, isolated ESP-IDF v6.1 build environment (image pinned in Dockerfile).
+	// It does not touch the native ESP-IDF installation in ~/.espressif. Build into
+	// build-container/ (see firmware/README.md) so container and native builds never
+	// share a CMake cache. No USB/serial passthrough: flashing is out of scope until
+	// the hardware review.
+	"name": "Dispenser firmware (ESP-IDF v6.1)",
+	"build": {
+		"dockerfile": "Dockerfile"
+	},
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"terminal.integrated.defaultProfile.linux": "bash"
+			},
+			"extensions": [
+				"espressif.esp-idf-extension"
+			]
+		}
+	}
+}

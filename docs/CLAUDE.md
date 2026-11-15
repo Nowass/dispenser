@@ -7,7 +7,7 @@ Dispenser v2 is a battery-powered automatic aquarium liquid-carbon dosing device
 Repository layout:
 
 - `android/`: existing Android Studio Kotlin + Jetpack Compose project (`cz.nowass.dispenser`), minSdk 26.
-- `firmware/`: future ESP-IDF project for Seeed XIAO ESP32-C3.
+- `firmware/`: ESP-IDF v6.1 project for Seeed XIAO ESP32-C3 (target `esp32c3`). Milestone M0.2 skeleton with Linux host tests; never run on hardware. See `firmware/README.md`.
 - `docs/`: source-of-truth product and architecture documents.
 
 Read these documents before making product decisions:
@@ -44,10 +44,21 @@ If any document is missing, **stop and ask** for it; do not guess missing busine
 2. For nontrivial tasks, give a short plan and intended file/module changes first.
 3. Make small, reviewable changes. Avoid unrelated refactors and generated file churn.
 4. Prefer robust deterministic domain tests for recurrence, timezone/DST and reservoir rules.
-5. Run relevant Gradle unit tests, compilation and lint when available. Report exact commands/results; never claim verification that did not run.
+5. Run relevant Gradle unit tests, compilation and lint when available (firmware: host CTest tests and `idf.py build`, see below). Report exact commands/results; never claim verification that did not run.
 6. Do not commit, push, install new system packages, change API credentials, or perform destructive Git operations without explicit user approval.
 7. Flag unresolved requirements (monthly missing dates, numeric safety limits, BLE wire format) explicitly; do not silently turn proposals into product decisions.
 
+## Firmware conventions
+
+- ESP-IDF **v6.1** (6.1.0), target `esp32c3`, RISC-V GCC `esp-15.2.0_20251204`. Do not change the ESP-IDF version, reinstall or modify the local toolchain (`~/.espressif`) without approval. The optional devcontainer pins `espressif/idf:v6.1` by digest.
+- C11 only. `firmware/components/dispenser_domain` is pure business logic: no ESP-IDF, FreeRTOS or hardware headers; platform services are injected as function-pointer interfaces. `firmware/main/` is the only composition root calling ESP-IDF APIs.
+- Host tests: `cmake -S test/host -B build-host && cmake --build build-host && ctest --test-dir build-host --output-on-failure` (from `firmware/`; warnings are errors, ASan/UBSan on). Keep the small harness in `test/host/support/dsp_test.h`; do not add a test framework without a demonstrated need.
+- Target build: `. ~/.espressif/tools/activate_idf_v6.1.sh && idf.py build`. `sdkconfig` is generated from `sdkconfig.defaults` and not committed.
+- Versioning: Android app, firmware and (future) BLE protocol are versioned independently with SemVer. Firmware version source of truth is `firmware/version.txt` (currently `0.1.0-dev`); do not touch Android versioning for firmware changes.
+- Never claim hardware validation. No GPIO, motor, radio, deep-sleep or NVS behavior without the corresponding milestone and hardware review.
+
 ## Current milestone
 
-Android **A1 — offline, calendar-first mock application**. Follow `docs/TASK_A1.md` and stop for review at the A1 boundary.
+- **Android:** A1 offline demo application implemented through A1.5 (open items listed in `docs/ANDROID_APP.md`); release `0.5.0-beta.1` prepared (`docs/RELEASING.md`). Task briefs: `docs/TASK_A1.md`.
+- **Firmware:** **M0.2 — ESP32-C3 skeleton and host tests**, implemented and awaiting review. Implemented: ESP-IDF project skeleton, `esp32c3` cross-compilation, platform-independent C11 domain component, Linux host test infrastructure, firmware version identification. Not implemented: scheduler, dosing coordinator, reservoir logic, event journal, NVS persistence, BLE/Wi-Fi, deep sleep and wake-up, GPIO and motor control. Not verified: physical ESP32-C3 execution, GPIO boot behavior, deep-sleep current, actual motor control. The rest of M0 (deep sleep, GPIO wake, safe-off motor pin) waits for the hardware.
+- **Next (after M0.2 approval):** **M1.1 — pure C recurrence engine** reproducing the approved Android Kotlin scheduling behavior, including Europe/Prague DST semantics (FR-015). Do not start it without approval; stop for review at each milestone boundary.

@@ -5,7 +5,8 @@ Android companion app.
 
 - [`android/`](android/README.md) – Android application (Kotlin, Jetpack Compose). Currently
   an offline **DEMO** build: schedules are stored on the phone, device values are simulated.
-- `firmware/` – ESP32 firmware (planned).
+- [`firmware/`](firmware/README.md) – ESP32-C3 firmware (ESP-IDF v6.1). Currently an M0.2
+  skeleton with host-side unit tests; not yet run on hardware.
 - [`docs/`](docs/) – requirements, architecture, [release process](docs/RELEASING.md) and the
   [backup file format](docs/BACKUP_FORMAT.md).
 
@@ -28,7 +29,10 @@ development builds: [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Development
 
-Build instructions and architecture notes: [android/README.md](android/README.md). CI
+Firmware build, host tests and toolchain (ESP-IDF v6.1, target `esp32c3`):
+[firmware/README.md](firmware/README.md). The firmware is not built in CI yet.
+
+Android build instructions and architecture notes: [android/README.md](android/README.md). CI
 (`.github/workflows/android.yml`) builds, runs the JVM unit tests and lint, compiles the
 instrumented tests (not executed in CI) and builds an unsigned release APK.
 

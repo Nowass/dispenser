@@ -1,0 +1,8 @@
+# Project-level Kconfig defaults for Dispenser V2 firmware.
+# `sdkconfig` is generated from these defaults (plus ESP-IDF defaults) and is not
+# committed. Add an option here only together with a reviewed reason.
+#
+# Not set on purpose (pending hardware review): flash size, power management,
+# GPIO-related options, Bluetooth and Wi-Fi.
+
+CONFIG_IDF_TARGET="esp32c3"
