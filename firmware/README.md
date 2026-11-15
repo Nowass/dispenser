@@ -4,12 +4,12 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: M1.1 (recurrence engine) and M1.2 (execution history and deduplication)
-committed; M1.3 (persistent storage and configuration) implemented, awaiting review.**
+**Status: M1.1–M1.3 (recurrence, execution history, persistent storage) committed;
+M1.4 (time management, Wi-Fi and SNTP) implemented, awaiting review.**
 At run time the firmware still only logs its identification. The domain and platform
 components are compiled into the image's component libraries but not called by
-`app_main` (an optional read-only storage check exists, off by default), and nothing is
-dosed. It
+`app_main` (optional diagnostics exist, off by default), Wi-Fi is never started, and
+nothing is dosed. It
 has **not been run on physical hardware**: the board has not arrived yet. All
 verification so far is Linux host tests and cross-compilation for `esp32c3`.
 
@@ -30,16 +30,20 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   [Persistent storage and configuration](#persistent-storage-and-configuration-m13)).
 - ESP-IDF NVS key-value adapter in the platform component `dispenser_platform` (compiled;
   not run on flash).
+- (M1.4) **Time management**: evidence-based clock trust, correction policy with rollback
+  hold and jumped-over protection, sync scheduling with bounded retries, bounded Wi-Fi
+  session manager, time-sync service, wake-up planner, `time` record (layout v2 with
+  migration); ESP-IDF clock, Wi-Fi and SNTP adapters (compiled; not run on hardware). See
+  [Time management, Wi-Fi and SNTP](#time-management-wi-fi-and-sntp-m14).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
 ### Not implemented
 
-Dosing service task (wiring of recurrence, coordinator, storage, stock, limits and pump),
-time management (M1.4: clock trust, time adjustments, rollback protection), MONTHLY
-recurrence, reservoir logic beyond storing the estimate, event journal, credential store,
-BLE and Wi-Fi, deep sleep and wake-up, GPIO and motor control, service mode, OTA, a
-storage maintenance/repair tool. The domain code decides and records; nothing drives
+Dosing service task (wiring of recurrence, coordinator, storage, time, stock, limits and
+pump), power manager and deep-sleep lifecycle, credential store and BLE provisioning,
+HTTPS notifications, MONTHLY recurrence, reservoir logic beyond storing the estimate, event
+journal, BLE, GPIO and motor control, service mode, OTA, a storage maintenance/repair tool. The domain code decides and records; nothing drives
 hardware yet.
 
 ### Not verified
@@ -125,7 +129,7 @@ firmware/
 ├── sdkconfig.defaults          committed Kconfig defaults (target only); sdkconfig is generated
 ├── main/                       composition root: the only code calling ESP-IDF APIs
 │   ├── CMakeLists.txt          REQUIRES dispenser_domain dispenser_platform esp_app_format log
-│   ├── Kconfig.projbuild       DSP_STORAGE_SMOKE_TEST (default off)
+│   ├── Kconfig.projbuild       DSP_STORAGE_SMOKE_TEST, DSP_TIME_SYNC_DIAGNOSTIC (default off)
 │   └── main.c                  app_main(): logs identification (+ optional read-only storage check)
 ├── components/
 │   ├── dispenser_domain/       pure C11 business logic, no ESP-IDF dependency
@@ -140,10 +144,16 @@ firmware/
 │   │   ├── include/dsp_storage.h     layout, provisioning, history store, config (M1.3)
 │   │   ├── include/dsp_schedule_set.h / dsp_schedule_repo.h  schedules (M1.3)
 │   │   ├── include/dsp_config.h      configuration model (M1.3)
+│   │   ├── include/dsp_time_meta.h / dsp_timekeeping.h  clock trust and corrections (M1.4)
+│   │   ├── include/dsp_net.h         Wi-Fi session manager and connectivity interfaces (M1.4)
+│   │   ├── include/dsp_time_service.h  one bounded sync session (M1.4)
+│   │   ├── include/dsp_wakeup.h      next wake-up planning (M1.4)
 │   │   └── src/                      matching .c files
 │   └── dispenser_platform/     ESP-IDF adapters (never in the host build)
+│       ├── Kconfig                   DSP_SNTP_SERVER (M1.4)
 │       ├── include/dsp_nvs_kv.h      NVS implementation of dsp_kv_t (M1.3)
-│       └── src/dsp_nvs_kv.c
+│       ├── include/dsp_esp_time.h    clock port, Wi-Fi driver, SNTP source (M1.4)
+│       └── src/                      dsp_nvs_kv.c, dsp_esp_clock.c, dsp_esp_wifi.c, dsp_esp_sntp.c
 ├── test/host/                  host unit tests (CMake + CTest, no ESP-IDF)
 │   ├── CMakeLists.txt
 │   ├── support/dsp_test.h      minimal header-only test harness
@@ -153,7 +163,8 @@ firmware/
 │   ├── test_recurrence.c          engine unit tests (C only)
 │   ├── test_recurrence_vectors.c  runs ../../test-vectors/*.txt
 │   ├── test_exec.c                coordinator/history tests (M1.2)
-│   └── test_storage.c             persistent storage tests (M1.3)
+│   ├── test_storage.c             persistent storage tests (M1.3, + v2 migration)
+│   └── test_time.c                time management tests (M1.4)
 └── .devcontainer/              optional pinned ESP-IDF v6.1 build container
 
 ../test-vectors/                shared C/Kotlin test vectors (see its README)
@@ -380,7 +391,7 @@ an injected storage implementation.
   that: `DSP_EXEC_MISSED`, skipped forever. There is no catch-up, so accumulated occurrences
   are never executed after a restart. The window is a coordinator parameter (0 … 3600 s)
   so it can be retuned after RTC drift measurements.
-- A **valid clock** (`dsp_clock_t.valid`, set by the future clock service (M1.4) after SNTP or
+- A **valid clock** (`dsp_clock_t.valid`, set by the M1.4 timekeeper (`dsp_timekeeper_clock`) after SNTP or
   Android time, FR-031/FR-033) is required; otherwise `DSP_EXEC_ERR_CLOCK`.
 - **Disabled** schedules are never executed (`DSP_EXEC_DISABLED`).
 - The occurrence must be exactly what the **current** schedule yields on that date
@@ -477,25 +488,26 @@ slot) and `commit` (make durable):
 - This history is for deduplication only. The user-visible audit trail (every attempt,
   skip and outcome, FR-040/FR-041) is the future event journal.
 
-### Backward clock adjustments (limitation)
+### Backward clock adjustments
 
-Deduplication of **recycled** records relies on an assumption, not on a mechanism: the
-*valid* clock never moves back by more than the 7-day retention window. M1.2 does not
-detect backward jumps; that belongs to the future clock service (M1.4 Time Management), which decides what
-`dsp_clock_t.valid` means.
+Inside M1.2 alone, deduplication of **recycled** records relies on an assumption: the
+*valid* clock never moves back by more than the 7-day retention window.
 
-| Situation | M1.2 behavior |
+| Situation | M1.2 coordinator alone |
 |---|---|
 | Clock moved back, the schedule's record still exists (any distance) | Blocked (`ALREADY_CLAIMED`) |
 | Clock moved back ≤ 7 days | Record cannot have been recycled: blocked |
-| Clock moved back > 7 days to the date of a **recycled** record | Currently refused with `ERR_CAPACITY` (storage untouched). This is an emergent effect of "recycle only when full, oldest first, never empty a slot", **not a designed guarantee** |
-| Same, but a slot is free (M1.2 never frees one; a future change might) | The recycled occurrence is **authorized again**: a duplicate dose |
+| Clock moved back > 7 days to the date of a **recycled** record | Refused with `ERR_CAPACITY` (storage untouched): an emergent effect, not a designed guarantee |
+| Same, but a slot is free (M1.2 never frees one) | Would be authorized again |
 
-`test_limitation_backward_clock_after_recycling` pins both behaviors. A small future
-mitigation is possible: refuse automatic dosing while `now` is earlier than the newest
-`claimed_at` in the history. It is not implemented, because it would also block dosing
-after a mistaken forward time jump is corrected, so it needs a product decision together
-with the clock service.
+**Enforced since M1.4.** The timekeeper detects a synchronization that moves the clock back
+more than 7 days below the highest trusted time. It then holds automatic dosing (the
+coordinator receives an invalid clock) until the clock reaches high water − 7 days. Once
+that point is reached, no recycled record can belong to a date that is still due. The
+remaining unprotected case is an RTC that jumps by itself between synchronizations,
+without any reference to detect it. That is a hardware fault outside the trust model; even
+then, the M1.4 randomized test confirms that the same occurrence identity never repeats.
+`test_limitation_backward_clock_after_recycling` still pins the M1.2-level behavior.
 
 ### Schedule IDs (invariant from M1.1, approved 2026-11-15)
 
@@ -573,14 +585,15 @@ dosing service (future) ──► dsp_exec ──► dsp_history_store_t ─┐
   ESP-IDF docs note that its recovery may erase and rewrite some pages. This is internal
   library behavior that the firmware neither performs nor can prevent.
 
-### Storage layout v1 (one NVS namespace, `dispenser`, partition `nvs`)
+### Storage layout v2 (one NVS namespace, `dispenser`, partition `nvs`)
 
 | Key | Content | Size |
 |---|---|---|
-| `layout` | layout marker (version 1, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
+| `layout` | layout marker (version 2, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
 | `h00` … `h31` | execution history slot: M1.2 record or the explicit EMPTY record | 92 B each |
 | `sched` | the whole schedule set (schedules + deleted-ID tombstones + set revision) | 8 … 2,504 B |
 | `config` | device configuration | 18 B |
+| `time` | time metadata (M1.4): last sync, high-water time, rollback hold, last correction, dosing floor | 42 B |
 
 **Explicit presence (approved):** on first boot every key is written with its
 provisioning value (EMPTY slots, empty set, default configuration), then the marker.
@@ -603,7 +616,7 @@ in place for maintenance (no repair tool exists yet).
 
 ### Persistent data format (all little-endian, explicit sizes, no structs)
 
-Every record: byte 0 = type (1 layout, 2 history, 3 schedule set, 4 config), byte 1 =
+Every record: byte 0 = type (1 layout, 2 history, 3 schedule set, 4 config, 5 time), byte 1 =
 format version (1). Decoders require the exact length, a known type and version, valid
 fields and zero padding. Encoders never produce an invalid record.
 
@@ -624,6 +637,8 @@ config (18 B):        0 type | 1 ver | 2..5 revision | 6..9 reservoir capacity �
                       17 notification mask
 layout (7 B):         0 type | 1 ver | 2..3 layout version | 4 history slots |
                       5 schedule capacity | 6 tombstone capacity
+time (42 B):          0 type | 1 ver | 2..9 last_sync | 10..17 high_water | 18..25 hold_until |
+                      26..33 last_correction_s | 34..41 not_before (all i64; instants 0 or in range)
 ```
 
 Golden byte vectors for history, configuration and schedule set (computed independently
@@ -691,8 +706,8 @@ notification milestones, never in `config` and never in logs.
 ### Capacity, flash layout and wear
 
 NVS entries are 32 B and blobs cost 2 entries plus 1 per 32 data bytes. History
-32 × 5 = 160 entries, schedule set ≤ 81, config 3, marker 3, namespace 1: **≤ about 250
-entries (8 KB)**, plus up to 81 free entries while the largest record is rewritten.
+32 × 5 = 160 entries, schedule set ≤ 81, config 3, time 4 (M1.4, 42 B), marker 3, namespace 1:
+**≤ about 255 entries (8 KB)**, plus up to 81 free entries while the largest record is rewritten.
 The current partition table (ESP-IDF default `partitions_singleapp.csv`: `nvs` 24 KB =
 6 pages, about 630 usable entries) fits this with about half left for ESP-IDF's own
 Wi-Fi/PHY/BLE data later. Wear: about 10 entries per automatic dose. Even at 16 doses a
@@ -718,6 +733,16 @@ The present image is about 145 KB; Wi-Fi, BLE and TLS will grow it substantially
 1.8 MB slots accommodate.
 
 ### Schema migration strategy
+
+**Layout v1 → v2 (M1.4, implemented and tested):** a v1 marker (M1.3) with valid v1 data
+and no `time` key, or an all-zero `time` key left by an interrupted migration, is migrated:
+- `time` is provisioned with zeros;
+- the marker is rewritten as v2 **last**;
+- a power cut before the marker is resumed at the next boot.
+
+Without write permission the open reports `ERR_MIGRATION_REQUIRED` and writes nothing. A v1
+marker next to a `time` record with real data is `CORRUPT`. M1.3 firmware reading v2 reports
+`UNSUPPORTED` (intended).
 
 - Each record carries its own version, and the layout marker carries the layout version.
 - A newer firmware keeps decoders for older versions and writes records back in its own
@@ -754,6 +779,147 @@ adapter links.
   build.
 - **Not verified:** the NVS adapter on real flash, real power-loss behavior, NVS wear and
   GC timing, partition sizing on the actual board.
+
+## Time management, Wi-Fi and SNTP (M1.4)
+
+Domain (pure C11, host-tested): `dsp_timekeeping.h` (trust model, corrections, sync
+schedule), `dsp_time_meta.h` (persistent metadata), `dsp_net.h` (Wi-Fi session manager,
+credential provider, time source and clock port interfaces), `dsp_time_service.h` (one
+bounded sync session), `dsp_wakeup.h` (next wake-up). Platform (ESP-IDF):
+`dsp_esp_time.h` with clock port + continuity evidence, Wi-Fi station driver and SNTP
+time source. **Implemented and host-tested; nothing has run on hardware or a real
+network.** `app_main` does not start Wi-Fi (an optional diagnostic exists, off by default).
+
+### Clock state model (approved: evidence-based, no expiry)
+
+| State | When | Automatic dosing |
+|---|---|---|
+| `UNKNOWN` / never synced | no accepted sync yet | no |
+| `UNKNOWN` / time base lost | power-on or brownout reset, or the RTC continuity marker is missing or does not match the last sync | no |
+| `UNKNOWN` / out of range | clock before 2025-01-01 or after 2099 (e.g. ~1970 after power-on) | no |
+| `UNKNOWN` / behind last sync | a "continuous" clock reads earlier than the last accepted sync | no |
+| `SYNCED` | continuous since an accepted sync less than one interval ago | yes |
+| `HOLDOVER` | continuous since the last accepted sync, sync overdue | **yes, no time limit** |
+| rollback hold | after a backward correction > 7 days, until the clock reaches high water − 7 days | no |
+
+- Evidence comes from the platform. The reset reason must be deep-sleep wake,
+  software/panic or a watchdog reset (power-on, brownout and others lose the time base), and
+  an RTC_NOINIT block (magic, version, CRC) must hold the last accepted sync time.
+- **A stored timestamp is never proof of the current time.**
+- A failed Wi-Fi or NTP attempt never changes trust and never stops dosing. "Sync overdue"
+  (more than 2 × interval) is only a diagnostic flag for future notifications.
+- `dsp_timekeeper_clock()` provides the `dsp_clock_t` for the M1.2 coordinator.
+
+### Clock corrections (approved: hold only beyond 7 days)
+
+An accepted NTP time is applied as an **immediate step** (`settimeofday`), not slewed:
+`adjtime` slewing is interrupted by deep sleep and would leave time wrong for a long period.
+
+| Correction (new − old clock) | Behavior |
+|---|---|
+| ≤ 10 min either way (`SMALL`) | accepted; dosing continues |
+| forward > 10 min | accepted. **Every occurrence scheduled at or before the step instant is missed**, even inside the due window, so a slow RTC can never produce a second dose right after the correction. Implemented as a persisted, **monotonic** dosing floor (`time.not_before_utc` → `dsp_clock_t.not_before`): never lowered by later syncs, it survives restarts, deep sleep, power loss with re-synchronization and repeated corrections. |
+| backward ≤ 7 days | accepted; the M1.2 watermark blocks every already claimed date |
+| backward > 7 days | accepted, **automatic dosing held** until the clock reaches (highest previously trusted time − 7 days). The hold is persisted, and a later sync that jumps past it ends it. A schedule claimed under a too-early "future" date additionally stays blocked by its watermark until that date (missed, never doubled). |
+| initial sync (previous clock untrusted) | accepted; floor raised to max(floor, synchronized time + 1 s): occurrences at or before re-establishing time never run |
+| result before 2025-01-01 / after 2099 | rejected (`DSP_SYNC_ERR_IMPLAUSIBLE`), never applied |
+
+Historical occurrence identities never move. Missed occurrences are never retried. Manual
+dosing is unaffected by holds.
+
+**Initial synchronization (approved 2026-11-15).** When time is re-established after the
+clock was untrusted (first boot, power loss, lost continuity), the floor is raised to
+`max(floor, synchronized time + 1 s)`. So nothing scheduled at or before that moment runs,
+because the device cannot know what it did before under an unverifiable clock. The new
+floor is persisted and confirmed before the time is applied; on a write failure nothing is
+applied. Cost: up to one missed dose per schedule when time comes back shortly after a dose
+time. This is intentional: a missed dose is preferable to a possible extra one.
+
+### Synchronization policy
+
+- Interval 24 h by default, configurable 24–48 h (configuration v1 `time_sync_interval_h`).
+- One session at a time:
+  1. decide whether a sync is due;
+  2. Wi-Fi up only then, bounded;
+  3. SNTP once, with a 10 s timeout by default;
+  4. **durable before effective:** write the new metadata (last sync, high water, hold,
+     floor) and confirm it, and only then step the clock and refresh the continuity marker.
+     If the write fails, nothing is applied (`DSP_SYNC_ERR_PERSIST`, trust unchanged, retry
+     scheduled), so a restart can never re-synchronize from stale metadata and lose the floor
+     or the hold;
+  5. persist any other changed metadata (e.g. an expired hold);
+  6. Wi-Fi down, unless the caller keeps the session for future notifications.
+- Retry after a failure, with the trust state unchanged:
+  - clock untrusted: 15 min, doubling up to 6 h;
+  - clock trusted: 1 h, doubling up to the sync interval.
+
+  The retry state lives in RTC memory and is lost on power-on, which simply means "try
+  now".
+- SNTP: `esp_netif_sntp` with one server (Kconfig `DSP_SNTP_SERVER`, default
+  `pool.ntp.org`). The weak `sntp_sync_time()` hook is overridden, so SNTP never sets the
+  clock itself; the override was verified in the link map.
+- Recommended dosing-service order at a wake (used in the tests): evaluate trust → execute
+  due doses → sync if due → execute doses that just became possible. A routine sync then
+  never delays a dose.
+
+### Wi-Fi lifecycle
+
+`DISABLED → STARTING → CONNECTING → CONNECTED → (shutdown) DISABLED`; any failure ends in
+`FAILED` with the radio already stopped.
+- **Attempts:** at most 1–5 per session (default 3), each bounded at 1–60 s (default 15 s). An
+  authentication failure ends the session at once. There is no reconnect loop and no
+  permanent connection.
+- **Shared sessions:** a connected session can be reused (NTP, then future HTTPS
+  notifications), and `dsp_wifi_shutdown()` ends it.
+- **Credentials (approved: interface only):** `dsp_wifi_credentials_provider_t` with
+  `DSP_CRED_UNAVAILABLE`. The only provider today is `DSP_WIFI_NO_CREDENTIALS`, so the radio
+  never starts. Credentials live in RAM for one connection attempt and are then wiped. The
+  driver uses `WIFI_STORAGE_RAM`: by default ESP-IDF would store the SSID and password in
+  plain NVS. Credentials are never logged, and there are none in the repository.
+- **Production credential storage** is designed with BLE provisioning (proposal: a separate
+  namespace with NVS encryption, which needs an eFuse/HMAC key decision).
+
+### Persistent time metadata (`time` record, layout v2)
+
+`last_sync_utc`, `high_water_utc`, `hold_until_utc`, `last_correction_s`. Written only
+when they change: after an accepted sync (≤ once per interval) and when a hold starts or
+ends; nothing per wake. A failed write keeps the metadata "dirty" and retries at the next
+session, and dosing continues. The volatile retry state lives in RTC memory, not NVS.
+
+### Wake-up planning (interface for the future power manager)
+
+`dsp_wake_plan()` returns the earliest of next dose, next sync, future notification and
+"other", as a sleep duration relative to the raw clock, capped by `max_sleep_s`. Ties go
+to the dose. `dsp_wake_next_dose()` uses the recurrence engine only while the clock is
+valid. While it is unknown, only the sync is scheduled (the RTC still counts since
+power-on). **No timing guarantee** is made: wake-up latency and RTC drift in deep sleep
+must be measured on the board. The 10-minute due window absorbs moderate lateness; an
+early wake simply sleeps again.
+
+### Resources and power
+
+- Domain M1.4 code: about 3.1 KB (`-Os`). RAM: timekeeper 80 B, Wi-Fi manager 28 B,
+  service 24 B, RTC block 40 B. Largest stack frames 128 B.
+- Platform adapters: about 2.3 KB. The ESP-IDF Wi-Fi/LwIP stack dominates. With the
+  diagnostic enabled (Wi-Fi + SNTP linked) the image is **0xce010 bytes (about 824 KiB),
+  only 20 % free in the current 1 MB app partition**. Adding BLE and TLS will not fit, so the
+  M1.3 partition recommendation (about 1.8 MB OTA slots, on a confirmed 4 MB board) is
+  needed before those milestones.
+- Wi-Fi heap is used only while a session is active (`esp_wifi_init` / `deinit` per session).
+  Energy per sync (connect plus SNTP, typically a few seconds at Wi-Fi current) must be
+  measured; at one sync per 24–48 h it should be small next to deep-sleep current. This
+  is an assumption, not a measurement.
+
+### Hardware validation still required
+
+- RTC continuity per reset type: does the RTC time survive software/watchdog resets and get
+  lost on power-on and brownout as assumed?
+- RTC_NOINIT behavior.
+- Deep-sleep RTC drift with the internal oscillator (the XIAO ESP32-C3 has no 32 kHz crystal,
+  to be confirmed). Drift sets how large routine corrections are; corrections above 10 min
+  forward skip a dose.
+- Real Wi-Fi association and timing, SNTP over the network, failure reasons, energy per
+  session, and the `sntp_sync_time` override at run time.
 
 ## Build (ESP32-C3, native)
 
@@ -815,6 +981,7 @@ Current host tests (CTest names):
 | `test_recurrence` | day arithmetic vs a naive calendar walk 1999–2101, jump search vs brute force (600 random schedules), buffer paging, argument errors, extreme instants and API range boundaries, identity across edits |
 | `test_exec` | execution coordinator and history: normal run, duplicates, restarts, power loss before and after the durable claim, write/commit/read/read-back failures, edits, same-instant schedules, dates and clock rollback, invalid clock, due window, manual independence, capacity/retention, corruption, invalid input; a randomized 60-day run with injected faults and restarts (no duplicate or late authorization) and a fault-free 200-day run (every occurrence exactly once) |
 | `test_storage` | persistent storage: first boot and provisioning (incl. power loss after every write), configuration save/reload and validation, schedule create/edit/delete with revision and ID rules, capacity and tombstone ring, power loss before/after commit (NVS-like and staged modes), marker loss, invalid/truncated/oversized/foreign records, unsupported versions, duplicate IDs, M1.2 coordinator on persistent history (missing slot = corruption, never empty), read/write/commit/no-space/read-back failures, golden bytes, maximum record sizes, randomized operation sequences with faults (always old or new set) |
+| `test_time` | clock trust (first boot, deep sleep vs power loss, anomalies), sync interval 24/48 h, Wi-Fi and NTP failures with bounded backoff, implausible NTP, long outage (60 days of dosing in holdover), small/large forward/backward corrections, rollback hold (persisted, lifted), jumped-over protection, DST, restarts around a dose, late wake, storage and clock-step failures, Wi-Fi session lifecycle, wake planning; two randomized multi-year runs (realistic RTC; RTC glitches) with end-to-end dosing: never the same occurrence twice, never twice on the same true day under the trust assumption |
 
 Planned host coverage (later milestones): reservoir depletion/refill and blocking, dose
 limits, service-mode transitions, event journal, NVS adapter (on target). The Android domain
@@ -862,11 +1029,13 @@ alternative to the native setup, not a requirement.
 | Execution coordinator and history (`dsp_exec`, `dsp_history`) | implemented, tested with fake storage (faults, power loss) | compiled, not called | not run |
 | Persistent storage: codec, layout, schedules, config (`dsp_storage`, `dsp_codec`, `dsp_schedule_repo`, `dsp_config`) | implemented, tested with fake key-value store (faults, power loss) | compiled, not called | not run |
 | NVS key-value adapter (`dispenser_platform`) | n/a (ESP-IDF only) | compiled; linked with the optional smoke test | **not run on flash** |
+| Time management: trust, corrections, sync service, Wi-Fi manager, wake planning | implemented, tested with fakes (clock, Wi-Fi, NTP, storage) | compiled, not called | not run |
+| ESP-IDF clock / Wi-Fi / SNTP adapters | n/a (ESP-IDF only) | compiled; linked with the optional diagnostic | **not run** |
 | Host test infrastructure (CMake/CTest, sanitizers) | working | n/a | n/a |
 | Dosing service, reservoir logic, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
 | Deep sleep and wake-up | not started | — | — |
-| BLE, Wi-Fi/SNTP, OTA, credential store | not started | — | — |
+| BLE, credential store, HTTPS notifications, OTA, deep sleep | not started | — | — |
 
 ## Hardware verification still pending
 
@@ -880,8 +1049,9 @@ alternative to the native setup, not a requirement.
 - Deep-sleep current and RTC drift; battery measurement hardware.
 - NVS adapter on real flash: provisioning, power loss during writes, partition sizing and
   the final partition layout (see "Capacity, flash layout and wear").
+- Time: RTC continuity per reset type, deep-sleep drift, Wi-Fi/SNTP on a real network,
+  energy per sync (see "Hardware validation still required" in the M1.4 section).
 
 ## Next milestone
 
-After the M1.3 review: **M1.4 — Time Management** (clock trust, significant time
-adjustments, rollback protection). Not started.
+After the M1.4 review: M1.5, scope to be agreed. Not started.

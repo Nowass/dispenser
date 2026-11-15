@@ -65,7 +65,7 @@ static dsp_occurrence_t occ_on(const dsp_schedule_t *s, dsp_date_t date)
 
 static dsp_clock_t clk(dsp_utc_t t)
 {
-    dsp_clock_t c = {t, true};
+    dsp_clock_t c = {t, true, 0};
     return c;
 }
 
@@ -386,7 +386,7 @@ static void test_invalid_clock_blocks(void)
 {
     setup_default();
     dsp_exec_token_t tok;
-    dsp_clock_t invalid = {O20.at, false};
+    dsp_clock_t invalid = {O20.at, false, 0};
     DSP_CHECK_EQ_INT(DSP_EXEC_ERR_CLOCK, dsp_exec_claim(&ex, &S, &O20, invalid, &tok));
     DSP_CHECK_EQ_INT(DSP_EXEC_ERR_CLOCK, dsp_exec_check(&ex, &S, &O20, invalid));
     const dsp_utc_t bad[] = {DSP_UTC_MIN - 1, DSP_UTC_MAX + 1, INT64_MIN, INT64_MAX};

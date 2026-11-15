@@ -13,10 +13,14 @@ set(DSP_DOMAIN_SRCS
     "src/dsp_exec.c"
     "src/dsp_history.c"
     "src/dsp_identity.c"
+    "src/dsp_net.c"
     "src/dsp_recurrence.c"
     "src/dsp_schedule_repo.c"
     "src/dsp_storage.c"
     "src/dsp_time.c"
+    "src/dsp_time_service.c"
+    "src/dsp_timekeeping.c"
+    "src/dsp_wakeup.c"
 )
 
 if(ESP_PLATFORM)

@@ -6,13 +6,16 @@
 #define KEY_LAYOUT "layout"
 #define KEY_SCHED "sched"
 #define KEY_CONFIG "config"
+#define KEY_TIME "time"
 
-static const dsp_layout_t LAYOUT_V1 = {
+/* Layout written by this firmware (v2 = v1 + "time" record, M1.4). */
+static const dsp_layout_t LAYOUT_CURRENT = {
     .layout_version = DSP_STORAGE_LAYOUT_VERSION,
     .history_slots = DSP_STORAGE_HISTORY_SLOTS,
     .schedule_capacity = DSP_SCHEDULE_CAPACITY,
     .tombstone_capacity = DSP_TOMBSTONE_CAPACITY,
 };
+#define LAYOUT_V1_VERSION 1 /* M1.3: migrated to v2 by adding "time", marker last */
 
 static dsp_storage_status_t from_kv_read(dsp_kv_status_t s)
 {
@@ -92,7 +95,7 @@ dsp_storage_status_t dsp_storage_put(dsp_storage_t *st, const char *key, size_t 
 
 /* ---- Provisioning values ----------------------------------------------------------- */
 
-typedef enum { KEY_HISTORY, KEY_SET, KEY_CONFIG_REC } key_kind_t;
+typedef enum { KEY_HISTORY, KEY_SET, KEY_CONFIG_REC, KEY_TIME_REC } key_kind_t;
 
 static size_t encode_pristine(dsp_storage_t *st, key_kind_t kind)
 {
@@ -102,10 +105,15 @@ static size_t encode_pristine(dsp_storage_t *st, key_kind_t kind)
     case KEY_SET:
         memset(&st->set_scratch, 0, sizeof st->set_scratch); /* revision 0, no entries */
         return dsp_codec_encode_schedule_set(&st->set_scratch, st->tz, st->buf, sizeof st->buf);
-    default: {
+    case KEY_CONFIG_REC: {
         dsp_config_t cfg;
         dsp_config_defaults(&cfg);
         return dsp_codec_encode_config(&cfg, st->buf, sizeof st->buf);
+    }
+    default: {
+        dsp_time_meta_t meta;
+        memset(&meta, 0, sizeof meta); /* never synced */
+        return dsp_codec_encode_time(&meta, st->buf, sizeof st->buf);
     }
     }
 }
@@ -135,7 +143,7 @@ static dsp_storage_status_t check_value(dsp_storage_t *st, key_kind_t kind, cons
         }
         break;
     }
-    default: {
+    case KEY_CONFIG_REC: {
         dsp_config_t cfg;
         dsp_config_t def;
         dsp_config_defaults(&def);
@@ -145,12 +153,25 @@ static dsp_storage_status_t check_value(dsp_storage_t *st, key_kind_t kind, cons
         }
         break;
     }
+    default: {
+        dsp_time_meta_t meta;
+        dsp_time_meta_t zero;
+        memset(&zero, 0, sizeof zero);
+        cs = dsp_codec_decode_time(v, len, &meta);
+        if (cs == DSP_CODEC_OK) {
+            *pristine = dsp_time_meta_equal(&meta, &zero);
+        }
+        break;
+    }
     }
     return cs == DSP_CODEC_OK ? DSP_STORAGE_OK : dsp_storage_from_codec(cs);
 }
 
-/* Iterates over all data keys (everything except the marker). */
-#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 2)
+/* Data keys (everything except the marker), in this order: h00..h31, sched, config, time.
+ * Layout v1 has the first DATA_KEYS_V1 of them. */
+#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 3)
+#define DATA_KEYS_V1 (DSP_STORAGE_HISTORY_SLOTS + 2)
+#define TIME_KEY_INDEX (DATA_KEYS - 1)
 
 static void data_key(size_t i, char key[8], key_kind_t *kind)
 {
@@ -160,15 +181,18 @@ static void data_key(size_t i, char key[8], key_kind_t *kind)
     } else if (i == DSP_STORAGE_HISTORY_SLOTS) {
         strcpy(key, KEY_SCHED);
         *kind = KEY_SET;
-    } else {
+    } else if (i == DSP_STORAGE_HISTORY_SLOTS + 1) {
         strcpy(key, KEY_CONFIG);
         *kind = KEY_CONFIG_REC;
+    } else {
+        strcpy(key, KEY_TIME);
+        *kind = KEY_TIME_REC;
     }
 }
 
-static dsp_storage_status_t verify_all(dsp_storage_t *st)
+static dsp_storage_status_t verify_keys(dsp_storage_t *st, size_t n_keys)
 {
-    for (size_t i = 0; i < DATA_KEYS; i++) {
+    for (size_t i = 0; i < n_keys; i++) {
         char key[8];
         key_kind_t kind;
         data_key(i, key, &kind);
@@ -182,6 +206,15 @@ static dsp_storage_status_t verify_all(dsp_storage_t *st)
         if (s != DSP_STORAGE_OK) {
             return s;
         }
+    }
+    return DSP_STORAGE_OK;
+}
+
+static dsp_storage_status_t verify_all(dsp_storage_t *st)
+{
+    dsp_storage_status_t ks = verify_keys(st, DATA_KEYS);
+    if (ks != DSP_STORAGE_OK) {
+        return ks;
     }
     /* Whole-history validation (corrupted records, duplicate schedule IDs). */
     dsp_history_store_t hs;
@@ -242,12 +275,59 @@ static dsp_storage_status_t provision(dsp_storage_t *st, bool allow)
             return s;
         }
     }
-    size_t len = dsp_codec_encode_layout(&LAYOUT_V1, st->buf, sizeof st->buf);
+    size_t len = dsp_codec_encode_layout(&LAYOUT_CURRENT, st->buf, sizeof st->buf);
     dsp_storage_status_t s = raw_put(st, KEY_LAYOUT, len); /* marker LAST */
     if (s != DSP_STORAGE_OK) {
         return s;
     }
     st->provisioned_now = true;
+    return verify_all(st);
+}
+
+/* Layout v1 (M1.3) -> v2: validate the v1 keys, provision "time" (unless an interrupted
+ * migration already wrote its provisioning value), then rewrite the marker as v2 LAST.
+ * A "time" key with real data next to a v1 marker is inconsistent: CORRUPT. */
+static dsp_storage_status_t migrate_v1(dsp_storage_t *st, bool allow)
+{
+    dsp_storage_status_t s = verify_keys(st, DATA_KEYS_V1);
+    if (s != DSP_STORAGE_OK) {
+        return s;
+    }
+    char key[8];
+    key_kind_t kind;
+    data_key(TIME_KEY_INDEX, key, &kind);
+    size_t len = 0;
+    dsp_kv_status_t ks = st->kv->get(st->kv->ctx, key, st->readback, DSP_RECORD_MAX_BYTES, &len);
+    bool missing = ks == DSP_KV_NOT_FOUND;
+    if (!missing) {
+        if (ks != DSP_KV_OK) {
+            return from_kv_read(ks);
+        }
+        bool pristine;
+        s = check_value(st, kind, st->readback, len, &pristine);
+        if (s != DSP_STORAGE_OK) {
+            return s;
+        }
+        if (!pristine) {
+            return DSP_STORAGE_ERR_CORRUPT;
+        }
+    }
+    if (!allow) {
+        return DSP_STORAGE_ERR_MIGRATION_REQUIRED;
+    }
+    if (missing) {
+        len = encode_pristine(st, kind);
+        s = len == 0 ? DSP_STORAGE_ERR_ARG : raw_put(st, key, len);
+        if (s != DSP_STORAGE_OK) {
+            return s;
+        }
+    }
+    len = dsp_codec_encode_layout(&LAYOUT_CURRENT, st->buf, sizeof st->buf);
+    s = raw_put(st, KEY_LAYOUT, len); /* marker LAST */
+    if (s != DSP_STORAGE_OK) {
+        return s;
+    }
+    st->migrated_now = true;
     return verify_all(st);
 }
 
@@ -259,6 +339,7 @@ dsp_storage_status_t dsp_storage_open(dsp_storage_t *st, const dsp_kv_t *kv, con
     }
     st->open = false;
     st->provisioned_now = false;
+    st->migrated_now = false;
     if (kv == NULL || kv->get == NULL || kv->set == NULL || kv->commit == NULL ||
         !dsp_tz_is_valid(tz)) {
         return DSP_STORAGE_ERR_ARG;
@@ -278,11 +359,14 @@ dsp_storage_status_t dsp_storage_open(dsp_storage_t *st, const dsp_kv_t *kv, con
         dsp_codec_status_t cs = dsp_codec_decode_layout(st->readback, len, &layout);
         if (cs != DSP_CODEC_OK) {
             s = dsp_storage_from_codec(cs);
-        } else if (layout.layout_version != LAYOUT_V1.layout_version ||
-                   layout.history_slots != LAYOUT_V1.history_slots ||
-                   layout.schedule_capacity != LAYOUT_V1.schedule_capacity ||
-                   layout.tombstone_capacity != LAYOUT_V1.tombstone_capacity) {
+        } else if ((layout.layout_version != LAYOUT_CURRENT.layout_version &&
+                    layout.layout_version != LAYOUT_V1_VERSION) ||
+                   layout.history_slots != LAYOUT_CURRENT.history_slots ||
+                   layout.schedule_capacity != LAYOUT_CURRENT.schedule_capacity ||
+                   layout.tombstone_capacity != LAYOUT_CURRENT.tombstone_capacity) {
             s = DSP_STORAGE_ERR_UNSUPPORTED;
+        } else if (layout.layout_version == LAYOUT_V1_VERSION) {
+            s = migrate_v1(st, allow_provision);
         } else {
             s = verify_all(st);
         }
@@ -386,4 +470,35 @@ dsp_storage_status_t dsp_storage_save_config(dsp_storage_t *st, const dsp_config
         return DSP_STORAGE_ERR_INVALID;
     }
     return dsp_storage_put(st, KEY_CONFIG, len);
+}
+
+/* ---- Time metadata (layout v2) ----------------------------------------------------- */
+
+dsp_storage_status_t dsp_storage_load_time(dsp_storage_t *st, dsp_time_meta_t *out)
+{
+    if (out == NULL) {
+        return DSP_STORAGE_ERR_ARG;
+    }
+    size_t len;
+    dsp_storage_status_t s = dsp_storage_get(st, KEY_TIME, &len);
+    if (s != DSP_STORAGE_OK) {
+        return s;
+    }
+    dsp_codec_status_t cs = dsp_codec_decode_time(st->buf, len, out);
+    return cs == DSP_CODEC_OK ? DSP_STORAGE_OK : dsp_storage_from_codec(cs);
+}
+
+dsp_storage_status_t dsp_storage_save_time(dsp_storage_t *st, const dsp_time_meta_t *meta)
+{
+    if (meta == NULL) {
+        return DSP_STORAGE_ERR_ARG;
+    }
+    if (st == NULL || !st->open) {
+        return DSP_STORAGE_ERR_NOT_OPEN;
+    }
+    size_t len = dsp_codec_encode_time(meta, st->buf, sizeof st->buf);
+    if (len == 0) {
+        return DSP_STORAGE_ERR_INVALID;
+    }
+    return dsp_storage_put(st, KEY_TIME, len);
 }

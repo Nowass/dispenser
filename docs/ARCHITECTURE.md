@@ -48,7 +48,7 @@ With no measured liquid flow and no transactional actuator, truly *exactly-once*
 
 - An automatic occurrence may run only while `scheduled ≤ now ≤ scheduled + 10 min` (due window, configurable) and only with a valid clock; later it is `MISSED` and never caught up.
 - A claim is a durable `STARTED` record (write, commit, read-back) **before** the pump is authorized; any storage failure means no pump. Records in any state (`STARTED`, `COMPLETED`, `FAILED`, `INTERRUPTED`) block re-execution; nothing is retried automatically. At boot, leftover `STARTED` records become `INTERRUPTED`.
-- History = **one watermark record per schedule ID** (last claimed local date), **32 slots by default** (approved). It blocks that date and all earlier dates, also after a backward clock correction while the record exists. Records of other schedules may be reused (oldest first, only when full) once their date is more than **7 days** old. This is safe because such occurrences are missed anyway, **assuming the valid clock never moves back more than 7 days**. That is an assumption to be enforced by the future clock service (M1.4 Time Management), not a guarantee of M1.2 (see `firmware/README.md`, "Backward clock adjustments"). With no free or reusable slot, a new schedule's claim is refused without touching storage. Any corrupted record or duplicate schedule ID anywhere in the history blocks automatic dosing (approved).
+- History = **one watermark record per schedule ID** (last claimed local date), **32 slots by default** (approved). It blocks that date and all earlier dates, also after a backward clock correction while the record exists. Records of other schedules may be reused (oldest first, only when full) once their date is more than **7 days** old. This is safe because such occurrences are missed anyway, **assuming the valid clock never moves back more than 7 days**. Since M1.4 this assumption is enforced: a sync moving the clock back more than 7 days holds automatic dosing until the clock reaches high water − 7 days (see `firmware/README.md`, "Backward clock adjustments"). With no free or reusable slot, a new schedule's claim is refused without touching storage. Any corrupted record or duplicate schedule ID anywhere in the history blocks automatic dosing (approved).
 - **Single owner:** the future dosing service task owns the coordinator and the history store and serializes all automatic and manual requests. Storage must replace one record atomically and durably; no multi-record atomicity is assumed.
 - Manual doses are separate: they never read, write or clear automatic history.
 - Schedule IDs: Android-generated UUIDs are preferred for schedule management (approved), never reused. A newly created schedule (new ID) may dose on the same day as a deleted one (approved).
@@ -228,6 +228,29 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - Endpoint should be minimal and credential-scoped per device; send immutable `event_id` and no sensitive personal data beyond what is necessary.
 - No periodic heartbeat or status email per user decision. A time-sync-only connection remains allowed at infrequent configurable cadence.
 - Failed alerts cannot cause an infinite Wi-Fi retry loop; preserve pending status until a bounded future retry opportunity or BLE maintenance.
+
+### Time management (firmware M1.4, implemented and host-tested; not run on hardware)
+
+- **Clock trust (approved: evidence-based, no expiry).**
+  - `UNKNOWN` (no automatic dosing): never synced; time base lost (power-on/brownout reset or missing RTC continuity marker); implausible time; or a clock earlier than the last accepted sync.
+  - `SYNCED`, and `HOLDOVER` (sync overdue) are both trusted, with **no time limit**. Ordinary Wi-Fi or NTP outages never stop dosing.
+  - A stored timestamp is never proof of the current time.
+- **Corrections (approved: hold only beyond 7 days).** Accepted NTP time is applied as an immediate step.
+  - A forward step over 10 minutes raises a persisted, monotonic dosing floor (`time.not_before_utc` → `dsp_clock_t.not_before`): every occurrence at or before the step instant is missed, also after restarts, power loss and later corrections, so a slow RTC cannot cause a second dose right after the correction.
+  - A backward step ≤ 7 days is protected by the M1.2 watermark.
+  - A backward step > 7 days holds automatic dosing until high water − 7 days (persisted; lifted by a later sync).
+  - An initial sync (previous clock untrusted: first boot, power loss, lost continuity) raises the floor to max(floor, synchronized time + 1 s). Approved: a missed dose is preferable to a possible extra one.
+  - Results before 2025 or after 2099 are rejected.
+- **Durable before effective.** An accepted time is applied (clock step, continuity marker) only after the new metadata is confirmed in NVS. A failed write means nothing is applied: trust unchanged, retry later.
+- **Sync policy.** Every 24 h by default (24–48 h configurable).
+  - Wi-Fi only for the bounded session: at most 5 attempts of at most 60 s each; an authentication failure is not retried.
+  - SNTP with a bounded wait.
+  - Backoff after failure: 15 min to 6 h while untrusted, 1 h up to the interval while trusted.
+  - The ESP-IDF `sntp_sync_time()` hook is overridden, so SNTP never sets the clock without a domain decision.
+- **Wi-Fi credentials (approved: interface only).** A provider interface with an explicit "unavailable" result; no credentials exist until BLE provisioning. The driver keeps them in RAM (`WIFI_STORAGE_RAM`), and they are never logged. A connected session can be shared with future HTTPS notifications.
+- **Persistent time metadata (approved: storage layout v2).** A `time` record holds last sync, high-water time, rollback hold and last correction. It is written only when it changes (≤ once per interval). Layout v1 is migrated by adding the key and rewriting the marker last.
+- **Wake planning.** `dsp_wake_plan()` picks the earliest of dose, sync, notification and other, as a relative sleep duration. No timing guarantee until RTC drift and wake latency are measured.
+- **Flash budget.** Linking Wi-Fi brings the image to about 824 KiB (20 % of the 1 MB app partition left), so the OTA partition recommendation is needed before BLE/TLS.
 
 ## Dependency boundaries and test doubles
 

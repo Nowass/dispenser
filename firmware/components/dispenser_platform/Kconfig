@@ -1,0 +1,10 @@
+menu "Dispenser V2 platform"
+
+config DSP_SNTP_SERVER
+    string "SNTP server"
+    default "pool.ntp.org"
+    help
+        NTP server used for time synchronization (UTC). One server; the
+        domain decides whether a received time is accepted.
+
+endmenu

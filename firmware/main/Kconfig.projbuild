@@ -14,4 +14,17 @@ config DSP_STORAGE_SMOKE_TEST
         option cannot prevent that. Off by default; no dosing or hardware
         activity.
 
+config DSP_TIME_SYNC_DIAGNOSTIC
+    bool "Time-management diagnostic at boot (no Wi-Fi without credentials)"
+    default n
+    help
+        Evaluates clock trust from the reset reason and the RTC-retained marker,
+        then runs one forced time-sync session with the "no credentials"
+        provider. Because Wi-Fi credentials are not provisioned yet (BLE
+        provisioning is a later milestone), Wi-Fi is never started and no
+        network activity happens; the session reports "credentials
+        unavailable". Does not read or write NVS, dose or touch GPIO.
+        Purpose: build/link verification of the Wi-Fi, SNTP and clock
+        adapters. Off by default.
+
 endmenu

@@ -65,6 +65,9 @@ static dsp_exec_status_t precheck(const dsp_exec_t *ex, const dsp_schedule_t *s,
     if (clock.now - occ->at > (dsp_utc_t)ex->cfg.due_window_s) {
         return DSP_EXEC_MISSED;
     }
+    if (clock.not_before != 0 && occ->at < clock.not_before) {
+        return DSP_EXEC_MISSED; /* jumped over by a forward clock correction (M1.4) */
+    }
     if (ex->active.kind != DSP_EXEC_KIND_NONE) {
         return DSP_EXEC_BUSY;
     }

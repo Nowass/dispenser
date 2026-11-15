@@ -9,6 +9,7 @@
  *   "h00".."h31"    execution history slots (M1.2 record or explicit EMPTY record)
  *   "sched"         the whole schedule set (one atomic record)
  *   "config"        device configuration
+ *   "time"          time metadata (layout v2, M1.4)
  *
  * Explicit presence (approved 2026-11-15): every key exists once provisioned and keys are
  * never deleted. Because ESP-IDF NVS drops items that fail its CRC checks, a missing key
@@ -28,12 +29,13 @@
 #include "dsp_history.h"
 #include "dsp_kv.h"
 #include "dsp_time.h"
+#include "dsp_time_meta.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define DSP_STORAGE_LAYOUT_VERSION 1
+#define DSP_STORAGE_LAYOUT_VERSION 2 /* v1 (M1.3) is migrated: "time" added, marker last */
 #define DSP_STORAGE_HISTORY_SLOTS DSP_HISTORY_DEFAULT_SLOTS /* 32, fixed in layout v1 */
 
 typedef enum {
@@ -55,6 +57,7 @@ typedef enum {
     DSP_STORAGE_ERR_ID_REUSED,       /* ID of a deleted / previously executed schedule */
     DSP_STORAGE_ERR_CAPACITY,        /* schedule capacity reached */
     DSP_STORAGE_ERR_RELOAD_REQUIRED, /* a write failed; durable state unknown until reload */
+    DSP_STORAGE_ERR_MIGRATION_REQUIRED, /* layout v1 found and writes not allowed */
 } dsp_storage_status_t;
 
 /* Caller-owned storage context (about 8 KB: two record buffers and one decoded schedule
@@ -64,6 +67,7 @@ typedef struct {
     const dsp_tz_t *tz;
     bool open;
     bool provisioned_now; /* this open() provisioned a fresh storage */
+    bool migrated_now;    /* this open() migrated layout v1 to v2 */
     uint8_t buf[DSP_RECORD_MAX_BYTES];
     uint8_t readback[DSP_RECORD_MAX_BYTES];
     dsp_schedule_set_t set_scratch;
@@ -71,6 +75,8 @@ typedef struct {
 
 /*
  * Opens the layout.
+ *  - Marker v1 (M1.3): migrated to v2 if allow_provision ("time" provisioned, marker
+ *    rewritten last; resumable), otherwise DSP_STORAGE_ERR_MIGRATION_REQUIRED.
  *  - Marker present and supported: every key is read and validated (history also through
  *    dsp_history_scan). Any missing or malformed key -> DSP_STORAGE_ERR_CORRUPT; a newer
  *    format -> DSP_STORAGE_ERR_UNSUPPORTED. Nothing is modified.
@@ -94,6 +100,11 @@ dsp_storage_status_t dsp_storage_load_config(dsp_storage_t *st, dsp_config_t *ou
 
 /* Validates cfg, requires cfg->revision == stored revision + 1, writes and confirms. */
 dsp_storage_status_t dsp_storage_save_config(dsp_storage_t *st, const dsp_config_t *cfg);
+
+/* Time metadata (M1.4). save validates and writes only the given record (caller writes
+ * only when the metadata changed, to limit flash wear). */
+dsp_storage_status_t dsp_storage_load_time(dsp_storage_t *st, dsp_time_meta_t *out);
+dsp_storage_status_t dsp_storage_save_time(dsp_storage_t *st, const dsp_time_meta_t *meta);
 
 /* ---- Internal helpers shared with the schedule repository ------------------------- */
 

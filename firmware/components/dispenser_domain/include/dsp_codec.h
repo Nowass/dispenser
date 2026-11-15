@@ -22,6 +22,7 @@
 #include "dsp_history.h"
 #include "dsp_schedule_set.h"
 #include "dsp_time.h"
+#include "dsp_time_meta.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -32,6 +33,7 @@ enum {
     DSP_REC_TYPE_HISTORY = 2,
     DSP_REC_TYPE_SCHEDULE_SET = 3,
     DSP_REC_TYPE_CONFIG = 4,
+    DSP_REC_TYPE_TIME = 5, /* layout v2 (M1.4) */
 };
 
 #define DSP_CODEC_VERSION 1 /* format version written by this firmware for every type */
@@ -45,6 +47,7 @@ enum {
     (DSP_SCHEDULE_SET_HEADER_BYTES + DSP_SCHEDULE_CAPACITY * DSP_SCHEDULE_ENTRY_BYTES +      \
      DSP_TOMBSTONE_CAPACITY * DSP_TOMBSTONE_ENTRY_BYTES)
 #define DSP_CONFIG_RECORD_BYTES 18
+#define DSP_TIME_RECORD_BYTES 42
 #define DSP_RECORD_MAX_BYTES DSP_SCHEDULE_SET_MAX_BYTES
 
 typedef enum {
@@ -83,6 +86,11 @@ dsp_codec_status_t dsp_codec_decode_schedule_set(const uint8_t *buf, size_t len,
 
 size_t dsp_codec_encode_config(const dsp_config_t *cfg, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_config(const uint8_t *buf, size_t len, dsp_config_t *out);
+
+/* time (42 B): 0 type | 1 version | 2..9 last_sync | 10..17 high_water | 18..25 hold_until |
+ * 26..33 last_correction | 34..41 not_before (all i64). */
+size_t dsp_codec_encode_time(const dsp_time_meta_t *meta, uint8_t *buf, size_t cap);
+dsp_codec_status_t dsp_codec_decode_time(const uint8_t *buf, size_t len, dsp_time_meta_t *out);
 
 #ifdef __cplusplus
 }

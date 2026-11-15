@@ -398,3 +398,42 @@ dsp_codec_status_t dsp_codec_decode_config(const uint8_t *buf, size_t len, dsp_c
     *out = cfg;
     return DSP_CODEC_OK;
 }
+
+/* ---- Time metadata ------------------------------------------------------------------ */
+
+size_t dsp_codec_encode_time(const dsp_time_meta_t *meta, uint8_t *buf, size_t cap)
+{
+    if (meta == NULL || buf == NULL || cap < DSP_TIME_RECORD_BYTES || !dsp_time_meta_is_valid(meta)) {
+        return 0;
+    }
+    buf[0] = DSP_REC_TYPE_TIME;
+    buf[1] = DSP_CODEC_VERSION;
+    put_i64(buf + 2, meta->last_sync_utc);
+    put_i64(buf + 10, meta->high_water_utc);
+    put_i64(buf + 18, meta->hold_until_utc);
+    put_i64(buf + 26, meta->last_correction_s);
+    put_i64(buf + 34, meta->not_before_utc);
+    return DSP_TIME_RECORD_BYTES;
+}
+
+dsp_codec_status_t dsp_codec_decode_time(const uint8_t *buf, size_t len, dsp_time_meta_t *out)
+{
+    dsp_codec_status_t st = check_header(buf, len, DSP_REC_TYPE_TIME);
+    if (st != DSP_CODEC_OK) {
+        return st;
+    }
+    if (len != DSP_TIME_RECORD_BYTES || out == NULL) {
+        return DSP_CODEC_ERR_SIZE;
+    }
+    dsp_time_meta_t m;
+    m.last_sync_utc = get_i64(buf + 2);
+    m.high_water_utc = get_i64(buf + 10);
+    m.hold_until_utc = get_i64(buf + 18);
+    m.last_correction_s = get_i64(buf + 26);
+    m.not_before_utc = get_i64(buf + 34);
+    if (!dsp_time_meta_is_valid(&m)) {
+        return DSP_CODEC_ERR_FIELD;
+    }
+    *out = m;
+    return DSP_CODEC_OK;
+}

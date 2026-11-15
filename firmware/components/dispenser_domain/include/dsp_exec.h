@@ -62,6 +62,10 @@ typedef struct {
 typedef struct {
     dsp_utc_t now;
     bool valid;
+    /* M1.4: occurrences scheduled before this instant are MISSED (0 = no floor). Set after
+     * a large forward clock correction so that occurrences jumped over are never executed,
+     * even when they still fall inside the due window of the corrected clock. */
+    dsp_utc_t not_before;
 } dsp_clock_t;
 
 enum {

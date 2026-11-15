@@ -48,13 +48,13 @@
 
 | ID | Requirement / default |
 | --- | --- |
-| FR-030 | Timer wake for scheduled doses. GPIO wake for manual BLE maintenance. Radio remains off in deep sleep. |
-| FR-031 | Maintain UTC internal time with Europe/Prague timezone conversion for schedules/UI. Record clock-validity and last sync source/time. |
-| FR-032 | SNTP over Wi-Fi at configurable infrequent intervals; synchronize from Android time over BLE as a fallback. |
-| FR-033 | After total power loss, do not assume clock is valid. **CONFIRMED (M1.2 brief, 2026-11-15):** clock validity must be established before automatic dosing is permitted (the M1.2 coordinator refuses automatic execution without a valid clock). How validity is recovered (SNTP or Android) is still `PROPOSED`. |
+| FR-030 | Timer wake for scheduled doses. GPIO wake for manual BLE maintenance. Radio remains off in deep sleep. Firmware M1.4: next-wakeup calculation (`dsp_wake_plan`) implemented and host-tested; the deep-sleep lifecycle and GPIO wake are later milestones. |
+| FR-031 | Maintain UTC internal time with Europe/Prague timezone conversion for schedules/UI. Record clock-validity and last sync source/time. **Firmware M1.4 (approved 2026-11-15):** evidence-based clock trust (UNKNOWN / SYNCED / HOLDOVER without expiry); last sync, high-water time, rollback hold and last correction persisted in the `time` record (storage layout v2). |
+| FR-032 | SNTP over Wi-Fi at configurable infrequent intervals; synchronize from Android time over BLE as a fallback. **CONFIRMED (M1.4 brief, 2026-11-15):** interval 24 h by default, configurable 24–48 h; Wi-Fi only during a bounded sync session; BLE is never required for regular synchronization or dosing. Implemented in the firmware domain plus ESP-IDF adapters (not yet run on a real network). The Android/BLE time fallback is still future work. Correction policy (approved): immediate step; forward steps over 10 min skip jumped-over occurrences; backward steps over 7 days hold automatic dosing until high water − 7 days. |
+| FR-033 | After total power loss, do not assume clock is valid. **CONFIRMED (M1.2 brief, 2026-11-15):** clock validity must be established before automatic dosing is permitted (the M1.2 coordinator refuses automatic execution without a valid clock). Firmware M1.4: validity is recovered by an accepted SNTP synchronization (implemented, host-tested); recovery through Android/BLE is still `PROPOSED`. After a power-on reset the stored last-sync time is never used as the current time. **CONFIRMED (M1.4 review, 2026-11-15):** at every initial synchronization (previous clock untrusted) the persistent dosing floor is raised to max(floor, synchronized time + 1 s), so occurrences scheduled at or before re-establishing time are never executed (a missed dose is preferable to a possible extra one). |
 | FR-034 | BLE communication with authenticated access to all mutation commands. UUIDs, versioned schema, log paging and timeout defined in separate protocol document. |
 | FR-035 | Event notification: ESP sends signed/authenticated HTTPS event to a minimal endpoint that sends an email. Event IDs must be deduplicated at source and receiver. Credentials never logged. |
-| FR-036 | Failed Wi-Fi connection never blocks core dosing; short connection timeout and bounded retries. No infinite retry loops. |
+| FR-036 | Failed Wi-Fi connection never blocks core dosing; short connection timeout and bounded retries. No infinite retry loops. Firmware M1.4: at most 5 attempts of at most 60 s per session (default 3 × 15 s), authentication failures not retried, exponential backoff between sessions; failures never change clock trust. |
 
 ### Logging and safety
 
