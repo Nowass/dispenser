@@ -1,5 +1,7 @@
 package cz.nowass.dispenser.data
 
+import cz.nowass.dispenser.data.backup.RawSimulationRows
+import cz.nowass.dispenser.data.local.simulation.SimulationEntityMapper
 import cz.nowass.dispenser.domain.simulation.HistoryEvent
 import cz.nowass.dispenser.domain.simulation.SimulationState
 import kotlinx.coroutines.flow.Flow
@@ -26,6 +28,21 @@ interface SimulationStore {
 
     /** Reset: removes simulation state and history only. */
     suspend fun clear()
+
+    /**
+     * Atomically ends the active run (state and processed occurrences) while keeping the
+     * history (backup restore with changed schedules, R2). A new run needs an explicit start.
+     */
+    suspend fun deactivate()
+
+    /** Atomically replaces state (null = inactive), processed set and history (backup restore). */
+    suspend fun replaceAll(state: SimulationState?, history: List<HistoryEvent>)
+
+    /** Exact copy of the stored tables for the pre-restore safety snapshot. */
+    suspend fun captureRaw(): RawSimulationRows
+
+    /** Atomically restores an exact copy taken by [captureRaw] (rollback). */
+    suspend fun restoreRaw(rows: RawSimulationRows)
 }
 
 class InMemorySimulationStore(
@@ -47,5 +64,29 @@ class InMemorySimulationStore(
 
     override suspend fun clear() {
         data.value = Data(null, emptyList())
+    }
+
+    override suspend fun deactivate() {
+        data.update { it.copy(state = null) }
+    }
+
+    override suspend fun replaceAll(state: SimulationState?, history: List<HistoryEvent>) {
+        data.value = Data(state, history.sortedBy { it.seq })
+    }
+
+    override suspend fun captureRaw(): RawSimulationRows {
+        val d = data.value
+        return RawSimulationRows(
+            state = listOfNotNull(d.state).map { SimulationEntityMapper.rawState(SimulationEntityMapper.toEntity(it)) },
+            processed = d.state?.let(SimulationEntityMapper::processedOf).orEmpty().map(SimulationEntityMapper::rawProcessed),
+            events = d.history.map { SimulationEntityMapper.rawEvent(SimulationEntityMapper.toEntity(it)) },
+        )
+    }
+
+    override suspend fun restoreRaw(rows: RawSimulationRows) {
+        val processed = rows.processed.map(SimulationEntityMapper::processedFromRaw)
+        val state = rows.state.singleOrNull()?.let { SimulationEntityMapper.toDomain(SimulationEntityMapper.stateFromRaw(it), processed) }
+        val events = rows.events.map { SimulationEntityMapper.toDomain(SimulationEntityMapper.eventFromRaw(it)) }
+        data.value = Data(state, events)
     }
 }

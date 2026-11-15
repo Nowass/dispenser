@@ -26,6 +26,24 @@ class AppContainerTest {
     fun wipe() {
         context.deleteDatabase(DispenserDatabase.FILE_NAME)
         context.deleteDatabase(cz.nowass.dispenser.data.local.simulation.SimulationDatabase.FILE_NAME)
+        java.io.File(context.filesDir, cz.nowass.dispenser.data.backup.DirectoryRestoreFiles.DIRECTORY).deleteRecursively()
+    }
+
+    /** R1 gate: with a pending restore journal no store may be used until recovery finished. */
+    @Test
+    fun pendingRestoreJournal_blocksStoreAccessUntilRecovered() = runBlocking<Unit> {
+        val dir = java.io.File(context.filesDir, cz.nowass.dispenser.data.backup.DirectoryRestoreFiles.DIRECTORY).apply { mkdirs() }
+        java.io.File(dir, cz.nowass.dispenser.data.backup.DirectoryRestoreFiles.JOURNAL_FILE)
+            .writeBytes(cz.nowass.dispenser.data.backup.SafetySnapshotCodec.encodeJournal("missing"))
+        val container = AppContainer(context)
+        org.junit.Assert.assertEquals(cz.nowass.dispenser.data.backup.StorageState.Recovering, container.backup.state.value)
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) { container.repository }
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) { container.simulation }
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) { container.appSettings }
+        // Snapshot missing: recovery fails safely and access stays blocked.
+        val blocked = container.backup.recoverAtStartup()
+        assertTrue(blocked is cz.nowass.dispenser.data.backup.StorageState.Blocked)
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) { container.repository }
     }
 
     @Test

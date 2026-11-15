@@ -19,6 +19,7 @@ milníky; nejde o publikovaná vydání. Při prvním vydání se přesunou pod 
 - Simulace dávkování se simulovaným časem, výpadkem zařízení a resetem; odhad zásobníku, blokace při nedostatku, doplnění a výhled zásoby; historie událostí (A1.3).
 - Nastavení s názvem akvária, ikona aplikace a úvodní obrazovka (A1.4a).
 - Obrazovka O aplikaci, Co je nového, licence knihoven třetích stran a kontrola aktualizací přes GitHub Releases (A1.4b).
+- Záloha a obnovení konfigurace (rozvrhy a název akvária, volitelně simulace a historie) do souboru JSON přes systémový výběr souborů; obnovení s potvrzením, kontrolou souboru a bezpečným návratem při chybě (A1.4c.1).
 
 ### Změněno
 - Ruční uložení v editoru je zakázané, dokud formulář obsahuje chyby nebo se nezměnil.

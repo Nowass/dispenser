@@ -6,7 +6,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cz.nowass.dispenser.ui.DispenserApp
+import cz.nowass.dispenser.ui.StorageGate
+import cz.nowass.dispenser.ui.backup.BackupViewModel
 import cz.nowass.dispenser.ui.theme.DispenserTheme
 
 class MainActivity : ComponentActivity() {
@@ -18,18 +22,28 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         val container = (application as DispenserApplication).container
+        // Roll back an interrupted restore (if any) before anything touches the stores (R1).
+        container.startStorageRecovery()
         setContent {
             DispenserTheme {
-                DispenserApp(
-                    repository = container.repository,
-                    simulation = container.simulation,
-                    appSettings = container.appSettings,
-                    appVersion = container.appVersion,
-                    isDemo = container.isDemo,
-                    updateChecker = container.updateChecker,
-                    assets = container.assets,
-                    sourceCodeUrl = container.sourceCodeUrl,
-                )
+                val storage by container.backup.state.collectAsStateWithLifecycle()
+                StorageGate(
+                    state = storage,
+                    onRetry = container::startStorageRecovery,
+                    onAcknowledgeNotice = container.backup::acknowledgeNotice,
+                ) {
+                    DispenserApp(
+                        repository = container.repository,
+                        simulation = container.simulation,
+                        appSettings = container.appSettings,
+                        appVersion = container.appVersion,
+                        isDemo = container.isDemo,
+                        updateChecker = container.updateChecker,
+                        assets = container.assets,
+                        sourceCodeUrl = container.sourceCodeUrl,
+                        backupViewModelFactory = BackupViewModel.factory(container.backup, container.documents, container.clock),
+                    )
+                }
             }
         }
     }

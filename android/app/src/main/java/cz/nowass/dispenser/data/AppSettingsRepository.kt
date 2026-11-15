@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 /**
@@ -20,6 +21,12 @@ interface AppSettingsRepository {
 
     /** Stores a normalized name; null or blank restores the default. */
     suspend fun setDisplayName(name: String?)
+
+    /** Stored display-name value exactly as persisted (safety snapshot before a restore). */
+    suspend fun captureRaw(): String?
+
+    /** Writes back a value taken by [captureRaw], unchanged (rollback). */
+    suspend fun restoreRaw(value: String?)
 }
 
 /** Validation and normalization of the display name. */
@@ -54,6 +61,12 @@ class DataStoreAppSettingsRepository(private val dataStore: DataStore<Preference
         }
     }
 
+    override suspend fun captureRaw(): String? = dataStore.data.first()[KEY_DISPLAY_NAME]
+
+    override suspend fun restoreRaw(value: String?) {
+        dataStore.edit { prefs -> if (value == null) prefs.remove(KEY_DISPLAY_NAME) else prefs[KEY_DISPLAY_NAME] = value }
+    }
+
     companion object {
         const val FILE_NAME = "app_settings"
         private val KEY_DISPLAY_NAME = stringPreferencesKey("display_name")
@@ -68,6 +81,8 @@ class InMemoryAppSettingsRepository(initialName: String? = null) : AppSettingsRe
         require(DisplayNameRules.validate(name) == null) { "display name too long" }
         this.name.value = DisplayNameRules.normalize(name)
     }
+    override suspend fun captureRaw(): String? = name.value
+    override suspend fun restoreRaw(value: String?) { name.value = value }
 }
 
 /** Installed app version, shown in Settings. */

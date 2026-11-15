@@ -72,8 +72,11 @@ class SimulationEngine(
     private val zone: ZoneId = DEFAULT_ZONE,
 ) {
 
-    /** Starts a new run at [at] with the given reservoir (D8: capacity > 0). */
-    fun start(runId: String, at: Instant, capacityUl: Long, remainingUl: Long): SimulationResult {
+    /**
+     * Starts a new run at [at] with the given reservoir (D8: capacity > 0). [firstSeq] continues
+     * the sequence after history kept from an earlier run (deactivated by a backup restore).
+     */
+    fun start(runId: String, at: Instant, capacityUl: Long, remainingUl: Long, firstSeq: Long = 1): SimulationResult {
         if (capacityUl !in 1..Volume.MAX_MICROLITRES) return SimulationResult.Rejected(RejectReason.INVALID_CAPACITY)
         if (remainingUl !in 0..capacityUl) return SimulationResult.Rejected(RejectReason.INVALID_VOLUME)
         val state = SimulationState(
@@ -81,6 +84,7 @@ class SimulationEngine(
             startedAt = at,
             clock = at,
             reservoir = ReservoirState(capacityUl, remainingUl, updatedAt = at),
+            nextSeq = maxOf(1, firstSeq),
         )
         val events = Events(state)
         val reservoir = events.lowWarningIfNeeded(state.reservoir, at)

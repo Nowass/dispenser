@@ -39,6 +39,10 @@ class CalendarUnreadableTest {
         override suspend fun insert(stored: StoredSchedule) = false
         override suspend fun replace(stored: StoredSchedule, expectedRevision: Int) = StoreWriteOutcome.NOT_FOUND
         override suspend fun delete(id: String, expectedRevision: Int) = StoreWriteOutcome.NOT_FOUND
+        override suspend fun unreadableIds(): Set<String> = emptySet()
+        override suspend fun replaceReadable(schedules: List<StoredSchedule>) = error("not used")
+        override suspend fun captureRaw() = error("not used")
+        override suspend fun restoreRaw(rows: cz.nowass.dispenser.data.backup.RawScheduleRows) = error("not used")
     }
 
     @Test

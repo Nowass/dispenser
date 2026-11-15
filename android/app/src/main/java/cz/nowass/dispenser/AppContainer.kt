@@ -2,6 +2,7 @@ package cz.nowass.dispenser
 
 import android.app.Application
 import android.content.Context
+import android.util.Log
 import androidx.core.content.pm.PackageInfoCompat
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.preferencesDataStoreFile
@@ -14,11 +15,21 @@ import cz.nowass.dispenser.data.update.GitHubReleasesUpdateChecker
 import cz.nowass.dispenser.data.update.UpdateChecker
 import cz.nowass.dispenser.data.SimulationController
 import cz.nowass.dispenser.data.DispenserRepository
+import cz.nowass.dispenser.data.backup.BackupService
+import cz.nowass.dispenser.data.backup.ContentResolverDocumentIo
+import cz.nowass.dispenser.data.backup.DirectoryRestoreFiles
+import cz.nowass.dispenser.data.backup.DocumentIo
+import cz.nowass.dispenser.data.backup.StorageState
 import cz.nowass.dispenser.data.local.DispenserDatabase
 import cz.nowass.dispenser.data.local.RoomScheduleStore
 import cz.nowass.dispenser.data.local.simulation.RoomSimulationStore
 import cz.nowass.dispenser.data.local.simulation.SimulationDatabase
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import java.io.File
 import java.time.Clock
 
 /** Manual dependency container; lives as long as the process. */
@@ -35,25 +46,56 @@ class AppContainer(context: Context) {
     /** Separate simulation database: state + history of simulated runs only. */
     private val simulationDatabase: SimulationDatabase by lazy { SimulationDatabase.build(context) }
 
+    private val scheduleStore: RoomScheduleStore by lazy { RoomScheduleStore(database.scheduleDao(), clock) }
+    private val simulationStore: RoomSimulationStore by lazy { RoomSimulationStore(simulationDatabase.simulationDao()) }
+
     private val localRepository: LocalDispenserRepository by lazy {
-        LocalDispenserRepository(
-            store = RoomScheduleStore(database.scheduleDao(), clock),
-            clock = clock,
-            simulationStore = RoomSimulationStore(simulationDatabase.simulationDao()),
-        )
+        LocalDispenserRepository(store = scheduleStore, clock = clock, simulationStore = simulationStore)
     }
 
-    val repository: DispenserRepository get() = localRepository
-
-    /** DEMO-only simulation controls (Settings); not part of the device contract. */
-    val simulation: SimulationController get() = localRepository.simulation
-
     /** Presentation preferences (display name) in their own DataStore file; no DB involvement. */
-    val appSettings: AppSettingsRepository by lazy {
+    private val settingsRepository: AppSettingsRepository by lazy {
         DataStoreAppSettingsRepository(
             PreferenceDataStoreFactory.create { context.applicationContext.preferencesDataStoreFile(DataStoreAppSettingsRepository.FILE_NAME) },
         )
     }
+
+    /**
+     * Configuration backup / restore (A1.4c.1). Owns the startup gate: while a pending restore is
+     * being rolled back (or recovery failed), [repository], [simulation] and [appSettings] refuse access.
+     */
+    val backup: BackupService by lazy {
+        BackupService(
+            schedules = scheduleStore,
+            simulation = simulationStore,
+            settings = settingsRepository,
+            files = DirectoryRestoreFiles(File(context.filesDir, DirectoryRestoreFiles.DIRECTORY)),
+            access = localRepository,
+            clock = clock,
+            appVersion = { "${appVersion.name} (${appVersion.code})" },
+            log = { Log.w("Backup", it) },
+        )
+    }
+
+    /** System document picker access for backup files (no storage permission). */
+    val documents: DocumentIo by lazy { ContentResolverDocumentIo(context.applicationContext.contentResolver) }
+
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** Runs startup recovery once per process (no-op without a restore journal). */
+    fun startStorageRecovery() {
+        if (backup.state.value !is StorageState.Ready) appScope.launch { backup.recoverAtStartup() }
+    }
+
+    private fun requireStorageReady() =
+        check(backup.state.value is StorageState.Ready) { "Local storage not ready (pending restore recovery)" }
+
+    val repository: DispenserRepository get() = localRepository.also { requireStorageReady() }
+
+    /** DEMO-only simulation controls (Settings); not part of the device contract. */
+    val simulation: SimulationController get() = localRepository.simulation.also { requireStorageReady() }
+
+    val appSettings: AppSettingsRepository get() = settingsRepository.also { requireStorageReady() }
 
     /** Public GitHub Releases source (owner/repo from gradle.properties via resources; no credentials). */
     private val githubOwner: String by lazy { context.getString(R.string.github_owner) }

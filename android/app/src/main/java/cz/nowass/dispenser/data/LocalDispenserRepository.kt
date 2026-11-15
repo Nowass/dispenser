@@ -1,5 +1,6 @@
 package cz.nowass.dispenser.data
 
+import cz.nowass.dispenser.data.backup.ExclusiveStoreAccess
 import cz.nowass.dispenser.domain.ConnectionState
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
 import cz.nowass.dispenser.domain.DataSource
@@ -49,7 +50,7 @@ class LocalDispenserRepository(
     private val zone: ZoneId = DEFAULT_ZONE,
     simulationEngine: SimulationEngine = SimulationEngine(zone = zone),
     simulationRunIds: () -> String = { UUID.randomUUID().toString() },
-) : DispenserRepository {
+) : DispenserRepository, ExclusiveStoreAccess {
 
     private val writeLock = Mutex()
 
@@ -131,6 +132,13 @@ class LocalDispenserRepository(
                 StoreWriteOutcome.NOT_FOUND -> ScheduleWriteResult.NotFound
             }
         }
+
+    /**
+     * Runs [block] with exclusive access to schedules and simulation: no schedule write and no
+     * simulation command can interleave (consistent backup export, all-or-nothing restore).
+     */
+    override suspend fun <T> withExclusiveAccess(block: suspend () -> T): T =
+        writeLock.withLock { simulation.withCommandsPaused(block) }
 
     companion object {
         private const val MAX_ID_ATTEMPTS = 5

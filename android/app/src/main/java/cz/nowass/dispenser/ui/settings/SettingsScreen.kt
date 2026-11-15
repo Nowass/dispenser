@@ -67,6 +67,7 @@ fun SettingsRoute(
     onOpenReservoir: () -> Unit,
     onOpenAbout: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenBackup: (() -> Unit)? = null,
 ) {
     val state by simulationViewModel.uiState.collectAsStateWithLifecycle()
     val message by simulationViewModel.message.collectAsStateWithLifecycle()
@@ -81,6 +82,7 @@ fun SettingsRoute(
             resetName = appViewModel::resetName,
             openReservoir = onOpenReservoir,
             openAbout = onOpenAbout,
+            openBackup = onOpenBackup,
         ),
         actions = SimulationActions(
             start = simulationViewModel::start,
@@ -109,9 +111,12 @@ data class AppSettingsActions(
     val resetName: () -> Unit = {},
     val openReservoir: () -> Unit = {},
     val openAbout: () -> Unit = {},
+    /** Null hides the "Záloha a obnovení" entry. */
+    val openBackup: (() -> Unit)? = null,
 )
 
 const val SETTINGS_ABOUT_ROW_TEST_TAG = "settings_about_row"
+const val SETTINGS_BACKUP_ROW_TEST_TAG = "settings_backup_row"
 
 const val SETTINGS_NAME_ROW_TEST_TAG = "settings_name_row"
 const val SETTINGS_RESERVOIR_ROW_TEST_TAG = "settings_reservoir_row"
@@ -172,6 +177,15 @@ fun SettingsScreen(
                     supportingContent = { Text(ready?.let { stringResource(R.string.settings_version_value, it.version.name, it.version.code.toInt()) } ?: "") },
                     colors = itemColors,
                 )
+                appActions.openBackup?.let { openBackup ->
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    ListItem(
+                        headlineContent = { Text(stringResource(R.string.settings_backup)) },
+                        supportingContent = { Text(stringResource(R.string.settings_backup_hint)) },
+                        colors = itemColors,
+                        modifier = Modifier.testTag(SETTINGS_BACKUP_ROW_TEST_TAG).clickable(onClick = openBackup),
+                    )
+                }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 ListItem(
                     headlineContent = { Text(stringResource(R.string.settings_about)) },

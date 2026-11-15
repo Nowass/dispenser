@@ -107,6 +107,19 @@ const val ABOUT_ROUTE = "about"
 const val ABOUT_CHANGELOG_ROUTE = "about_changelog"
 const val ABOUT_LICENSES_ROUTE = "about_licenses"
 const val ABOUT_LICENSE_TEXT_ROUTE = "about_license_text"
+
+/** Backup and restore (full-screen route, A1.4c.1). */
+const val BACKUP_ROUTE = "backup"
+
+/**
+ * Detail routes that draw their own [cz.nowass.dispenser.ui.components.DetailTopBar]: the shell
+ * then hides its tab header and navigation dock (otherwise two headers would be stacked).
+ */
+internal fun isFullScreenRoute(route: String?): Boolean {
+    val base = route?.substringBefore('?') ?: return false
+    return base in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE, BACKUP_ROUTE) || base.startsWith(ABOUT_ROUTE)
+}
+
 private const val ARG_TITLE = "title"
 private const val ARG_PATH = "path"
 
@@ -120,6 +133,8 @@ fun DispenserApp(
     updateChecker: UpdateChecker,
     assets: AssetTextSource,
     sourceCodeUrl: String?,
+    /** Backup screen dependencies; null hides the entry (previews, tests without storage). */
+    backupViewModelFactory: androidx.lifecycle.ViewModelProvider.Factory? = null,
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -151,10 +166,8 @@ fun DispenserApp(
     val savedMessage = stringResource(R.string.editor_saved_snackbar)
     val deletedMessage = stringResource(R.string.editor_deleted_snackbar)
 
-    // Editor and reservoir detail are full-screen tasks with their own top bar (incl. DEMO badge).
-    val inEditor = currentDestination?.route?.substringBefore('?')?.let {
-        it in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE) || it.startsWith(ABOUT_ROUTE)
-    } == true
+    // Editor, reservoir, About and backup are full-screen tasks with their own top bar (incl. DEMO badge).
+    val inEditor = isFullScreenRoute(currentDestination?.route)
 
     // A1.4a: dashboard header shows the user's aquarium name (default "Moje akvárium").
     val nameFlow = remember(appSettings) { appSettings.displayName }
@@ -229,6 +242,7 @@ fun DispenserApp(
                     appVersion = appVersion,
                     onOpenReservoir = { navController.navigate(RESERVOIR_ROUTE) { launchSingleTop = true } },
                     onOpenAbout = { navController.navigate(ABOUT_ROUTE) { launchSingleTop = true } },
+                    onOpenBackup = backupViewModelFactory?.let { { navController.navigate(BACKUP_ROUTE) { launchSingleTop = true } } },
                     initialTab = entry.arguments?.getString(ARG_TAB),
                     onCreateSchedule = { date -> openEditor(date = date) },
                     onEditSchedule = { id -> openEditor(scheduleId = id) },
@@ -242,6 +256,15 @@ fun DispenserApp(
                     onOpenChangelog = { navController.navigate(ABOUT_CHANGELOG_ROUTE) { launchSingleTop = true } },
                     onOpenLicenses = { navController.navigate(ABOUT_LICENSES_ROUTE) { launchSingleTop = true } },
                 )
+            }
+            if (backupViewModelFactory != null) {
+                composable(BACKUP_ROUTE) {
+                    cz.nowass.dispenser.ui.backup.BackupRoute(
+                        viewModel = viewModel(factory = backupViewModelFactory),
+                        isDemo = isDemo,
+                        onBack = { navController.popBackStack() },
+                    )
+                }
             }
             composable(ABOUT_CHANGELOG_ROUTE) {
                 ChangelogRoute(assets, appVersion.name, isDemo, onBack = { navController.popBackStack() })
@@ -331,6 +354,7 @@ private fun MainPager(
     appVersion: AppVersion,
     onOpenReservoir: () -> Unit,
     onOpenAbout: () -> Unit,
+    onOpenBackup: (() -> Unit)?,
     initialTab: String?,
     onCreateSchedule: (LocalDate) -> Unit,
     onEditSchedule: (String) -> Unit,
@@ -380,6 +404,7 @@ private fun MainPager(
                 appViewModel = viewModel(factory = AppSettingsViewModel.factory(appSettings, repository, appVersion)),
                 onOpenReservoir = onOpenReservoir,
                 onOpenAbout = onOpenAbout,
+                onOpenBackup = onOpenBackup,
             )
         }
     }

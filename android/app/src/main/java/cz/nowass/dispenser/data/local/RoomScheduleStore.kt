@@ -1,7 +1,9 @@
 package cz.nowass.dispenser.data.local
 
 import android.util.Log
+import cz.nowass.dispenser.data.ReplaceOutcome
 import cz.nowass.dispenser.data.ScheduleStore
+import cz.nowass.dispenser.data.backup.RawScheduleRows
 import cz.nowass.dispenser.data.StoreSnapshot
 import cz.nowass.dispenser.data.StoreWriteOutcome
 import cz.nowass.dispenser.data.StoredSchedule
@@ -54,6 +56,24 @@ class RoomScheduleStore(
 
     override suspend fun delete(id: String, expectedRevision: Int): StoreWriteOutcome =
         dao.deleteIfRevision(id, expectedRevision)
+
+    override suspend fun unreadableIds(): Set<String> =
+        dao.getAll().filter { ScheduleEntityMapper.fromEntity(it) is ScheduleEntityMapper.Decoded.Invalid }.mapTo(mutableSetOf()) { it.id }
+
+    override suspend fun replaceReadable(schedules: List<StoredSchedule>): ReplaceOutcome {
+        // Callers hold the app-wide write lock, so the unreadable set cannot change in between;
+        // a collision would still abort the transaction (ABORT insert) as a second guard.
+        val keep = unreadableIds()
+        val collisions = schedules.map { it.schedule.id }.filterTo(mutableSetOf()) { it in keep }
+        if (collisions.isNotEmpty()) return ReplaceOutcome.IdCollision(collisions)
+        val now = clock.millis()
+        dao.replaceKeeping(keep.toList(), schedules.map { ScheduleEntityMapper.toEntity(it, now) })
+        return ReplaceOutcome.Replaced
+    }
+
+    override suspend fun captureRaw(): RawScheduleRows = RawScheduleRows(dao.getAll().map(ScheduleRawRows::toJson))
+
+    override suspend fun restoreRaw(rows: RawScheduleRows) = dao.replaceAllRows(rows.rows.map(ScheduleRawRows::fromJson))
 
     private companion object {
         const val TAG = "RoomScheduleStore"

@@ -24,6 +24,9 @@ abstract class SimulationDao {
     @Query("SELECT * FROM sim_events ORDER BY seq")
     abstract fun observeEvents(): Flow<List<SimEventEntity>>
 
+    @Query("SELECT * FROM sim_events ORDER BY seq")
+    abstract suspend fun getEvents(): List<SimEventEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     protected abstract suspend fun upsertState(state: SimStateEntity)
 
@@ -52,5 +55,23 @@ abstract class SimulationDao {
         deleteState()
         deleteProcessed()
         deleteEvents()
+    }
+
+    /** Replaces the whole simulation (state, processed set, history) in one transaction. */
+    @Transaction
+    open suspend fun replaceAll(state: SimStateEntity?, processed: List<SimProcessedEntity>, events: List<SimEventEntity>) {
+        deleteState()
+        deleteProcessed()
+        deleteEvents()
+        if (state != null) upsertState(state)
+        insertProcessed(processed)
+        insertEvents(events)
+    }
+
+    /** Ends the active run (state + processed set) but keeps the immutable history. */
+    @Transaction
+    open suspend fun deactivate() {
+        deleteState()
+        deleteProcessed()
     }
 }

@@ -68,7 +68,9 @@ class DispenserSimulator(
 
     override suspend fun start(at: Instant, capacityUl: Long, remainingUl: Long): CommandResult = lock.withLock {
         if (store.currentState() != null) return@withLock CommandResult.AlreadyActive
-        apply(engine.start(runIdGenerator(), at, capacityUl, remainingUl))
+        // History may survive a deactivation (backup restore); keep seq increasing across runs.
+        val firstSeq = (store.observeHistory().first().maxOfOrNull { it.seq } ?: 0) + 1
+        apply(engine.start(runIdGenerator(), at, capacityUl, remainingUl, firstSeq))
     }
 
     override suspend fun advanceHours(hours: Long) = command { s, list -> engine.advanceBy(s, Duration.ofHours(hours), list) }
@@ -80,6 +82,9 @@ class DispenserSimulator(
     suspend fun refill(remainingUl: Long): CommandResult = command { s, _ -> engine.refill(s, remainingUl) }
 
     override suspend fun reset() = lock.withLock { store.clear() }
+
+    /** Runs [block] while no simulation command can execute (backup export / restore). */
+    suspend fun <T> withCommandsPaused(block: suspend () -> T): T = lock.withLock { block() }
 
     private suspend fun command(block: (SimulationState, List<Schedule>) -> SimulationResult): CommandResult = lock.withLock {
         val state = store.currentState() ?: return@withLock CommandResult.NotActive

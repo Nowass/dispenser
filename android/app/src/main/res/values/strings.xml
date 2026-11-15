@@ -343,4 +343,96 @@
 
     <string name="settings_device_connect">Připojit zařízení</string>
     <string name="settings_device_coming_later">Připojení přes Bluetooth bude dostupné později.</string>
+
+    <!-- Backup and restore (A1.4c.1) -->
+    <string name="settings_backup">Záloha a obnovení</string>
+    <string name="settings_backup_hint">Export a obnovení rozvrhů a nastavení</string>
+    <string name="backup_title">Záloha a obnovení</string>
+    <string name="backup_intro">Záloha obsahuje rozvrhy a název akvária. Kam soubor uložit nebo který obnovit, vyberete v systémovém výběru souborů. Aplikace nepotřebuje oprávnění k úložišti a nic neodesílá.</string>
+    <string name="backup_export_title">Export</string>
+    <string name="backup_export_button">Exportovat konfiguraci</string>
+    <string name="backup_include_simulation">Zahrnout simulaci a historii</string>
+    <string name="backup_include_simulation_hint">Simulovaný čas, odhad zásobníku a historie simulace. Jde o simulovaná data, ne o skutečnou činnost zařízení.</string>
+    <string name="backup_export_privacy">Soubor neobsahuje hesla, tokeny ani klíče. Uložte ho na bezpečné místo.</string>
+    <string name="backup_restore_title">Obnovení</string>
+    <string name="backup_restore_button">Obnovit ze zálohy</string>
+    <string name="backup_restore_hint">Obnovení nahradí rozvrhy a název akvária v telefonu obsahem zálohy. Rozvrhy se nikdy neslučují. Před jakoukoli změnou se zobrazí potvrzení.</string>
+    <string name="backup_busy">Probíhá…</string>
+    <plurals name="backup_export_done">
+        <item quantity="one">Záloha uložena (%d rozvrh).</item>
+        <item quantity="few">Záloha uložena (%d rozvrhy).</item>
+        <item quantity="many">Záloha uložena (%d rozvrhu).</item>
+        <item quantity="other">Záloha uložena (%d rozvrhů).</item>
+    </plurals>
+    <plurals name="backup_export_history">
+        <item quantity="one">Včetně simulace a %d simulované události.</item>
+        <item quantity="few">Včetně simulace a %d simulovaných událostí.</item>
+        <item quantity="many">Včetně simulace a %d simulované události.</item>
+        <item quantity="other">Včetně simulace a %d simulovaných událostí.</item>
+    </plurals>
+    <plurals name="backup_export_unreadable">
+        <item quantity="one">%d nečitelný záznam nebylo možné zahrnout.</item>
+        <item quantity="few">%d nečitelné záznamy nebylo možné zahrnout.</item>
+        <item quantity="many">%d nečitelného záznamu nebylo možné zahrnout.</item>
+        <item quantity="other">%d nečitelných záznamů nebylo možné zahrnout.</item>
+    </plurals>
+    <string name="backup_export_failed">Zálohu se nepodařilo uložit. Zkuste jiné umístění.</string>
+    <string name="backup_read_failed">Soubor se nepodařilo přečíst.</string>
+    <string name="backup_invalid_title">Zálohu nelze obnovit</string>
+    <string name="backup_err_location">Místo v souboru: %1$s</string>
+    <string name="backup_nothing_changed">Nic nebylo změněno.</string>
+    <string name="backup_err_empty">Soubor je prázdný.</string>
+    <string name="backup_err_too_large">Soubor je příliš velký (limit 20 MB).</string>
+    <string name="backup_err_not_json">Soubor není platný JSON.</string>
+    <string name="backup_err_not_a_backup">Soubor není záloha aplikace Dispenser.</string>
+    <string name="backup_err_unsupported_version">Tuto verzi formátu zálohy aplikace nepodporuje.</string>
+    <string name="backup_err_missing_field">Chybí povinná položka.</string>
+    <string name="backup_err_unknown_field">Záloha obsahuje neznámou položku.</string>
+    <string name="backup_err_wrong_type">Položka má nesprávný typ.</string>
+    <string name="backup_err_invalid_value">Položka má neplatnou hodnotu.</string>
+    <string name="backup_err_duplicate_id">Záloha obsahuje duplicitní identifikátor.</string>
+    <string name="backup_err_invalid_schedule">Rozvrh v záloze porušuje pravidla aplikace.</string>
+    <string name="backup_err_inconsistent_simulation">Simulační data v záloze si odporují.</string>
+    <string name="backup_err_too_many_items">Záloha obsahuje příliš mnoho položek.</string>
+    <string name="backup_err_collision_unreadable">Rozvrh v záloze má stejný identifikátor jako nečitelný záznam v telefonu. Nečitelné záznamy se nikdy nepřepisují.</string>
+    <string name="backup_confirm_title">Nahradit konfiguraci?</string>
+    <plurals name="backup_confirm_schedules">
+        <item quantity="one">Záloha obsahuje %d rozvrh.</item>
+        <item quantity="few">Záloha obsahuje %d rozvrhy.</item>
+        <item quantity="many">Záloha obsahuje %d rozvrhu.</item>
+        <item quantity="other">Záloha obsahuje %d rozvrhů.</item>
+    </plurals>
+    <string name="backup_confirm_name">Název akvária: %1$s</string>
+    <string name="backup_confirm_exported">Vytvořeno %1$s ve verzi %2$s.</string>
+    <string name="backup_confirm_replace">Nahradí se všechny rozvrhy v telefonu (nyní %1$d) a název akvária (nyní %2$s).</string>
+    <string name="backup_confirm_pending">Obnovené rozvrhy budou uložené jen v telefonu („Uloženo v telefonu“), ne v zařízení.</string>
+    <string name="backup_confirm_sim_replaced">Záloha obsahuje simulaci a historii (simulovaná data). Současná simulace i celá historie simulace budou nahrazeny.</string>
+    <string name="backup_confirm_sim_deactivated">Záloha neobsahuje simulaci. Běžící simulace se zastaví, protože by neodpovídala obnoveným rozvrhům. Novou spustíte ručně v Nastavení. Historie zůstane zachována.</string>
+    <string name="backup_confirm_sim_continues">Záloha neobsahuje simulaci. Rozvrhy jsou stejné, takže běžící simulace i historie zůstanou beze změny.</string>
+    <string name="backup_confirm_sim_none">Záloha neobsahuje simulaci. Historie simulace zůstane beze změny.</string>
+    <plurals name="backup_confirm_unreadable">
+        <item quantity="one">%d nečitelný záznam v telefonu zůstane beze změny.</item>
+        <item quantity="few">%d nečitelné záznamy v telefonu zůstanou beze změny.</item>
+        <item quantity="many">%d nečitelného záznamu v telefonu zůstane beze změny.</item>
+        <item quantity="other">%d nečitelných záznamů v telefonu zůstane beze změny.</item>
+    </plurals>
+    <string name="backup_confirm_action">Nahradit</string>
+    <plurals name="backup_restore_done">
+        <item quantity="one">Konfigurace obnovena (%d rozvrh).</item>
+        <item quantity="few">Konfigurace obnovena (%d rozvrhy).</item>
+        <item quantity="many">Konfigurace obnovena (%d rozvrhu).</item>
+        <item quantity="other">Konfigurace obnovena (%d rozvrhů).</item>
+    </plurals>
+    <string name="backup_restore_done_sim_stopped">Simulace byla zastavena, historie zůstala zachována.</string>
+    <string name="backup_restore_done_sim_replaced">Simulace a historie byly obnoveny ze zálohy.</string>
+    <string name="backup_restore_rolled_back">Obnovení se nezdařilo. Původní konfigurace byla vrácena.</string>
+    <string name="backup_restore_not_started">Obnovení se nezdařilo ještě před změnou dat.</string>
+    <string name="storage_recovering">Dokončuji přerušené obnovení ze zálohy…</string>
+    <string name="storage_recovered_title">Obnovení bylo přerušeno</string>
+    <string name="storage_recovered_text">Předchozí obnovení ze zálohy se nedokončilo. Původní konfigurace byla vrácena beze změny.</string>
+    <string name="storage_blocked_title">Data nelze bezpečně otevřít</string>
+    <string name="storage_blocked_text">Obnovení ze zálohy se nepodařilo dokončit ani vrátit. Aby aplikace nepracovala s neúplnými daty, zůstane zablokovaná. Data zůstávají v telefonu, nic nebylo smazáno.</string>
+    <string name="storage_blocked_snapshot">Bezpečnostní kopie pro návrat chybí nebo je poškozená.</string>
+    <string name="storage_blocked_rollback">Zápis bezpečnostní kopie zpět se nezdařil.</string>
+    <string name="storage_retry">Zkusit znovu</string>
 </resources>
