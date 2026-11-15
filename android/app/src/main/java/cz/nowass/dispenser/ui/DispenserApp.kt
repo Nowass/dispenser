@@ -46,6 +46,15 @@ import androidx.lifecycle.Lifecycle
 import java.time.LocalDate
 import cz.nowass.dispenser.R
 import cz.nowass.dispenser.data.DispenserRepository
+import cz.nowass.dispenser.data.SimulationController
+import cz.nowass.dispenser.ui.history.HistoryRoute
+import cz.nowass.dispenser.ui.history.HistoryViewModel
+import cz.nowass.dispenser.ui.reservoir.ReservoirRoute
+import cz.nowass.dispenser.ui.reservoir.ReservoirViewModel
+import cz.nowass.dispenser.ui.settings.SettingsRoute
+import cz.nowass.dispenser.ui.settings.SimulationSettingsViewModel
+import cz.nowass.dispenser.ui.settings.simulatedClockText
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cz.nowass.dispenser.ui.components.AppHeader
 import cz.nowass.dispenser.ui.components.DispenserIcons
 import cz.nowass.dispenser.ui.components.NavigationDock
@@ -79,8 +88,11 @@ const val MAIN_ROUTE = "main"
 const val ARG_TAB = "tab"
 const val MAIN_PAGER_TEST_TAG = "main_pager"
 
+/** Reservoir detail (full-screen route, like the schedule editor). */
+const val RESERVOIR_ROUTE = "reservoir"
+
 @Composable
-fun DispenserApp(repository: DispenserRepository, isDemo: Boolean) {
+fun DispenserApp(repository: DispenserRepository, simulation: SimulationController, isDemo: Boolean) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
@@ -111,8 +123,15 @@ fun DispenserApp(repository: DispenserRepository, isDemo: Boolean) {
     val savedMessage = stringResource(R.string.editor_saved_snackbar)
     val deletedMessage = stringResource(R.string.editor_deleted_snackbar)
 
-    // The editor is a full-screen task with its own top bar (incl. DEMO badge); hide header and dock.
-    val inEditor = currentDestination?.route?.substringBefore('?') == SCHEDULE_ROUTE
+    // Editor and reservoir detail are full-screen tasks with their own top bar (incl. DEMO badge).
+    val inEditor = currentDestination?.route?.substringBefore('?') in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE)
+
+    // D1: one visible simulation clock while the simulation runs.
+    val deviceFlow = remember(repository) { repository.observeDevice() }
+    val device by deviceFlow.collectAsStateWithLifecycle(initialValue = null)
+    val simulationClockText = device?.takeIf { it.simulationActive }?.let {
+        stringResource(R.string.header_simulated_time, simulatedClockText(it.now.atZone(it.zone)))
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -134,6 +153,7 @@ fun DispenserApp(repository: DispenserRepository, isDemo: Boolean) {
                     if (current == TopLevelDestination.DASHBOARD) R.string.dashboard_title else current.labelRes,
                 ),
                 showDemoBadge = isDemo,
+                simulationClock = simulationClockText,
             )
         },
         bottomBar = {
@@ -168,9 +188,18 @@ fun DispenserApp(repository: DispenserRepository, isDemo: Boolean) {
                 MainPager(
                     pagerState = pagerState,
                     repository = repository,
+                    simulation = simulation,
+                    onOpenReservoir = { navController.navigate(RESERVOIR_ROUTE) { launchSingleTop = true } },
                     initialTab = entry.arguments?.getString(ARG_TAB),
                     onCreateSchedule = { date -> openEditor(date = date) },
                     onEditSchedule = { id -> openEditor(scheduleId = id) },
+                )
+            }
+            composable(RESERVOIR_ROUTE) {
+                ReservoirRoute(
+                    viewModel = viewModel(factory = ReservoirViewModel.factory(repository, simulation.lowStockPolicy)),
+                    isDemo = isDemo,
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable(
@@ -226,6 +255,8 @@ fun DispenserApp(repository: DispenserRepository, isDemo: Boolean) {
 private fun MainPager(
     pagerState: PagerState,
     repository: DispenserRepository,
+    simulation: SimulationController,
+    onOpenReservoir: () -> Unit,
     initialTab: String?,
     onCreateSchedule: (LocalDate) -> Unit,
     onEditSchedule: (String) -> Unit,
@@ -262,14 +293,15 @@ private fun MainPager(
                     if (date != null) calendarViewModel.selectDate(date)
                     scope.launch { pagerState.animateScrollToPage(TopLevelDestination.CALENDAR.ordinal) }
                 },
+                onOpenReservoir = onOpenReservoir,
             )
             TopLevelDestination.CALENDAR -> CalendarRoute(
                 viewModel = calendarViewModel,
                 onCreate = onCreateSchedule,
                 onEdit = onEditSchedule,
             )
-            TopLevelDestination.HISTORY -> HistoryScreen()
-            TopLevelDestination.SETTINGS -> SettingsScreen()
+            TopLevelDestination.HISTORY -> HistoryRoute(viewModel(factory = HistoryViewModel.factory(repository)))
+            TopLevelDestination.SETTINGS -> SettingsRoute(viewModel(factory = SimulationSettingsViewModel.factory(simulation, repository)))
         }
     }
 }
@@ -281,6 +313,7 @@ private fun MainPager(
 @Composable
 private fun DispenserAppPreview() {
     cz.nowass.dispenser.ui.theme.DispenserTheme {
-        DispenserApp(repository = cz.nowass.dispenser.data.MockDispenserRepository(), isDemo = true)
+        val repo = cz.nowass.dispenser.data.MockDispenserRepository()
+        DispenserApp(repository = repo, simulation = repo.simulation, isDemo = true)
     }
 }

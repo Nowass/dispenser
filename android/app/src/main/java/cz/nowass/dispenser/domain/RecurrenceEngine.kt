@@ -74,28 +74,44 @@ object RecurrenceEngine {
     fun nextOccurrence(schedule: Schedule, after: Instant): DoseOccurrence? =
         nextOccurrences(schedule, after, 1).firstOrNull()
 
-    /**
-     * Up to [count] occurrences strictly after [after], in time order.
-     *
-     * Jumps directly from one rule-matching date to the next (no day-by-day scan), so any
-     * interval length works. A matching date whose local time falls into a DST gap is
-     * skipped and the search continues with the next matching date.
-     */
+    /** Up to [count] occurrences strictly after [after], in time order. */
     fun nextOccurrences(schedule: Schedule, after: Instant, count: Int): List<DoseOccurrence> {
         require(count >= 0) { "count must be >= 0" }
         if (count == 0) return emptyList()
+        return occurrencesAfter(schedule, after).take(count).toList()
+    }
+
+    /**
+     * All occurrences in (afterExclusive, untilInclusive], in time order, or null when there
+     * are more than [limit] (callers must reject such ranges explicitly instead of truncating).
+     */
+    fun occurrencesBetween(schedule: Schedule, afterExclusive: Instant, untilInclusive: Instant, limit: Int): List<DoseOccurrence>? {
+        require(limit >= 0) { "limit must be >= 0" }
+        val result = ArrayList<DoseOccurrence>()
+        for (occ in occurrencesAfter(schedule, afterExclusive)) {
+            if (occ.scheduledAt.isAfter(untilInclusive)) break
+            if (result.size == limit) return null
+            result += occ
+        }
+        return result
+    }
+
+    /**
+     * Lazy, strictly chronological occurrences after [after]. Jumps directly from one
+     * rule-matching date to the next (no day-by-day scan), so any interval length works.
+     * A matching date whose local time falls into a DST gap is skipped.
+     */
+    private fun occurrencesAfter(schedule: Schedule, after: Instant): Sequence<DoseOccurrence> = sequence {
         val afterLocalDate = after.atZone(schedule.zone).toLocalDate()
         // Start one day early so a local date differing from the UTC date is never missed.
         var date = firstMatchOnOrAfter(schedule, afterLocalDate.minusDays(1))
-        val result = ArrayList<DoseOccurrence>(count)
         var examined = 0
-        while (date != null && result.size < count && examined++ < MAX_CANDIDATES) {
+        while (date != null && examined++ < MAX_CANDIDATES) {
             if (schedule.endDate != null && date.isAfter(schedule.endDate)) break
             val occ = occurrenceOn(schedule, date)
-            if (occ != null && occ.scheduledAt.isAfter(after)) result += occ
+            if (occ != null && occ.scheduledAt.isAfter(after)) yield(occ)
             date = firstMatchOnOrAfter(schedule, date.plusDays(1))
         }
-        return result
     }
 
     /**

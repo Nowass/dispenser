@@ -24,6 +24,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.unit.dp
 import cz.nowass.dispenser.ui.theme.DispenserTheme
 import cz.nowass.dispenser.ui.theme.Spacing
@@ -57,6 +58,9 @@ fun StatusCard(
     modifier: Modifier = Modifier,
     accent: Color = tone.accent(),
     tags: List<String> = emptyList(),
+    /** Optional: makes the whole card a single touch target (e.g. opens a detail screen). */
+    onClick: (() -> Unit)? = null,
+    onClickLabel: String? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val border = when (tone) {
@@ -64,7 +68,11 @@ fun StatusCard(
         else -> null
     }
     Card(
-        modifier = modifier,
+        modifier = if (onClick != null) {
+            modifier.clip(MaterialTheme.shapes.large).clickable(onClickLabel = onClickLabel, onClick = onClick)
+        } else {
+            modifier
+        },
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         border = border,

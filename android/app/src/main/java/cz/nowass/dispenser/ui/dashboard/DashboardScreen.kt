@@ -52,10 +52,11 @@ fun DashboardRoute(
     viewModel: DashboardViewModel,
     /** Opens the calendar; null date means "today / last state". */
     onOpenCalendar: (LocalDate?) -> Unit,
+    onOpenReservoir: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    DashboardScreen(state, onOpenCalendar, modifier)
+    DashboardScreen(state, onOpenCalendar, modifier, onOpenReservoir)
 }
 
 @Composable
@@ -63,6 +64,7 @@ fun DashboardScreen(
     state: DashboardUiState,
     onOpenCalendar: (LocalDate?) -> Unit,
     modifier: Modifier = Modifier,
+    onOpenReservoir: () -> Unit = {},
 ) {
     when (state) {
         DashboardUiState.Loading -> Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -76,7 +78,7 @@ fun DashboardScreen(
             verticalArrangement = Arrangement.spacedBy(Spacing.m),
         ) {
             NextDose(state)
-            StatusCards(state)
+            StatusCards(state, onOpenReservoir)
             Week(state, onOpenCalendar)
         }
     }
@@ -103,19 +105,19 @@ private fun NextDose(state: DashboardUiState.Ready) {
 }
 
 @Composable
-private fun StatusCards(state: DashboardUiState.Ready) {
+private fun StatusCards(state: DashboardUiState.Ready, onOpenReservoir: () -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         if (maxWidth >= TwoColumnMinWidth) {
             Row(
                 modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Max),
                 horizontalArrangement = Arrangement.spacedBy(Spacing.m),
             ) {
-                ReservoirCard(state, Modifier.weight(1f).fillMaxHeight())
+                ReservoirCard(state, onOpenReservoir, Modifier.weight(1f).fillMaxHeight())
                 BatteryCard(state.battery, Modifier.weight(1f).fillMaxHeight())
             }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(Spacing.m)) {
-                ReservoirCard(state, Modifier.fillMaxWidth())
+                ReservoirCard(state, onOpenReservoir, Modifier.fillMaxWidth())
                 BatteryCard(state.battery, Modifier.fillMaxWidth())
             }
         }
@@ -123,21 +125,41 @@ private fun StatusCards(state: DashboardUiState.Ready) {
 }
 
 @Composable
-private fun ReservoirCard(state: DashboardUiState.Ready, modifier: Modifier) {
+private fun ReservoirCard(state: DashboardUiState.Ready, onOpen: () -> Unit, modifier: Modifier) {
     val r = state.reservoir
-    val accent = r.tone.accent()
-    val percent = (r.fraction * 100).roundToInt()
+    val tone = r?.tone ?: StatusTone.Unknown
+    val accent = tone.accent()
     StatusCard(
         title = stringResource(R.string.dashboard_reservoir),
         icon = painterResource(R.drawable.ic_reservoir),
-        tone = r.tone,
+        tone = tone,
         accent = accent,
         tags = buildList {
             add(stringResource(R.string.dashboard_estimate_label))
             if (state.isDemo) add(stringResource(R.string.dashboard_simulated_label))
         },
+        onClick = onOpen,
+        onClickLabel = stringResource(R.string.reservoir_open_detail),
         modifier = modifier,
     ) {
+        if (r == null) {
+            // No device and no simulation: the estimate is unknown (never invent a value).
+            Text(
+                stringResource(R.string.reservoir_unknown),
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            MetricProgress(fraction = null, accessibilityLabel = stringResource(R.string.reservoir_unknown), color = accent)
+            Text(
+                stringResource(R.string.reservoir_simulation_inactive),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            return@StatusCard
+        }
+        val percent = (r.fraction * 100).roundToInt()
         Text(
             stringResource(R.string.unit_ml, Format.ml(r.estimatedRemainingMl)),
             style = MaterialTheme.typography.headlineMedium,
@@ -243,13 +265,14 @@ private class DashboardPreviewStates : PreviewParameterProvider<DashboardUiState
     private val base = DashboardViewModel.toUiState(seed.device, seed.schedules, seed.reservoir)
     override val values = sequenceOf(
         base,
-        DashboardViewModel.toUiState(seed.device, seed.schedules, seed.reservoir.copy(estimatedRemainingMl = 60.0)),
+        DashboardViewModel.toUiState(seed.device, seed.schedules, seed.reservoir.copy(remainingUl = 60_000)),
         DashboardViewModel.toUiState(
             seed.device.copy(batteryPercent = null),
             seed.schedules,
-            seed.reservoir.copy(estimatedRemainingMl = 4.5),
+            seed.reservoir.copy(remainingUl = 4_500),
         ),
         DashboardViewModel.toUiState(seed.device, seed.schedules.map { it.copy(enabled = false) }, seed.reservoir),
+        DashboardViewModel.toUiState(seed.device, seed.schedules, reservoir = null),
     )
 }
 

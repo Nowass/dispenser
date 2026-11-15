@@ -42,9 +42,9 @@ class DashboardViewModelTest {
         assertEquals("Ranní dávka", state.nextDose?.scheduleName)
         assertEquals(10.0, state.nextDose!!.amountMl, 0.0)
         assertEquals(ZonedDateTime.of(2026, 11, 14, 8, 0, 0, 0, DEFAULT_ZONE), state.nextDose.at)
-        assertEquals(312.0, state.reservoir.estimatedRemainingMl, 0.0)
-        assertEquals(312f / 500f, state.reservoir.fraction, 1e-6f)
-        assertTrue(state.reservoir.coversNextDose)
+        assertEquals(312.0, state.reservoir!!.estimatedRemainingMl, 0.0)
+        assertEquals(312f / 500f, state.reservoir!!.fraction, 1e-6f)
+        assertTrue(state.reservoir!!.coversNextDose)
         assertEquals(78, state.battery.percent)
         assertTrue(state.battery.isSimulated)
     }
@@ -52,16 +52,16 @@ class DashboardViewModelTest {
     @Test
     fun reservoirBelowNextDose_isFlaggedAsNotCovering() {
         val seed = MockSeed.default()
-        val low = seed.reservoir.copy(estimatedRemainingMl = 9.5) // next dose is 10 ml
+        val low = seed.reservoir.copy(remainingUl = 9500) // next dose is 10 ml
         val state = DashboardViewModel.toUiState(seed.device, seed.schedules, low)
-        assertFalse(state.reservoir.coversNextDose)
+        assertFalse(state.reservoir!!.coversNextDose)
     }
 
     @Test
     fun reservoirExactlyEqualToNextDose_covers() {
         val seed = MockSeed.default()
-        val exact = seed.reservoir.copy(estimatedRemainingMl = 10.0)
-        assertTrue(DashboardViewModel.toUiState(seed.device, seed.schedules, exact).reservoir.coversNextDose)
+        val exact = seed.reservoir.copy(remainingUl = 10000)
+        assertTrue(DashboardViewModel.toUiState(seed.device, seed.schedules, exact).reservoir!!.coversNextDose)
     }
 
     @Test
@@ -70,18 +70,17 @@ class DashboardViewModelTest {
         val state = DashboardViewModel.toUiState(
             seed.device,
             seed.schedules.map { it.copy(enabled = false) },
-            seed.reservoir.copy(estimatedRemainingMl = 0.0),
+            seed.reservoir.copy(remainingUl = 0),
         )
         assertEquals(null, state.nextDose)
-        assertTrue(state.reservoir.coversNextDose)
+        assertTrue(state.reservoir!!.coversNextDose)
     }
 
     @Test
     fun mockSeed_isEntirelyTaggedDemo() {
         val seed = MockSeed.default()
         assertEquals(DataSource.DEMO, seed.device.source)
-        assertEquals(DataSource.DEMO, seed.reservoir.source)
-        assertTrue(seed.events.all { it.source == DataSource.DEMO })
+        assertTrue(seed.events.all { it.origin == cz.nowass.dispenser.domain.simulation.EventOrigin.SIMULATION })
     }
 
     // ---- A1.1.1 presentation mapping ----
@@ -122,8 +121,8 @@ class DashboardViewModelTest {
     fun reservoirTone_normalLowBlocked() {
         val seed = MockSeed.default()
         fun tone(ml: Double) = DashboardViewModel.toUiState(
-            seed.device, seed.schedules, seed.reservoir.copy(estimatedRemainingMl = ml),
-        ).reservoir.tone
+            seed.device, seed.schedules, seed.reservoir.copy(remainingUl = Math.round(ml * 1000)),
+        ).reservoir!!.tone
         assertEquals(StatusTone.Normal, tone(312.0))
         assertEquals(StatusTone.Normal, tone(100.0)) // exactly 20 % is not low
         assertEquals(StatusTone.Low, tone(60.0))
@@ -137,5 +136,19 @@ class DashboardViewModelTest {
         assertEquals(null, unknown.battery.percent)
         assertEquals(StatusTone.Unknown, unknown.battery.tone)
         assertEquals(StatusTone.Normal, DashboardViewModel.toUiState(seed.device, seed.schedules, seed.reservoir).battery.tone)
+    }
+
+    @Test
+    fun unknownReservoir_whenNoSimulation_isNull_neverInvented() {
+        val seed = MockSeed.default()
+        assertEquals(null, DashboardViewModel.toUiState(seed.device, seed.schedules, reservoir = null).reservoir)
+    }
+
+    @Test
+    fun blockedReservoir_isBlockedTone_evenWithEnoughVolume() {
+        val seed = MockSeed.default()
+        val blocked = seed.reservoir.copy(blocked = true)
+        assertEquals(StatusTone.Blocked, DashboardViewModel.toUiState(seed.device, seed.schedules, blocked).reservoir!!.tone)
+        assertFalse(DashboardViewModel.toUiState(seed.device, seed.schedules, blocked).reservoir!!.coversNextDose)
     }
 }

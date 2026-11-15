@@ -389,15 +389,8 @@ class ScheduleEditorViewModel(
         internal fun parseDate(value: String?): LocalDate? =
             try { value?.let(LocalDate::parse) } catch (_: DateTimeParseException) { null }
 
-        /** Plain decimal only: digits with an optional single comma or dot ("12", "12,5", "12.5", ",5"). */
-        private val AMOUNT_PATTERN = Regex("""^(\d+([.,]\d*)?|[.,]\d+)$""")
-
-        /**
-         * Accepts "12", "12.5" and Czech "12,5". Returns null for anything else, including
-         * scientific ("1e3"), hex, signed or grouped input, which toDouble() would accept.
-         */
-        internal fun parseAmount(text: String): Double? =
-            text.trim().takeIf { AMOUNT_PATTERN.matches(it) }?.replace(',', '.')?.toDoubleOrNull()
+        /** See [cz.nowass.dispenser.ui.AmountInput.parseMl]. */
+        internal fun parseAmount(text: String): Double? = cz.nowass.dispenser.ui.AmountInput.parseMl(text)
 
         internal fun formFrom(s: Schedule): EditorForm {
             val d = s.toDraft()

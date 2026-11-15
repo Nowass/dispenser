@@ -85,6 +85,21 @@ ViewModels and domain models have no database dependencies; Room types live only
   zone `Europe/Prague`), refreshed every minute. Tests and Compose previews inject a fixed
   `Clock`; the fixed demo date (14 Nov 2026 07:30) is used only together with fixture data.
 
+### Simulation (A1.3)
+
+- Pure domain in `domain/simulation/` (`SimulationEngine`, `ReservoirState`, `LowStockPolicy`,
+  `ReservoirPredictor`, `HistoryEvent`); no Android dependencies, intended as a firmware
+  reference. Rules: chronological, at most once per occurrence, time never moves backwards
+  (reset instead), advancing = device running, outage = skipped without catch-up, no partial
+  doses, never negative, insufficient stock blocks until refill, low-stock warning (PROPOSED
+  20 %, configurable) once per episode, bounded commands (366 days / 10 000 occurrences).
+- Persisted in a **separate `simulation.db`** (state, processed occurrences, immutable
+  events). It never touches `dispenser.db`; "Resetovat simulaci" clears only simulation data.
+- Events carry an origin (`SIMULATION` now, `DEVICE` reserved) and snapshot the schedule name
+  and dose volume, so later schedule edits never change history.
+- Service mode / tubing priming (FR-025) is documented and its event types and the
+  `SERVICE_REQUIRED` readiness state are reserved, but nothing of it is implemented yet.
+
 ### Local persistence
 
 - Room database `dispenser.db`, table `schedules` (schema exported to `app/schemas/`).
@@ -122,6 +137,13 @@ ViewModels and domain models have no database dependencies; Room types live only
   be left and the form is frozen. After saving, "Uloženo v telefonu" is shown.
 - **Persistence (A1.2c):** schedules survive app restarts; calendar and dashboard update
   immediately after every change.
+- **Dispensing simulation (A1.3):** started from Nastavení ("Simulace dávkování") with a
+  start date/time and reservoir; +1 hour, +1 day (calendar day), advance to a date/time,
+  explicit device outage, reset. While it runs, the whole app uses the visible simulation
+  clock ("Simulovaný čas: …" in the header); otherwise the phone clock. Reservoir detail
+  (tap the dashboard card) shows remaining/capacity, low/blocked state, prediction (covered
+  doses, "refill by" date with day precision) and the refill action. Historie lists simulated
+  events newest first by day, each marked SIMULACE.
 - **Navigation:** floating icon-only dock (Přehled, Kalendář, Historie, Nastavení) plus
   horizontal swipe between these four screens (one `HorizontalPager` in the `main`
   destination; the pager state is the single source of truth for dock, header and swipes).
@@ -165,7 +187,7 @@ ViewModels and domain models have no database dependencies; Room types live only
 
 - The Material 3 date picker grid uses the device language for month/day names
   (M3 1.4.0 cannot force Czech there). Titles and buttons are Czech.
-- No simulation of dispensing yet: history, refill and stock blocking are A1.3. Battery
-  and reservoir are fixed demo values.
+- Battery is a fixed demo value (no voltage measurement). The simulation uses the current
+  schedule configuration for each processed interval; service mode is not implemented.
 - Schedules are never sent to a device (no BLE yet); all stay `PENDING`.
 - One occurrence per schedule per day by design (use multiple schedules for multiple daily doses).

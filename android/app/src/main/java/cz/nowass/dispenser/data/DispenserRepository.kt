@@ -1,8 +1,8 @@
 package cz.nowass.dispenser.data
 
 import cz.nowass.dispenser.domain.DeviceStatus
-import cz.nowass.dispenser.domain.DispenserEvent
-import cz.nowass.dispenser.domain.ReservoirEstimate
+import cz.nowass.dispenser.domain.simulation.HistoryEvent
+import cz.nowass.dispenser.domain.simulation.ReservoirState
 import cz.nowass.dispenser.domain.Schedule
 import cz.nowass.dispenser.domain.ScheduleDraft
 import cz.nowass.dispenser.domain.SyncState
@@ -18,8 +18,14 @@ import kotlinx.coroutines.flow.Flow
 interface DispenserRepository {
     fun observeDevice(): Flow<DeviceStatus>
     fun observeSchedules(): Flow<List<Schedule>>
-    fun observeReservoir(): Flow<ReservoirEstimate>
-    fun observeEvents(): Flow<List<DispenserEvent>>
+    /** Estimated reservoir state; null when unknown (no device connected, no simulation running). */
+    fun observeReservoir(): Flow<ReservoirState?>
+
+    /** Dispensing / reservoir history; every event is tagged with its [cz.nowass.dispenser.domain.simulation.EventOrigin]. */
+    fun observeHistory(): Flow<List<HistoryEvent>>
+
+    /** Refill (D7): sets the absolute remaining volume in µl, ≤ capacity. */
+    suspend fun refillReservoir(remainingUl: Long): CommandResult
 
     /**
      * Device confirmation state per schedule id. Locally saved schedules are

@@ -129,4 +129,15 @@ class RecurrenceEdgeCaseTest {
             assertEquals("schedule=$sch after=$after", expected, RecurrenceEngine.nextOccurrences(sch, after, 5))
         }
     }
+
+    // ---- occurrencesBetween (used by the simulation) ----
+
+    @Test
+    fun occurrencesBetween_isExclusiveStartInclusiveEnd_andBounded() {
+        val sch = s(Recurrence.Daily(1), LocalDate.of(2026, 11, 1))
+        val list = RecurrenceEngine.occurrencesBetween(sch, at(2026, 11, 14, 8), at(2026, 11, 17, 8), 10)!!
+        assertEquals(listOf(15, 16, 17).map { LocalDate.of(2026, 11, it) }, list.map { it.localDate })
+        assertNull(RecurrenceEngine.occurrencesBetween(sch, at(2026, 11, 1, 0), at(2026, 11, 30, 0), 5))
+        assertTrue(RecurrenceEngine.occurrencesBetween(sch, at(2026, 11, 14, 9), at(2026, 11, 14, 23), 0)!!.isEmpty())
+    }
 }

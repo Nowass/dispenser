@@ -134,7 +134,8 @@ Implemented in `android/` (see `android/README.md`): A1.1 shell and dashboard, A
 - **Calendar journey (B):** month/week views and day details are done. Tapping an occurrence opens the editor for the whole recurring schedule. A **Rozvrhy** list under the day details shows all schedules, including disabled ones, with enable/disable switches. Disabled schedules have no calendar occurrences. There is no separate per-schedule visibility setting.
 - **Create/edit (C):** ONCE, DAILY every N days and WEEKLY every N weeks with weekdays, optional inclusive end date, enabled flag, next-5 preview, and validation without physical pump limits. The start date is prefilled from the selected day. Delete asks for confirmation; leaving with unsaved changes asks to discard. A floating Save button stays disabled while the form is invalid or unchanged. MONTHLY is not offered (missing-date rule undecided).
 - **Sync semantics:** every saved schedule is `PENDING`, displayed as "Uloženo v telefonu": stored locally, not transferred to or accepted by the device. No acknowledgement is simulated; `DEVICE_APPLIED` is reserved for future BLE read-back. The DEMO badge stays because device values are simulated.
-- **Not yet done:** time simulation, history, refill and stock blocking (A1.3); onboarding screen (A); Historie screen (E).
+- **A1.3 dispensing simulation:** deterministic engine with a separate persisted `simulation.db`, Settings controls (start, +1 h, +1 day, advance to, outage, reset), a visible simulation clock while active, reservoir detail with prediction and refill, and a newest-first History screen with events marked SIMULACE. Service mode / tubing priming (FR-025) is documented and reserved only.
+- **Not yet done:** onboarding screen (A); history filters (E); BLE, real battery measurement, service mode.
 - **Known limitation:** the M3 date picker grid follows the device language for month/day names.
 
 ## Open questions for next product review

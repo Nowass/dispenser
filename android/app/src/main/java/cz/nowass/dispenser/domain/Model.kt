@@ -90,43 +90,17 @@ data class DoseOccurrence(
  */
 enum class SyncState { PENDING, DEVICE_APPLIED }
 
-/**
- * Reservoir state. The remaining volume is always a model estimate based on
- * commanded doses; it is never a measurement (FR-006, FR-020).
- */
-data class ReservoirEstimate(
-    val capacityMl: Double,
-    val estimatedRemainingMl: Double,
-    val source: DataSource,
-) {
-    val fraction: Double
-        get() = if (capacityMl <= 0.0) 0.0 else (estimatedRemainingMl / capacityMl).coerceIn(0.0, 1.0)
-
-    /** FR-009 / FR-022: a dose may run only if the estimate covers its full volume. */
-    fun canCover(amountMl: Double): Boolean = estimatedRemainingMl >= amountMl
-}
-
 enum class ConnectionState { DEMO, DISCONNECTED, CONNECTED }
 
 /** Snapshot of the (demo or physical) dispenser. */
 data class DeviceStatus(
     val source: DataSource,
     val connection: ConnectionState,
-    /** Device clock. In DEMO this is a simulated clock, not the phone's clock. */
+    /** Device clock: the simulation clock while a simulation runs, otherwise the phone clock. */
     val now: Instant,
     /** In DEMO this value is simulated, not measured. Null if unknown. */
     val batteryPercent: Int?,
     val zone: ZoneId = DEFAULT_ZONE,
-)
-
-enum class EventType { COMPLETED, SKIPPED, BLOCKED, REFILL, INTERRUPTED_UNCERTAIN, LOW_STOCK }
-
-/** An entry in the dispenser event history. */
-data class DispenserEvent(
-    val seq: Long,
-    val time: Instant,
-    val type: EventType,
-    val scheduleId: String?,
-    val amountMl: Double?,
-    val source: DataSource,
+    /** True while [now] is the simulation clock (D1); false = phone clock. */
+    val simulationActive: Boolean = false,
 )

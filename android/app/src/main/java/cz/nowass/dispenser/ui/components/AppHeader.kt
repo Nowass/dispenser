@@ -29,6 +29,8 @@ fun AppHeader(
     title: String,
     showDemoBadge: Boolean,
     modifier: Modifier = Modifier,
+    /** Visible simulation-clock indicator (D1); null outside simulation mode. */
+    simulationClock: String? = null,
 ) {
     Row(
         modifier = modifier
@@ -52,6 +54,15 @@ fun AppHeader(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.semantics { heading() },
             )
+            if (simulationClock != null) {
+                Text(
+                    simulationClock,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = cz.nowass.dispenser.ui.theme.DispenserTheme.extendedColors.warning,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         if (showDemoBadge) DemoBadge(Modifier.testTag(DEMO_BADGE_TEST_TAG))
     }

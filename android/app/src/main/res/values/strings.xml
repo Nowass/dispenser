@@ -180,8 +180,97 @@
     <string name="picker_date_title">Vyberte datum</string>
     <string name="picker_time_title">Vyberte čas</string>
 
-    <!-- Placeholders -->
-    <string name="placeholder_coming_next">Tato obrazovka bude doplněna v další fázi vývoje.</string>
+    <!-- Header -->
+    <string name="header_simulated_time">Simulovaný čas: %1$s</string>
+
+    <!-- Reservoir detail -->
+    <string name="reservoir_title">Zásobník</string>
+    <string name="reservoir_back">Zpět</string>
+    <string name="reservoir_open_detail">Otevřít detail zásobníku</string>
+    <string name="reservoir_unknown">Neznámý</string>
+    <string name="reservoir_simulation_inactive">Zařízení není připojeno a simulace neběží. Spusťte ji v Nastavení.</string>
+    <string name="reservoir_status_normal">Zásoba v pořádku</string>
+    <string name="reservoir_status_low">Nízká zásoba</string>
+    <string name="reservoir_status_blocked">Dávkování zablokováno – doplňte zásobník</string>
+    <string name="reservoir_low_threshold">Upozornění na nízkou zásobu pod %1$d %% kapacity (navržená hodnota).</string>
+    <string name="reservoir_prediction_title">Výhled zásoby</string>
+    <plurals name="prediction_covered">
+        <item quantity="one">Vystačí na %d celou dávku</item>
+        <item quantity="few">Vystačí na %d celé dávky</item>
+        <item quantity="many">Vystačí na %d celé dávky</item>
+        <item quantity="other">Vystačí na %d celých dávek</item>
+    </plurals>
+    <string name="prediction_refill_by">Doplnit nejpozději do: %1$s</string>
+    <string name="prediction_first_uncovered">Nepokrytá dávka: %1$s (%2$s)</string>
+    <string name="prediction_remaining_after">Po poslední pokryté dávce zbude přibližně %1$s.</string>
+    <string name="prediction_insufficient_next">Příští dávku už nelze pokrýt. Doplňte zásobník.</string>
+    <string name="prediction_blocked">Dávkování je zablokováno, dokud zásobník nedoplníte.</string>
+    <string name="prediction_no_doses">Žádné naplánované dávky – spotřebu nelze odhadnout.</string>
+    <string name="prediction_all_covered">Zásoba pokryje všechny zbývající naplánované dávky.</string>
+    <string name="prediction_unknown">Zásoba vystačí déle než rok – přesné datum nelze spolehlivě určit.</string>
+    <string name="prediction_note">Výhled vychází ze skutečných naplánovaných termínů aktivních rozvrhů.</string>
+    <string name="reservoir_refill">Doplnit zásobník</string>
+    <string name="refill_dialog_title">Doplnění zásobníku</string>
+    <string name="refill_dialog_label">Nový objem v zásobníku</string>
+    <string name="refill_dialog_hint">Nejvýše %1$s (kapacita). Doplnění zruší blokaci dávkování.</string>
+    <string name="refill_fill_to_capacity">Plná kapacita</string>
+    <string name="refill_confirm">Potvrdit</string>
+    <string name="refill_err_above_capacity">Objem nesmí překročit kapacitu %1$s.</string>
+    <string name="refill_done">Zásobník doplněn (simulace)</string>
+
+    <!-- History -->
+    <string name="history_simulated_note">Simulované události – nejde o činnost skutečného čerpadla.</string>
+    <string name="history_empty">Zatím žádné události. Simulaci spustíte v Nastavení.</string>
+    <string name="history_origin_simulation">SIMULACE</string>
+    <string name="history_origin_device">ZAŘÍZENÍ</string>
+    <string name="history_type_success">Dávka podána</string>
+    <string name="history_type_blocked">Dávka zablokována</string>
+    <string name="history_type_skipped">Dávka vynechána</string>
+    <string name="history_type_refilled">Zásobník doplněn</string>
+    <string name="history_type_low">Nízká zásoba</string>
+    <string name="history_type_interrupted">Dávka přerušena (nejistý stav)</string>
+    <string name="history_type_service_started">Servis zahájen</string>
+    <string name="history_type_priming_run">Plnění hadičky (čerpadlo)</string>
+    <string name="history_type_tubing_primed">Hadička naplněna</string>
+    <string name="history_type_service_completed">Zařízení připraveno</string>
+    <string name="history_reason_insufficient">nedostatek kapaliny</string>
+    <string name="history_reason_blocked_until_refill">čeká na doplnění</string>
+    <string name="history_reason_outage">výpadek zařízení</string>
+    <string name="history_reason_not_ready">zařízení není připraveno</string>
+    <string name="history_reservoir_after">Zásobník: %1$s</string>
+    <string name="history_reservoir_change">Zásobník: %1$s → %2$s</string>
+
+    <!-- Settings: simulation -->
+    <string name="settings_simulation_title">Simulace dávkování</string>
+    <string name="settings_sim_inactive">Simulace neběží. Aplikace používá skutečný čas telefonu.</string>
+    <string name="settings_sim_active_note">Simulace běží. Dávky se nepodávají skutečným čerpadlem a rozvrhy zůstávají beze změny.</string>
+    <string name="settings_sim_start_time">Začátek simulace</string>
+    <string name="settings_sim_capacity">Kapacita zásobníku</string>
+    <string name="settings_sim_remaining">Počáteční objem</string>
+    <string name="settings_sim_start">Spustit simulaci</string>
+    <string name="settings_sim_clock">Simulovaný čas</string>
+    <string name="settings_sim_plus_hour">+1 hodina</string>
+    <string name="settings_sim_plus_day">+1 den</string>
+    <string name="settings_sim_advance_to">Posunout na…</string>
+    <string name="settings_sim_outage">Výpadek zařízení do…</string>
+    <string name="settings_sim_reset">Resetovat simulaci</string>
+    <string name="settings_sim_reset_title">Resetovat simulaci?</string>
+    <string name="settings_sim_reset_text">Smaže se simulovaný stav zásobníku a historie simulace. Rozvrhy zůstanou beze změny.</string>
+    <string name="settings_sim_reset_confirm">Resetovat</string>
+    <string name="settings_sim_err_target_before">Simulovaný čas nelze vracet zpět. Pro dřívější čas simulaci resetujte.</string>
+    <string name="settings_sim_err_range">Najednou lze čas posunout nejvýše o 366 dní.</string>
+    <string name="settings_sim_err_too_many">Příliš mnoho dávek najednou. Posuňte čas po menších krocích.</string>
+    <string name="settings_sim_err_capacity">Kapacita musí být větší než 0 ml.</string>
+    <string name="settings_sim_err_volume">Objem musí být od 0 do kapacity zásobníku.</string>
+    <string name="settings_sim_err_not_active">Simulace neběží.</string>
+    <string name="settings_sim_err_already_active">Simulace již běží.</string>
+    <plurals name="settings_sim_events_processed">
+        <item quantity="one">Zpracována %d událost</item>
+        <item quantity="few">Zpracovány %d události</item>
+        <item quantity="many">Zpracováno %d události</item>
+        <item quantity="other">Zpracováno %d událostí</item>
+    </plurals>
+
 
     <!-- Settings -->
     <string name="settings_mode">Režim</string>

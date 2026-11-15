@@ -10,7 +10,10 @@ import cz.nowass.dispenser.domain.DataSource
 import cz.nowass.dispenser.domain.DeviceStatus
 import cz.nowass.dispenser.domain.DoseOccurrence
 import cz.nowass.dispenser.domain.NextDoseCalculator
-import cz.nowass.dispenser.domain.ReservoirEstimate
+import cz.nowass.dispenser.domain.Volume
+import cz.nowass.dispenser.domain.simulation.LowStockPolicy
+import cz.nowass.dispenser.domain.simulation.ReservoirState
+import cz.nowass.dispenser.domain.simulation.ReservoirStatus
 import cz.nowass.dispenser.domain.Schedule
 import cz.nowass.dispenser.ui.components.StatusTone
 import kotlinx.coroutines.flow.SharingStarted
@@ -30,7 +33,8 @@ sealed interface DashboardUiState {
         /** Device clock (simulated in DEMO), in the schedule zone. */
         val now: ZonedDateTime,
         val nextDose: NextDoseUi?,
-        val reservoir: ReservoirUi,
+        /** Null when the reservoir estimate is unknown (no device, no simulation running). */
+        val reservoir: ReservoirUi?,
         val battery: BatteryUi,
         /** Today plus six following days, computed from the repository's schedules. */
         val week: List<DayPreviewUi>,
@@ -80,13 +84,6 @@ class DashboardViewModel(repository: DispenserRepository) : ViewModel() {
     )
 
     companion object {
-        /**
-         * UI styling threshold only. Mirrors the PROPOSED 20 % low-stock default
-         * (REQUIREMENTS_DRAFT FR-021); not an approved business rule and it does
-         * not affect dosing/blocking logic.
-         */
-        internal const val LOW_STOCK_UI_FRACTION = 0.20
-
         internal const val WEEK_DAYS = 7
 
         /** Bound on occurrences enumerated per schedule for the week strip. */
@@ -99,10 +96,12 @@ class DashboardViewModel(repository: DispenserRepository) : ViewModel() {
         internal fun toUiState(
             device: DeviceStatus,
             schedules: List<Schedule>,
-            reservoir: ReservoirEstimate,
+            reservoir: ReservoirState?,
+            lowStock: LowStockPolicy = LowStockPolicy(),
         ): DashboardUiState.Ready {
             val next = NextDoseCalculator.nextDose(schedules, device.now)
-            val covers = next == null || reservoir.canCover(next.amountMl)
+            val nextUl = next?.let { (Volume.mlToMicrolitres(it.amountMl) as? Volume.Conversion.Ok)?.microlitres }
+            val covers = reservoir == null || nextUl == null || reservoir.canDispense(nextUl)
             val isDemo = device.source == DataSource.DEMO
             return DashboardUiState.Ready(
                 isDemo = isDemo,
@@ -110,17 +109,20 @@ class DashboardViewModel(repository: DispenserRepository) : ViewModel() {
                 nextDose = next?.let {
                     NextDoseUi(it.scheduleName, it.amountMl, it.scheduledAt.atZone(device.zone))
                 },
-                reservoir = ReservoirUi(
-                    capacityMl = reservoir.capacityMl,
-                    estimatedRemainingMl = reservoir.estimatedRemainingMl,
-                    fraction = reservoir.fraction.toFloat(),
-                    coversNextDose = covers,
-                    tone = when {
-                        !covers -> StatusTone.Blocked
-                        reservoir.fraction < LOW_STOCK_UI_FRACTION -> StatusTone.Low
-                        else -> StatusTone.Normal
-                    },
-                ),
+                reservoir = reservoir?.let { r ->
+                    ReservoirUi(
+                        capacityMl = Volume.microlitresToMl(r.capacityUl),
+                        estimatedRemainingMl = r.remainingUl / Volume.MICROLITRES_PER_ML.toDouble(),
+                        fraction = (r.remainingUl.toDouble() / r.capacityUl).toFloat(),
+                        coversNextDose = covers,
+                        // Single shared rule (domain LowStockPolicy / blocked state), no UI-only threshold.
+                        tone = when {
+                            r.status(lowStock) == ReservoirStatus.BLOCKED || !covers -> StatusTone.Blocked
+                            r.status(lowStock) == ReservoirStatus.LOW -> StatusTone.Low
+                            else -> StatusTone.Normal
+                        },
+                    )
+                },
                 battery = BatteryUi(
                     percent = device.batteryPercent,
                     isSimulated = isDemo,

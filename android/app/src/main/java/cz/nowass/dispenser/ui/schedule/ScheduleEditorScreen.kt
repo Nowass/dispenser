@@ -94,6 +94,8 @@ import cz.nowass.dispenser.ui.Format
 import cz.nowass.dispenser.ui.components.DEMO_BADGE_TEST_TAG
 import cz.nowass.dispenser.ui.components.DemoBadge
 import cz.nowass.dispenser.ui.components.StatusTag
+import cz.nowass.dispenser.ui.components.DispenserDatePickerDialog
+import cz.nowass.dispenser.ui.components.DispenserTimePickerDialog
 import cz.nowass.dispenser.ui.theme.DispenserTheme
 import cz.nowass.dispenser.ui.theme.Spacing
 import java.time.DayOfWeek
@@ -537,13 +539,13 @@ private fun EditorBody(
     }
 
     if (showStartPicker) {
-        DateDialog(initial = f.startDate, onDismiss = { showStartPicker = false }) { actions.onStartDate(it); showStartPicker = false }
+        DispenserDatePickerDialog(initial = f.startDate, onDismiss = { showStartPicker = false }) { actions.onStartDate(it); showStartPicker = false }
     }
     if (showEndPicker) {
-        DateDialog(initial = f.endDate ?: f.startDate, onDismiss = { showEndPicker = false }) { actions.onEndDate(it); showEndPicker = false }
+        DispenserDatePickerDialog(initial = f.endDate ?: f.startDate, onDismiss = { showEndPicker = false }) { actions.onEndDate(it); showEndPicker = false }
     }
     if (showTimePicker) {
-        TimeDialog(initial = f.time, onDismiss = { showTimePicker = false }) { actions.onTime(it); showTimePicker = false }
+        DispenserTimePickerDialog(initial = f.time, onDismiss = { showTimePicker = false }) { actions.onTime(it); showTimePicker = false }
     }
     if (showDelete) {
         AlertDialog(
@@ -728,63 +730,6 @@ private fun PreviewCard(state: ScheduleEditorUiState.Editing) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-    }
-}
-
-// ---- Pickers (M3); dates are converted via UTC midnight millis as DatePicker expects ----
-
-private fun LocalDate.toPickerMillis(): Long = atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
-private fun Long.toPickerDate(): LocalDate = Instant.ofEpochMilli(this).atZone(ZoneOffset.UTC).toLocalDate()
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun DateDialog(initial: LocalDate, onDismiss: () -> Unit, onConfirm: (LocalDate) -> Unit) {
-    val state = rememberDatePickerState(initialSelectedDateMillis = initial.toPickerMillis())
-    DatePickerDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = {
-            TextButton(onClick = { state.selectedDateMillis?.let { onConfirm(it.toPickerDate()) } ?: onDismiss() }) {
-                Text(stringResource(R.string.dialog_ok))
-            }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) } },
-    ) {
-        DatePicker(
-            state = state,
-            showModeToggle = false,
-            title = { Text(stringResource(R.string.picker_date_title), modifier = Modifier.padding(start = 24.dp, top = 16.dp)) },
-            headline = {
-                Text(
-                    state.selectedDateMillis?.let { Format.fullDateTitle(it.toPickerDate()) } ?: "",
-                    style = MaterialTheme.typography.titleLarge,
-                    modifier = Modifier.padding(start = 24.dp, bottom = 12.dp),
-                )
-            },
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TimeDialog(initial: LocalTime, onDismiss: () -> Unit, onConfirm: (LocalTime) -> Unit) {
-    val state = rememberTimePickerState(initialHour = initial.hour, initialMinute = initial.minute, is24Hour = true)
-    BasicAlertDialog(onDismissRequest = onDismiss) {
-        Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-            Column(Modifier.padding(Spacing.l), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    stringResource(R.string.picker_time_title),
-                    style = MaterialTheme.typography.labelLarge,
-                    modifier = Modifier.fillMaxWidth().padding(bottom = Spacing.m),
-                )
-                TimePicker(state = state)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) }
-                    TextButton(onClick = { onConfirm(LocalTime.of(state.hour, state.minute)) }) {
-                        Text(stringResource(R.string.dialog_ok))
-                    }
-                }
-            }
-        }
     }
 }
 

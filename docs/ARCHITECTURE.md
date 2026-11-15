@@ -102,6 +102,56 @@ stateDiagram-v2
 
 Store `reservoir_capacity_ml`, `estimated_remaining_ml`, `low_alert_sent_for_episode`, `blocked_alert_sent_for_episode`, `refill_epoch`, and last committed dispensing action. Use event IDs to deduplicate on-device and server-side. Stock is a modeled estimate, so never promise true empty detection. If a dose is interrupted, record estimated delivered amount as unknown rather than asserting complete success; choose a conservative policy before release.
 
+## Dispensing simulation and device readiness (A1.3)
+
+The Android app contains a deterministic, pure Kotlin dispensing simulation (`android/app/src/main/java/cz/nowass/dispenser/domain/simulation/`). It doubles as an executable reference for firmware logic:
+
+- `SimulationEngine`: pure functions over an immutable `SimulationState`. Enabled schedules' occurrences in (clock, target] are processed chronologically (time, then schedule id) and at most once (occurrence id). The clock never moves backwards (reset starts a new run). Advancing time means the device is running; an explicit outage records `DISPENSE_SKIPPED` without catch-up. Commands are bounded (366 days, 10 000 occurrences) and excessive ranges are rejected.
+- `ReservoirState` (integer µl): 0 < capacity, 0 ≤ remaining ≤ capacity. No partial doses, never negative. Insufficient stock blocks that dose and every following one until a refill (FR-022). Refill sets an absolute remaining volume ≤ capacity and clears the blocked state and the low-stock latch. The low-stock warning (PROPOSED 20 %, configurable) is issued once per episode (FR-007/FR-021).
+- `HistoryEvent`: immutable, with origin `SIMULATION` or `DEVICE`. Execution events snapshot the schedule name and requested volume, plus reservoir before/after.
+- `ReservoirPredictor`: walks actual future occurrences (not average consumption) within a 365-day / 10 000-occurrence horizon; results beyond it are reported as unknown.
+
+**Device readiness (future service mode, FR-025).** States: `READY` (normal dispensing); blocked by insufficient stock (`ReservoirState.blocked`, cleared by refill); `SERVICE_REQUIRED` (container replacement / tubing priming in progress, dispensing suspended; doses are recorded as skipped with reason `DEVICE_NOT_READY`). Reserved event types: `SERVICE_STARTED`, `TUBING_PRIMED` (priming volume deducted from the estimate), `SERVICE_COMPLETED` (back to `READY`), `DISPENSE_INTERRUPTED_UNCERTAIN`. A1.3 implements none of the service workflow; priming is never part of normal dose execution.
+
+## Service mode state machine (firmware, future — FR-025/FR-026)
+
+Explicit state machine, **separate from the dosing coordinator**. The dosing coordinator only reads the readiness: outside `READY`, due doses are recorded as skipped with reason `DEVICE_NOT_READY` and never caught up. The A1.3 simulation already implements that rule.
+
+```mermaid
+stateDiagram-v2
+  [*] --> BOOT
+  BOOT --> READY: persisted readiness = READY
+  BOOT --> SERVICE_REQUIRED: persisted readiness = SERVICE_REQUIRED (reboot never exits service)
+  READY --> SERVICE_REQUIRED: 4 short presses / BLE start_service
+  SERVICE_REQUIRED --> PRIMING: hold >= T_hold AND button armed
+  PRIMING --> SERVICE_REQUIRED: release (pump OFF immediately)
+  PRIMING --> PRIMING_LIMIT: continuous runtime reaches T_max (pump OFF)
+  PRIMING_LIMIT --> SERVICE_REQUIRED: button released
+  SERVICE_REQUIRED --> READY: 4 short presses / BLE confirm_ready
+```
+
+**Rules**
+- Readiness (`READY` / `SERVICE_REQUIRED`) is persisted durably *before* the transition takes effect. `PRIMING` and `PRIMING_LIMIT` are transient: after any reset the device boots into `SERVICE_REQUIRED` with the pump OFF.
+- **Button arming:** after boot or wake the button is unarmed until a release has been debounced, so a button held at boot can never start the pump.
+- **Pump drive:** ON only while all of these hold: state = `PRIMING`, button sampled pressed (debounced), continuous runtime < `T_max`, and the watchdog is fed. Any other condition, fault, reset or brown-out means OFF (FR-044; hardware pull-down on the gate).
+- Short presses (≤ `T_short_max`) never run the pump, because `T_hold` > `T_short_max`. The 4-press confirm sequence therefore cannot prime by accident.
+- **Consumption:** each pump run is journaled with its runtime. Estimated volume = runtime × calibrated flow (FR-011), deducted from the reservoir estimate and flagged uncertain if not calibrated. Reserved history types: `SERVICE_STARTED`, `PRIMING_PUMP_RUN` (one per run, with its estimated volume), `TUBING_PRIMED` / `SERVICE_COMPLETED` (back to `READY`). Reasons: `SERVICE_BUTTON`, `SERVICE_BLE`, `PRIMING_RUNTIME_LIMIT`.
+- **BLE:** may start service and confirm readiness. It does not drive the pump in this design. If remote priming is ever added, it needs a dead-man heartbeat (pump OFF when the heartbeat is lost).
+- **Wake:** the button must be on a deep-sleep wake-capable GPIO (ESP32-C3: GPIO0–GPIO5). Multi-press counting starts with the wake press.
+
+**Timing parameters (`PROPOSED`, to be validated on hardware)**
+
+| Parameter | Proposed value | Meaning |
+|---|---|---|
+| Debounce | 30 ms | stable level required before an edge counts |
+| `T_short_max` | 400 ms | longest press counted as a short press |
+| Inter-press gap | ≤ 500 ms | max release→press gap inside a multi-press sequence |
+| Sequence end | 700 ms idle | sequence evaluated after this silence; exactly 4 presses = gesture; 1 press = FR-003 BLE wake; other counts ignored |
+| `T_hold` | 800 ms | hold time before the pump starts in `SERVICE_REQUIRED` |
+| `T_max` | 10 s | hard maximum continuous priming run (pending pump characterization, FR-016) |
+
+**Feedback (visible).** The XIAO ESP32-C3 has no user LED, so an indicator (e.g. an LED) must be added in hardware. Proposed patterns: gesture recognized → 2 short blinks; `SERVICE_REQUIRED` → slow blink; `PRIMING` → steady on; `T_max` reached → fast blink until release; back to `READY` → one long blink. The Android app mirrors the state once BLE exists.
+
 ## Data model sketch
 
 ```text

@@ -20,7 +20,7 @@ class MainActivity : ComponentActivity() {
         val container = (application as DispenserApplication).container
         setContent {
             DispenserTheme {
-                DispenserApp(repository = container.repository, isDemo = container.isDemo)
+                DispenserApp(repository = container.repository, simulation = container.simulation, isDemo = container.isDemo)
             }
         }
     }

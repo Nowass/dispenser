@@ -4,10 +4,14 @@ import cz.nowass.dispenser.domain.ConnectionState
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
 import cz.nowass.dispenser.domain.DataSource
 import cz.nowass.dispenser.domain.DeviceStatus
-import cz.nowass.dispenser.domain.DispenserEvent
-import cz.nowass.dispenser.domain.EventType
+import cz.nowass.dispenser.domain.DoseOccurrence
+import cz.nowass.dispenser.domain.simulation.EventOrigin
+import cz.nowass.dispenser.domain.simulation.EventReason
+import cz.nowass.dispenser.domain.simulation.HistoryEvent
+import cz.nowass.dispenser.domain.simulation.HistoryEventType
+import cz.nowass.dispenser.domain.simulation.ReservoirState
+import cz.nowass.dispenser.domain.simulation.SimulationState
 import cz.nowass.dispenser.domain.Recurrence
-import cz.nowass.dispenser.domain.ReservoirEstimate
 import cz.nowass.dispenser.domain.Schedule
 import cz.nowass.dispenser.domain.SyncState
 import java.time.Clock
@@ -19,20 +23,21 @@ import java.time.ZonedDateTime
 import java.util.UUID
 
 /**
- * Fixture repository for previews and tests: in-memory store pre-filled with
- * [MockSeed.schedules] (as PENDING, i.e. phone-only), a fixed clock at the fixture time
- * and no clock ticking. Not used by the running app.
+ * Fixture repository for previews and tests: in-memory stores pre-filled with
+ * [MockSeed.schedules] (as PENDING, i.e. phone-only) and, if [simulationActive], an active
+ * demo simulation at the fixture time with sample history. Not used by the running app.
  */
 fun MockDispenserRepository(
     seed: MockSeed = MockSeed.default(),
     idGenerator: () -> String = { UUID.randomUUID().toString() },
+    simulationActive: Boolean = true,
 ): LocalDispenserRepository = LocalDispenserRepository(
     store = InMemoryScheduleStore(seed.schedules.map { StoredSchedule(it, SyncState.PENDING) }),
     clock = Clock.fixed(seed.device.now, seed.device.zone),
-    simulatedDevice = seed.simulatedDevice,
+    simulationStore = if (simulationActive) InMemorySimulationStore(seed.simulation, seed.events) else InMemorySimulationStore(),
+    batteryPercent = seed.device.batteryPercent,
     idGenerator = idGenerator,
     clockTick = null,
-    events = seed.events,
 )
 
 /**
@@ -43,11 +48,18 @@ fun MockDispenserRepository(
 data class MockSeed(
     val device: DeviceStatus,
     val schedules: List<Schedule>,
-    val reservoir: ReservoirEstimate,
-    val events: List<DispenserEvent>,
+    val reservoir: ReservoirState,
+    val events: List<HistoryEvent>,
 ) {
-    /** Simulated device values matching this fixture. */
-    val simulatedDevice: SimulatedDevice get() = SimulatedDevice(device.batteryPercent, reservoir)
+    /** Active demo simulation at the fixture time (for previews/tests only). */
+    val simulation: SimulationState
+        get() = SimulationState(
+            runId = FIXTURE_RUN_ID,
+            startedAt = events.firstOrNull()?.time ?: device.now,
+            clock = device.now,
+            reservoir = reservoir,
+            nextSeq = events.size + 1L,
+        )
 
     companion object {
         /** Saturday 14 Nov 2026, 07:30 Europe/Prague. */
@@ -99,29 +111,41 @@ data class MockSeed(
                     ),
                 ),
             ),
-            reservoir = ReservoirEstimate(
-                capacityMl = 500.0,
-                estimatedRemainingMl = 312.0,
-                source = DataSource.DEMO,
-            ),
+            reservoir = ReservoirState(capacityUl = 500_000, remainingUl = 312_000, updatedAt = ZonedDateTime.of(2026, 11, 12, 19, 30, 0, 0, DEFAULT_ZONE).toInstant()),
             events = listOf(
-                event(1, 2026, 11, 2, 7, 45, EventType.REFILL, null, 500.0),
-                event(2, 2026, 11, 12, 8, 0, EventType.COMPLETED, "demo-morning", 10.0),
-                event(3, 2026, 11, 12, 19, 30, EventType.COMPLETED, "demo-evening", 5.0),
-                event(4, 2026, 11, 13, 8, 0, EventType.SKIPPED, "demo-morning", 10.0),
+                event(1, 2026, 11, 2, 7, 45, HistoryEventType.RESERVOIR_REFILLED, EventReason.MANUAL_REFILL, null, null, 0, 40_000, 500_000),
+                event(2, 2026, 11, 12, 8, 0, HistoryEventType.DISPENSE_SUCCESS, EventReason.SCHEDULED, "demo-morning", 10_000, 10_000, 327_000, 317_000),
+                event(3, 2026, 11, 12, 19, 30, HistoryEventType.DISPENSE_SUCCESS, EventReason.SCHEDULED, "demo-evening", 5_000, 5_000, 317_000, 312_000),
+                event(4, 2026, 11, 13, 8, 0, HistoryEventType.DISPENSE_SKIPPED, EventReason.DEVICE_OUTAGE, "demo-morning", 10_000, 0, 312_000, 312_000),
             ),
         )
 
+        const val FIXTURE_RUN_ID = "demo"
+
+        private val NAMES = mapOf("demo-morning" to "Ranní dávka", "demo-evening" to "Večerní doplnění")
+
         private fun event(
             seq: Long, y: Int, mo: Int, d: Int, h: Int, mi: Int,
-            type: EventType, scheduleId: String?, amountMl: Double?,
-        ) = DispenserEvent(
-            seq = seq,
-            time = ZonedDateTime.of(y, mo, d, h, mi, 0, 0, DEFAULT_ZONE).toInstant(),
-            type = type,
-            scheduleId = scheduleId,
-            amountMl = amountMl,
-            source = DataSource.DEMO,
-        )
+            type: HistoryEventType, reason: EventReason, scheduleId: String?,
+            requestedUl: Long?, dispensedUl: Long, beforeUl: Long, afterUl: Long,
+        ): HistoryEvent {
+            val time = ZonedDateTime.of(y, mo, d, h, mi, 0, 0, DEFAULT_ZONE)
+            return HistoryEvent(
+                id = "$FIXTURE_RUN_ID-$seq",
+                seq = seq,
+                time = time.toInstant(),
+                type = type,
+                origin = EventOrigin.SIMULATION,
+                reason = reason,
+                scheduleId = scheduleId,
+                scheduleNameSnapshot = scheduleId?.let(NAMES::get),
+                occurrenceId = scheduleId?.let { DoseOccurrence.occurrenceId(it, time.toLocalDate()) },
+                requestedUl = requestedUl,
+                dispensedUl = dispensedUl,
+                reservoirBeforeUl = beforeUl,
+                reservoirAfterUl = afterUl,
+                capacityUl = 500_000,
+            )
+        }
     }
 }

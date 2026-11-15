@@ -36,7 +36,7 @@ A buildable Android app (`cz.nowass.dispenser`, minSdk 26), in Czech, launched o
 - Running app uses the phone's real clock; an injectable `Clock` keeps tests/previews deterministic.
 - Quantities stored as integer microlitres with validated ml↔µl conversion; optimistic revisions; no destructive migrations.
 
-**A1.3 — reservoir and simulation**
+**A1.3 — reservoir and simulation** (button-driven priming, FR-026, is documented and its event types reserved; no pump/button/BLE implementation in A1) (delivered in two parts: **A1.3a** pure simulation domain, reservoir state, prediction, safety rules and tests; **A1.3b** separate `simulation.db` persistence, History UI, reservoir detail, Settings simulation controls, dashboard integration)
 
 - Dashboard shows next dose, upcoming total, estimated remaining fluid and mock battery percentage.
 - Mock controls let user advance simulation time by hours/days; they affect only demo state.

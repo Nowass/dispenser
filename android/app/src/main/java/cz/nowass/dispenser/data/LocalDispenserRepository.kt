@@ -4,8 +4,9 @@ import cz.nowass.dispenser.domain.ConnectionState
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
 import cz.nowass.dispenser.domain.DataSource
 import cz.nowass.dispenser.domain.DeviceStatus
-import cz.nowass.dispenser.domain.DispenserEvent
-import cz.nowass.dispenser.domain.ReservoirEstimate
+import cz.nowass.dispenser.domain.simulation.HistoryEvent
+import cz.nowass.dispenser.domain.simulation.ReservoirState
+import cz.nowass.dispenser.domain.simulation.SimulationEngine
 import cz.nowass.dispenser.domain.Schedule
 import cz.nowass.dispenser.domain.ScheduleDraft
 import cz.nowass.dispenser.domain.ScheduleValidator
@@ -13,76 +14,70 @@ import cz.nowass.dispenser.domain.SyncState
 import cz.nowass.dispenser.domain.toSchedule
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.Clock
+import java.time.Instant
 import java.time.ZoneId
 import java.util.UUID
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.minutes
 
-/** Device-side values that are still simulated (no hardware yet); always tagged DEMO. */
-data class SimulatedDevice(
-    val batteryPercent: Int?,
-    val reservoir: ReservoirEstimate,
-) {
-    companion object {
-        /** Demo battery and reservoir estimate shown until a real device is connected. */
-        fun demo(): SimulatedDevice = SimulatedDevice(
-            batteryPercent = 78,
-            reservoir = ReservoirEstimate(capacityMl = 500.0, estimatedRemainingMl = 312.0, source = DataSource.DEMO),
-        )
-    }
-}
-
 /**
- * App repository for A1.2c: schedules are persisted locally through a [ScheduleStore];
- * device values (battery, reservoir, history) are still simulated and tagged DEMO.
+ * App repository: schedules are persisted locally through a [ScheduleStore]; device-side
+ * state (reservoir, history, clock while simulating) comes from the dispensing simulation
+ * ([simulation]); battery is a fixed demo value. Everything device-side is tagged DEMO /
+ * SIMULATION and never presented as real hardware activity.
  *
- * - "Now" comes from the injected [clock] (the phone clock in the app; fixed in tests and
- *   previews). With a [clockTick] the device status re-emits on each tick boundary so
- *   time-dependent UI (next dose, past occurrences) stays current.
- * - Every write is validated, revision-checked atomically by the store, and stored as
+ * - "Now": while a simulation runs, the visible simulation clock (D1); otherwise the injected
+ *   phone [clock], re-emitted on each [clockTick] boundary.
+ * - Schedule writes are validated, revision-checked atomically by the store, and stored as
  *   [SyncState.PENDING] ("Uloženo v telefonu"). No device acknowledgement is simulated.
- * - A future BLE repository can reuse the same [ScheduleStore] as its local cache.
+ * - The simulation only reads schedules; it never writes them or their sync state.
  */
 class LocalDispenserRepository(
     private val store: ScheduleStore,
     private val clock: Clock,
-    private val simulatedDevice: SimulatedDevice = SimulatedDevice.demo(),
+    simulationStore: SimulationStore = InMemorySimulationStore(),
+    private val batteryPercent: Int? = DEMO_BATTERY_PERCENT,
     private val idGenerator: () -> String = { UUID.randomUUID().toString() },
     private val clockTick: Duration? = 1.minutes,
-    events: List<DispenserEvent> = emptyList(),
     private val zone: ZoneId = DEFAULT_ZONE,
+    simulationEngine: SimulationEngine = SimulationEngine(zone = zone),
+    simulationRunIds: () -> String = { UUID.randomUUID().toString() },
 ) : DispenserRepository {
 
-    private val reservoir = MutableStateFlow(simulatedDevice.reservoir)
-    private val events = MutableStateFlow(events)
     private val writeLock = Mutex()
 
-    override fun observeDevice(): Flow<DeviceStatus> = flow {
-        emit(deviceStatus())
+    /** Simulation controls (DEMO); not part of the device contract. */
+    val simulation: DispenserSimulator = DispenserSimulator(simulationStore, observeSchedules(), simulationEngine, simulationRunIds)
+
+    private fun phoneNow(): Flow<Instant> = flow {
+        emit(clock.instant())
         val tick = clockTick ?: return@flow
         val tickMs = tick.inWholeMilliseconds
         while (true) {
             // Align to the next tick boundary of the clock (e.g. the next full minute).
             delay(tickMs - Math.floorMod(clock.millis(), tickMs))
-            emit(deviceStatus())
+            emit(clock.instant())
         }
-    }.distinctUntilChanged()
+    }
 
-    private fun deviceStatus() = DeviceStatus(
-        source = DataSource.DEMO,
-        connection = ConnectionState.DEMO,
-        now = clock.instant(),
-        batteryPercent = simulatedDevice.batteryPercent,
-        zone = zone,
-    )
+    override fun observeDevice(): Flow<DeviceStatus> =
+        combine(simulation.observeSimulation(), phoneNow()) { sim, phone ->
+            DeviceStatus(
+                source = DataSource.DEMO,
+                connection = ConnectionState.DEMO,
+                now = sim?.clock ?: phone,
+                batteryPercent = batteryPercent,
+                zone = zone,
+                simulationActive = sim != null,
+            )
+        }.distinctUntilChanged()
 
     override fun observeSchedules(): Flow<List<Schedule>> =
         store.observe().map { snap -> snap.schedules.map { it.schedule } }.distinctUntilChanged()
@@ -93,8 +88,12 @@ class LocalDispenserRepository(
     override fun observeUnreadableScheduleCount(): Flow<Int> =
         store.observe().map { it.unreadableCount }.distinctUntilChanged()
 
-    override fun observeReservoir(): Flow<ReservoirEstimate> = reservoir.asStateFlow()
-    override fun observeEvents(): Flow<List<DispenserEvent>> = events.asStateFlow()
+    override fun observeReservoir(): Flow<ReservoirState?> =
+        simulation.observeSimulation().map { it?.reservoir }.distinctUntilChanged()
+
+    override fun observeHistory(): Flow<List<HistoryEvent>> = simulation.observeHistory()
+
+    override suspend fun refillReservoir(remainingUl: Long): CommandResult = simulation.refill(remainingUl)
 
     override suspend fun createSchedule(draft: ScheduleDraft): ScheduleWriteResult {
         val errors = ScheduleValidator.validate(draft)
@@ -133,7 +132,10 @@ class LocalDispenserRepository(
             }
         }
 
-    private companion object {
-        const val MAX_ID_ATTEMPTS = 5
+    companion object {
+        private const val MAX_ID_ATTEMPTS = 5
+
+        /** Battery monitoring is not implemented (A1.3 scope): fixed, clearly simulated value. */
+        const val DEMO_BATTERY_PERCENT = 78
     }
 }
