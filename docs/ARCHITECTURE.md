@@ -44,6 +44,15 @@ Keep all business-domain components (`scheduler`, `dosing coordinator`, `stock e
 
 With no measured liquid flow and no transactional actuator, truly *exactly-once* dosing is impossible across arbitrary power failures. Choose **at-most-once automatic actuation** for each occurrence: a crash after durable `STARTED` may result in a missed/partial dose, but should never cause an automatic duplicate dose. Surface the event as uncertain in logs and Android.
 
+**Firmware implementation status (M1.2, 2026-11-15, pending review).** Steps 3, 5 (deduplication, timing, clock validity, enabled flag) and 6 (durable `STARTED` before actuation, outcome afterwards) are implemented as pure domain code in `firmware/components/dispenser_domain` (`dsp_exec.h`, `dsp_history.h`) and host-tested with a fault-injecting fake store; details in `firmware/README.md` "Execution history and deduplication". Approved decisions:
+
+- An automatic occurrence may run only while `scheduled ≤ now ≤ scheduled + 10 min` (due window, configurable) and only with a valid clock; later it is `MISSED` and never caught up.
+- A claim is a durable `STARTED` record (write, commit, read-back) **before** the pump is authorized; any storage failure means no pump. Records in any state (`STARTED`, `COMPLETED`, `FAILED`, `INTERRUPTED`) block re-execution; nothing is retried automatically. At boot, leftover `STARTED` records become `INTERRUPTED`.
+- History = **one watermark record per schedule ID** (last claimed local date), **32 slots by default** (approved). It blocks that date and all earlier dates, also after a backward clock correction while the record exists. Records of other schedules may be reused (oldest first, only when full) once their date is more than **7 days** old. This is safe because such occurrences are missed anyway, **assuming the valid clock never moves back more than 7 days**. That is an assumption to be enforced by the future clock service, not a guarantee of M1.2 (see `firmware/README.md`, "Backward clock adjustments"). With no free or reusable slot, a new schedule's claim is refused without touching storage. Any corrupted record or duplicate schedule ID anywhere in the history blocks automatic dosing (approved).
+- **Single owner:** the future dosing service task owns the coordinator and the history store and serializes all automatic and manual requests. Storage must replace one record atomically and durably; no multi-record atomicity is assumed.
+- Manual doses are separate: they never read, write or clear automatic history.
+- Schedule IDs: Android-generated UUIDs are preferred for schedule management (approved), never reused. A newly created schedule (new ID) may dose on the same day as a deleted one (approved).
+
 ## Domain state machines
 
 ### Dosing operation
@@ -192,6 +201,7 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - Size-bounded durable event history, not a high-frequency trace. Prefer append records or a controlled ring/log partition with recovery and testable wear limits; only persist event boundaries.
 - Use crash-tolerant records and explicit version/migration logic. Commit `STARTED` before GPIO activation, commit `COMPLETED` after motor OFF; avoid coupling GPIO transitions to fragile multi-key updates.
 - Journal-write failure must prevent actuator start (fail-safe).
+- Execution history (M1.2): fixed slots, one record per schedule (32 slots by default, approved; about 3 KB), one blob key per slot with a versioned encoding. Each slot update must be atomic (old or new value after power loss) and durable after `nvs_commit`. Two writes per automatic dose; the coordinator confirms each by reading it back.
 
 ## Wireless APIs
 

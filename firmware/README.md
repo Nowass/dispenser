@@ -4,9 +4,10 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: milestone M1.1 (recurrence engine) approved and finalized, pending commit.** At run time
-the firmware still only logs its identification: the recurrence engine is compiled into
-the image's component library but not called by `app_main`, and nothing is dosed. It
+**Status: M1.1 (recurrence engine) committed; M1.2 (execution history and
+deduplication) implemented, awaiting review.** At run time the firmware still only logs
+its identification: the domain components are compiled into the image's component
+library but not called by `app_main`, and nothing is dosed. It
 has **not been run on physical hardware**: the board has not arrived yet. All
 verification so far is Linux host tests and cross-compilation for `esp32c3`.
 
@@ -16,16 +17,21 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
 - Cross-compilation for ESP32-C3 (`esp32c3`) with ESP-IDF v6.1.
 - Platform-independent C11 domain component `dispenser_domain`: firmware identification
   formatting and (M1.1) the **recurrence engine** with explicit Europe/Prague DST handling
-  (see [Recurrence engine](#recurrence-engine-m11)).
+  (see [Recurrence engine](#recurrence-engine-m11)), and (M1.2) the **execution
+  coordinator and history** that claim an occurrence durably before the pump may run and
+  prevent repeated automatic dosing (see
+  [Execution history and deduplication](#execution-history-and-deduplication-m12)),
+  tested against a fake storage with injected faults and power loss.
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
 ### Not implemented
 
-Dosing coordinator and durable occurrence deduplication (M1.2/M1.3), MONTHLY recurrence,
-reservoir logic, event journal, NVS persistence, BLE and Wi-Fi, clock synchronization,
-deep sleep and wake-up, GPIO and motor control, service mode, OTA. The recurrence engine
-only calculates planned occurrences; nothing acts on them yet.
+Real NVS storage adapter, dosing service task (wiring of recurrence, coordinator, stock,
+limits and pump), schedule management and ID allocation, MONTHLY recurrence, reservoir
+logic, event journal, BLE and Wi-Fi, clock synchronization, deep sleep and wake-up, GPIO
+and motor control, service mode, OTA. The domain code decides and records; nothing
+drives hardware yet.
 
 ### Not verified
 
@@ -117,13 +123,17 @@ firmware/
 │       ├── include/dsp_identity.h    firmware identification
 │       ├── include/dsp_time.h        dates, UTC instants, timezone rule (M1.1)
 │       ├── include/dsp_recurrence.h  schedules and recurrence queries (M1.1)
+│       ├── include/dsp_history.h     execution records, storage contract (M1.2)
+│       ├── include/dsp_exec.h        execution coordinator (M1.2)
 │       └── src/                      matching .c files
 ├── test/host/                  host unit tests (CMake + CTest, no ESP-IDF)
 │   ├── CMakeLists.txt
 │   ├── support/dsp_test.h      minimal header-only test harness
+│   ├── support/fake_store.[ch] in-memory history store with fault/power-loss injection
 │   ├── test_identity.c
 │   ├── test_recurrence.c          engine unit tests (C only)
-│   └── test_recurrence_vectors.c  runs ../../test-vectors/*.txt
+│   ├── test_recurrence_vectors.c  runs ../../test-vectors/*.txt
+│   └── test_exec.c                coordinator/history tests (M1.2)
 └── .devcontainer/              optional pinned ESP-IDF v6.1 build container
 
 ../test-vectors/                shared C/Kotlin test vectors (see its README)
@@ -331,6 +341,181 @@ decisions above and lie outside normal use:
      schedule, `limit = 10_000` and a 30-year range, expecting `null`.
    - The C engine has no such cap and always reports `DSP_REC_ERR_BUFFER_FULL`.
 
+## Execution history and deduplication (M1.2)
+
+Pure C11 in `components/dispenser_domain`: `dsp_history.h` (records, storage contract,
+history operations) and `dsp_exec.h` (execution coordinator). It decides whether an
+automatic occurrence may run and makes sure it runs **at most once**. It does not start
+the pump, read the clock or write NVS itself: the caller supplies the clock snapshot and
+an injected storage implementation.
+
+### Approved semantics
+
+- Identity `<scheduleId>@<localDate>` (M1.1). Once an automatic occurrence has been
+  **claimed**, it is never executed automatically again, in any state (STARTED,
+  COMPLETED, FAILED, INTERRUPTED). Editing a schedule (time, volume, revision) keeps the
+  identity, so a claimed day is never repeated.
+- **Due window (approved: 10 minutes):** an occurrence may run while
+  `scheduled_at <= now <= scheduled_at + 600 s`. Before that: `DSP_EXEC_NOT_DUE`. After
+  that: `DSP_EXEC_MISSED`, skipped forever. There is no catch-up, so accumulated occurrences
+  are never executed after a restart. The window is a coordinator parameter (0 … 3600 s)
+  so it can be retuned after RTC drift measurements.
+- A **valid clock** (`dsp_clock_t.valid`, set by the future clock service after SNTP or
+  Android time, FR-031/FR-033) is required; otherwise `DSP_EXEC_ERR_CLOCK`.
+- **Disabled** schedules are never executed (`DSP_EXEC_DISABLED`).
+- The occurrence must be exactly what the **current** schedule yields on that date
+  (re-computed with the recurrence engine). Stale occurrences computed before an edit
+  and fabricated ones are refused (`DSP_EXEC_ERR_OCCURRENCE`).
+- **Manual dosing** (`dsp_exec_manual_begin`) is independent: it never reads, writes or
+  clears automatic history, and it neither satisfies nor resets an automatic occurrence.
+  Only mutual exclusion with automatic execution (one pump) is enforced.
+- **Default is no dosing:** any error, unknown history (read failure, corrupted or
+  duplicate record), full history or unconfirmed persistence means the pump is **not**
+  authorized.
+
+### Automatic execution protocol
+
+1. `dsp_exec_check()`: optional read-only pre-check, e.g. before stock and battery checks.
+2. `dsp_exec_claim()`: re-checks everything, then writes a `STARTED` record, commits it
+   and reads it back. **Only `DSP_EXEC_OK` authorizes pump activation.**
+3. The caller runs the pump (future milestone).
+4. `dsp_exec_finish(token, COMPLETED | FAILED)`: stores the outcome. Nothing is ever
+   retried automatically.
+
+At boot, `dsp_exec_recover()` rewrites every record still `STARTED` as `INTERRUPTED`
+(still blocking), so the outcome can be reported as uncertain.
+
+### State transitions (per schedule record)
+
+```text
+             claim (durable STARTED)                     finish(COMPLETED)
+ (no record) ─────────────────────────► STARTED ─────────────────────────► COMPLETED
+ or older date                             │   └─────── finish(FAILED) ───► FAILED
+                                           └── restart, recover() ────────► INTERRUPTED
+
+ Every state blocks automatic execution of its local date and of all earlier dates.
+ A claim for a LATER date overwrites the schedule's record (the watermark moves forward).
+```
+
+### Crash and restart behavior
+
+| Event | Result |
+|---|---|
+| Restart before the scheduled time | Executes normally when due (within the window) |
+| Restart or wake after the window | `MISSED`; skipped, never caught up; the next occurrence runs normally |
+| Power loss before the claim is durable (write or commit lost) | Claim failed, pump never authorized. After restart, the occurrence may still run once if the window is still open. This is not a duplicate, because the pump never ran. |
+| Power loss after the durable claim, before or during the pump run | Record `STARTED` → `INTERRUPTED` at recovery; never resumed or repeated. **The dose may be lost or partial (accepted).** |
+| Commit reports failure but data persisted / read-back mismatch | Not authorized; the occurrence is blocked afterwards (lost, never doubled) |
+| Storing the outcome fails after the pump ran | Record stays `STARTED` (still blocks); reported as interrupted after the next boot |
+
+### Storage contract (for the future NVS adapter)
+
+`dsp_history_store_t` is a fixed array of record slots with `read`, `write` (stage one
+slot) and `commit` (make durable):
+
+- **Per-slot atomicity:** after any power loss, each slot holds its old or its new
+  record, never a mix. Suggested NVS mapping: one blob key per slot, a versioned
+  encoding, `nvs_set_blob` + `nvs_commit`.
+- **Durability:** `commit` returning OK means the record survives power loss. On a commit
+  error, the slot may hold either value.
+- **No cross-slot atomicity** is assumed: every coordinator transition stages and commits
+  exactly one slot. The coordinator confirms each commit by reading the slot back.
+- **Concurrency (approved: single owner):** neither the coordinator nor the store is
+  thread-safe. The future **dosing service task** owns the coordinator and the store and
+  serializes every automatic and manual request. Two execution paths can therefore never
+  claim the same occurrence at the same time. Within that task, the coordinator allows only
+  one active execution (`DSP_EXEC_BUSY`). BLE handlers and timers must post requests
+  to that task instead of calling the coordinator.
+
+### History representation and retention (approved)
+
+- **Per-schedule watermark:** one record per schedule ID, holding the last claimed local
+  date, state, revision, scheduled and claim instants (96 bytes in RAM). An occurrence
+  is blocked if its schedule's record date is ≥ its local date. This is sufficient because a
+  schedule has at most one occurrence per local date and dates are never caught up.
+  While a schedule's record exists, it also blocks its dates after a backward clock
+  correction of any size. Each claim updates the schedule's record in place: 2 flash writes
+  per automatic dose (claim and outcome) and none otherwise.
+- **Retention (approved: 7 days):** a record of another schedule may be overwritten when the
+  history is full, but only once its local date is **more than 7 days** before today's local
+  date, oldest first. Under a correct clock this cannot cause a duplicate: such a record
+  only blocks occurrences dated a week or more in the past, which are refused as
+  `MISSED` anyway.
+- **Capacity (approved: 32 slots by default, `DSP_HISTORY_DEFAULT_SLOTS`; maximum 64):**
+  32 slots take about 3 KB in NVS. They must cover the active schedules (FR-010 proposes
+  up to 8) plus schedules whose last claim is within the last 7 days. When no empty or
+  recyclable slot exists, a new schedule's claim fails with `DSP_EXEC_ERR_CAPACITY` and
+  **storage is not modified**; the new schedule is not executed until a record becomes
+  older than 7 days. Existing schedules keep working (in-place update). Tested with all
+  32 slots occupied.
+- **Whole-history validation:** every check, claim, lookup and recovery first validates all
+  slots. Any corrupted record, or any two records sharing a schedule ID (whichever schedule
+  they belong to), returns `DSP_EXEC_ERR_INTERNAL` and blocks automatic dosing (approved).
+  Duplicates are found with one 32-bit FNV-1a hash per occupied slot (at most
+  64 × 63 / 2 integer comparisons). Equal hashes trigger an exact re-read and compare of
+  both slots, so different IDs that collide are not misreported.
+- This history is for deduplication only. The user-visible audit trail (every attempt,
+  skip and outcome, FR-040/FR-041) is the future event journal.
+
+### Backward clock adjustments (limitation)
+
+Deduplication of **recycled** records relies on an assumption, not on a mechanism: the
+*valid* clock never moves back by more than the 7-day retention window. M1.2 does not
+detect backward jumps; that belongs to the future clock service, which decides what
+`dsp_clock_t.valid` means.
+
+| Situation | M1.2 behavior |
+|---|---|
+| Clock moved back, the schedule's record still exists (any distance) | Blocked (`ALREADY_CLAIMED`) |
+| Clock moved back ≤ 7 days | Record cannot have been recycled: blocked |
+| Clock moved back > 7 days to the date of a **recycled** record | Currently refused with `ERR_CAPACITY` (storage untouched). This is an emergent effect of "recycle only when full, oldest first, never empty a slot", **not a designed guarantee** |
+| Same, but a slot is free (M1.2 never frees one; a future change might) | The recycled occurrence is **authorized again**: a duplicate dose |
+
+`test_limitation_backward_clock_after_recycling` pins both behaviors. A small future
+mitigation is possible: refuse automatic dosing while `now` is earlier than the newest
+`claimed_at` in the history. It is not implemented, because it would also block dosing
+after a mistaken forward time jump is corrected, so it needs a product decision together
+with the clock service.
+
+### Schedule IDs (invariant from M1.1, approved 2026-11-15)
+
+Schedule IDs must be unique within the device and **never reused**. Preferred for the
+schedule-management milestone (approved): **UUID-based IDs generated by Android**. The
+device rejects a create whose ID already exists, and an edit keeps the ID with a higher
+revision. With the watermark design, an ID that does reappear (for example via backup
+restore) can only **suppress** a dose on a date the old schedule already claimed. It can
+never cause a duplicate. **Approved:** deleting a schedule and creating a new one (new ID)
+on the same day is a new identity and may dose on that day as well.
+
+### Status codes
+
+`DSP_EXEC_OK`, `NOT_FOUND` (lookup), `NOT_DUE`, `MISSED`, `ALREADY_CLAIMED`,
+`DISABLED`, `BUSY`, `ERR_ARG`, `ERR_SCHEDULE`, `ERR_OCCURRENCE` (invalid identity),
+`ERR_CLOCK`, `ERR_CAPACITY`, `ERR_STORAGE_READ`, `ERR_STORAGE_WRITE`,
+`ERR_STORAGE_COMMIT`, `ERR_PERSIST_CONFIRM`, `ERR_INTERNAL` (corrupted or duplicate
+record anywhere in the history, slot changed under an active execution).
+
+### Resources
+
+No heap, no globals, no recursion. Bounded work: at most 64 slot reads per scan, plus
+2 re-reads per hash collision and at most 2,016 hash comparisons. ESP32-C3 code (`-Os`):
+about 2.4 KB (`dsp_exec` 1.5 KB, `dsp_history` 1.0 KB), no `.data`/`.bss`. RAM:
+`dsp_exec_t` about 150 B (caller-owned). Stack (`-Os`): `dsp_history_scan` 576 B (hash
+table for 64 slots), `dsp_exec_finish` 320 B, `dsp_exec_claim` 272 B. The deepest chain
+(claim → scan) is about 0.85 KB plus the storage adapter's own needs, which the dosing
+service task's stack must cover.
+
+### Remaining limitations
+
+- Backward clock jumps over 7 days after recycling (see above): an assumption, enforced
+  later by the clock service.
+- Corrupted or duplicate history blocks all automatic dosing (approved, fail-safe) until a
+  future maintenance/repair operation clears it. That operation does not exist yet.
+- After heavy schedule churn, capacity can delay a brand-new schedule by up to 7 days.
+- The record encoding, NVS key layout and wear figures belong to the NVS adapter
+  milestone. Clock validity, stock/battery checks, limits, event journal and pump control
+  are not part of M1.2.
+
 ## Build (ESP32-C3, native)
 
 ```sh
@@ -388,11 +573,11 @@ Current host tests (CTest names):
 | `test_identity` | firmware identification formatting, version from `version.txt` |
 | `test_recurrence_vectors` | all shared vectors in `../test-vectors/` (also run by the Android Kotlin tests), incl. 100 years of DST transitions |
 | `test_recurrence_vectors_TZ_*` | the same vectors with host `TZ=America/New_York` and `TZ=Asia/Kathmandu` (host timezone has no effect) |
-| `test_recurrence` | day arithmetic vs a naive calendar walk 1999–2101, jump search vs brute force (600 random schedules), buffer paging, argument errors, extreme instants, identity across edits |
+| `test_recurrence` | day arithmetic vs a naive calendar walk 1999–2101, jump search vs brute force (600 random schedules), buffer paging, argument errors, extreme instants and API range boundaries, identity across edits |
+| `test_exec` | execution coordinator and history: normal run, duplicates, restarts, power loss before and after the durable claim, write/commit/read/read-back failures, edits, same-instant schedules, dates and clock rollback, invalid clock, due window, manual independence, capacity/retention, corruption, invalid input; a randomized 60-day run with injected faults and restarts (no duplicate or late authorization) and a fault-free 200-day run (every occurrence exactly once) |
 
-Planned host coverage (M1.2+): occurrence deduplication, dosing state transitions,
-reservoir depletion/refill, service-mode transitions, interrupted operations, simulated
-clock and storage failures. The Android domain
+Planned host coverage (later milestones): reservoir depletion/refill and blocking, dose
+limits, service-mode transitions, event journal, NVS adapter (on target). The Android domain
 (`android/app/src/main/java/cz/nowass/dispenser/domain/`) is the behavioral reference.
 
 ## Devcontainer (optional)
@@ -434,8 +619,9 @@ alternative to the native setup, not a requirement.
 | `app_main` identification logging | n/a | yes | **not run** |
 | Firmware version from `version.txt` | validated at configure time | yes (app descriptor) | not run |
 | Recurrence engine (`dsp_recurrence`, `dsp_time`) | implemented, unit- and vector-tested, Kotlin parity | compiled, not called | not run |
+| Execution coordinator and history (`dsp_exec`, `dsp_history`) | implemented, tested with fake storage (faults, power loss) | compiled, not called | not run |
 | Host test infrastructure (CMake/CTest, sanitizers) | working | n/a | n/a |
-| Dosing coordinator, deduplication, reservoir, journal, service mode | not started | — | — |
+| NVS storage adapter, dosing service, reservoir, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
 | Deep sleep and wake-up | not started | — | — |
 | NVS persistence, BLE, Wi-Fi/SNTP, OTA | not started | — | — |
@@ -453,5 +639,5 @@ alternative to the native setup, not a requirement.
 
 ## Next milestone
 
-M1.2/M1.3 — durable occurrence tracking and the dosing coordinator. Not started; scope to
-be defined after the M1.1 review.
+After the M1.2 review: next steps are to be agreed (candidates: event journal, reservoir
+and limits, NVS storage adapter). Not started.

@@ -100,6 +100,10 @@ enum {
     DSP_SCHED_E_TIME_NONEXISTENT = 1u << 15,   /* ONCE in a DST gap (Kotlin TIME_NONEXISTENT) */
 };
 
+/* True for 1..DSP_SCHEDULE_ID_MAX_LEN characters of [A-Za-z0-9._-] followed by NUL
+ * within the first DSP_SCHEDULE_ID_MAX_LEN + 1 bytes (never reads further). */
+bool dsp_schedule_id_is_valid(const char *id);
+
 /* Checks every field; reports all problems at once (like Kotlin ScheduleValidator). */
 dsp_sched_errors_t dsp_schedule_validate(const dsp_schedule_t *schedule, const dsp_tz_t *tz);
 

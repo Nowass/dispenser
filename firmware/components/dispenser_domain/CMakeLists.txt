@@ -8,6 +8,8 @@
 #
 # Keep the source list here only.
 set(DSP_DOMAIN_SRCS
+    "src/dsp_exec.c"
+    "src/dsp_history.c"
     "src/dsp_identity.c"
     "src/dsp_recurrence.c"
     "src/dsp_time.c"

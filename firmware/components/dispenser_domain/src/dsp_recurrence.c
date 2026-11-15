@@ -46,6 +46,11 @@ static bool id_valid(const char *id)
     return i >= 1 && i <= DSP_SCHEDULE_ID_MAX_LEN;
 }
 
+bool dsp_schedule_id_is_valid(const char *id)
+{
+    return id_valid(id);
+}
+
 dsp_sched_errors_t dsp_schedule_validate(const dsp_schedule_t *s, const dsp_tz_t *tz)
 {
     if (s == NULL) {
