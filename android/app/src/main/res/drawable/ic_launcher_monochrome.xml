@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed (monochrome) icon: same geometry as the foreground; the system applies the tint. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FF000000"
+        android:fillType="evenOdd"
+        android:pathData="M54,24 L40,44.5 C35.3,51.3 32.5,56.5 32.5,62.5 C32.5,74.4 42.1,84 54,84 C65.9,84 75.5,74.4 75.5,62.5 C75.5,56.5 72.7,51.3 68,44.5 Z M44.2,40 L46,40 L46,47.4 Q46,48.6 47.2,48.6 L60.8,48.6 Q62,48.6 62,47.4 L62,40 L63.8,40 L63.8,49 Q63.8,51.4 61.4,51.4 L59.6,51.4 L59.6,54.6 Q59.6,55.4 58.8,55.4 L49.2,55.4 Q48.4,55.4 48.4,54.6 L48.4,51.4 L46.6,51.4 Q44.2,51.4 44.2,49 Z M50.5,57 L57.6,57 L56.4,58.5 L55.3,65.2 Q55.2,65.6 54.8,65.6 L53.2,65.6 Q52.8,65.6 52.7,65.2 L51.6,58.5 Z M54,67.6 L52,70.6 C51.6,71.2 51.5,71.7 51.5,72.3 C51.5,73.7 52.6,74.8 54,74.8 C55.4,74.8 56.5,73.7 56.5,72.3 C56.5,71.7 56.4,71.2 56,70.6 Z" />
+</vector>

@@ -42,6 +42,13 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cz.nowass.dispenser.R
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
+import cz.nowass.dispenser.data.AppVersion
+import cz.nowass.dispenser.data.DisplayNameRules
+import cz.nowass.dispenser.ui.components.StatusTag
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.platform.testTag
 import cz.nowass.dispenser.ui.Format
 import cz.nowass.dispenser.ui.components.DispenserDatePickerDialog
 import cz.nowass.dispenser.ui.components.DispenserTimePickerDialog
@@ -54,19 +61,32 @@ import java.time.LocalTime
 import java.time.ZonedDateTime
 
 @Composable
-fun SettingsRoute(viewModel: SimulationSettingsViewModel, modifier: Modifier = Modifier) {
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val message by viewModel.message.collectAsStateWithLifecycle()
+fun SettingsRoute(
+    simulationViewModel: SimulationSettingsViewModel,
+    appViewModel: AppSettingsViewModel,
+    onOpenReservoir: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val state by simulationViewModel.uiState.collectAsStateWithLifecycle()
+    val message by simulationViewModel.message.collectAsStateWithLifecycle()
+    val app by appViewModel.uiState.collectAsStateWithLifecycle()
     SettingsScreen(
+        app = app,
         simulation = state,
         message = message,
+        appActions = AppSettingsActions(
+            validateName = appViewModel::validateName,
+            saveName = appViewModel::saveName,
+            resetName = appViewModel::resetName,
+            openReservoir = onOpenReservoir,
+        ),
         actions = SimulationActions(
-            start = viewModel::start,
-            plusHour = { viewModel.advanceHours(1) },
-            plusDay = { viewModel.advanceDays(1) },
-            advanceTo = { viewModel.advanceTo(it, DEFAULT_ZONE) },
-            outageUntil = { viewModel.outageUntil(it, DEFAULT_ZONE) },
-            reset = viewModel::reset,
+            start = simulationViewModel::start,
+            plusHour = { simulationViewModel.advanceHours(1) },
+            plusDay = { simulationViewModel.advanceDays(1) },
+            advanceTo = { simulationViewModel.advanceTo(it, DEFAULT_ZONE) },
+            outageUntil = { simulationViewModel.outageUntil(it, DEFAULT_ZONE) },
+            reset = simulationViewModel::reset,
         ),
         modifier = modifier,
     )
@@ -81,11 +101,26 @@ data class SimulationActions(
     val reset: () -> Unit = {},
 )
 
-/** Static settings (demo mode, timezone, future device) plus the DEMO simulation controls (D10). */
+data class AppSettingsActions(
+    val validateName: (String) -> DisplayNameRules.Error? = { DisplayNameRules.validate(it) },
+    val saveName: (String) -> Unit = {},
+    val resetName: () -> Unit = {},
+    val openReservoir: () -> Unit = {},
+)
+
+const val SETTINGS_NAME_ROW_TEST_TAG = "settings_name_row"
+const val SETTINGS_RESERVOIR_ROW_TEST_TAG = "settings_reservoir_row"
+
+/**
+ * Compact settings in four sections (A1.4a): Aplikace, Zásobník (read-only summary +
+ * shortcut), Simulace (existing DEMO controls) and Zařízení (placeholder, never "connected").
+ */
 @Composable
 fun SettingsScreen(
+    app: AppSettingsUiState,
     simulation: SimulationUiState,
     message: SimulationMessage?,
+    appActions: AppSettingsActions,
     actions: SimulationActions,
     modifier: Modifier = Modifier,
 ) {
@@ -93,12 +128,29 @@ fun SettingsScreen(
         containerColor = MaterialTheme.colorScheme.surface,
         supportingColor = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+    var showRename by rememberSaveable { mutableStateOf(false) }
+    var showAbout by rememberSaveable { mutableStateOf(false) }
+    val ready = app as? AppSettingsUiState.Ready
+    val defaultName = stringResource(R.string.dashboard_title)
+
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = Spacing.m, vertical = Spacing.s),
-        verticalArrangement = Arrangement.spacedBy(Spacing.m),
+        verticalArrangement = Arrangement.spacedBy(Spacing.s),
     ) {
+        SectionLabel(stringResource(R.string.settings_section_app))
         SurfaceCard {
             Column {
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.settings_name)) },
+                    supportingContent = {
+                        Text(ready?.customName ?: stringResource(R.string.settings_name_default_suffix, defaultName))
+                    },
+                    colors = itemColors,
+                    modifier = Modifier
+                        .testTag(SETTINGS_NAME_ROW_TEST_TAG)
+                        .clickable(enabled = ready != null, onClickLabel = stringResource(R.string.settings_name_dialog_title)) { showRename = true },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 ListItem(
                     headlineContent = { Text(stringResource(R.string.settings_mode)) },
                     supportingContent = { Text(stringResource(R.string.settings_mode_demo)) },
@@ -112,21 +164,148 @@ fun SettingsScreen(
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 ListItem(
-                    headlineContent = { Text(stringResource(R.string.settings_device)) },
-                    supportingContent = {
-                        Column {
-                            Text(stringResource(R.string.settings_device_coming_later))
-                            OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.padding(top = Spacing.s)) {
-                                Text(stringResource(R.string.settings_device_connect))
-                            }
-                        }
-                    },
+                    headlineContent = { Text(stringResource(R.string.settings_version)) },
+                    supportingContent = { Text(ready?.let { stringResource(R.string.settings_version_value, it.version.name, it.version.code.toInt()) } ?: "") },
                     colors = itemColors,
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.settings_about)) },
+                    colors = itemColors,
+                    modifier = Modifier.clickable { showAbout = true },
                 )
             }
         }
+
+        SectionLabel(stringResource(R.string.settings_section_reservoir))
+        SurfaceCard {
+            Column {
+                val r = ready?.reservoir
+                if (r == null) {
+                    ListItem(
+                        headlineContent = { Text(stringResource(R.string.reservoir_unknown)) },
+                        supportingContent = { Text(stringResource(R.string.reservoir_simulation_inactive)) },
+                        colors = itemColors,
+                    )
+                } else {
+                    ListItem(
+                        headlineContent = { Text(stringResource(R.string.settings_reservoir_capacity)) },
+                        supportingContent = { Text(stringResource(R.string.unit_ml, Format.ml(r.capacityUl / 1000.0))) },
+                        colors = itemColors,
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    ListItem(
+                        headlineContent = { Text(stringResource(R.string.settings_reservoir_estimate)) },
+                        supportingContent = {
+                            Text(stringResource(R.string.unit_ml, Format.ml(r.remainingUl / 1000.0)) + " · " + stringResource(R.string.dashboard_estimate_label) + " · " + stringResource(R.string.dashboard_simulated_label))
+                        },
+                        colors = itemColors,
+                    )
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.settings_reservoir_manage), color = MaterialTheme.colorScheme.primary) },
+                    colors = itemColors,
+                    modifier = Modifier.testTag(SETTINGS_RESERVOIR_ROW_TEST_TAG).clickable(onClick = appActions.openReservoir),
+                )
+            }
+        }
+
+        SectionLabel(stringResource(R.string.settings_section_simulation))
         SimulationCard(simulation, message, actions)
+
+        SectionLabel(stringResource(R.string.settings_device))
+        SurfaceCard {
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.settings_device_not_connected)) },
+                supportingContent = {
+                    Column {
+                        // Placeholder only: nothing here may suggest a working physical connection.
+                        Text(stringResource(R.string.settings_device_coming_later))
+                        OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.padding(top = Spacing.s)) {
+                            Text(stringResource(R.string.settings_device_connect))
+                        }
+                    }
+                },
+                colors = itemColors,
+            )
+        }
+        Spacer(Modifier.height(Spacing.m))
     }
+
+    if (showRename && ready != null) {
+        RenameDialog(
+            initial = ready.customName ?: "",
+            defaultName = defaultName,
+            validate = appActions.validateName,
+            onDismiss = { showRename = false },
+            onSave = { appActions.saveName(it); showRename = false },
+            onReset = { appActions.resetName(); showRename = false },
+        )
+    }
+    if (showAbout && ready != null) {
+        AlertDialog(
+            onDismissRequest = { showAbout = false },
+            title = { Text(stringResource(R.string.app_name)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
+                    Text(stringResource(R.string.settings_version_value, ready.version.name, ready.version.code.toInt()), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(stringResource(R.string.settings_about_text))
+                }
+            },
+            confirmButton = { TextButton(onClick = { showAbout = false }) { Text(stringResource(R.string.dialog_ok)) } },
+        )
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text.uppercase(),
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = Spacing.xs, top = Spacing.s).semantics { heading() },
+    )
+}
+
+@Composable
+private fun RenameDialog(
+    initial: String,
+    defaultName: String,
+    validate: (String) -> DisplayNameRules.Error?,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+    onReset: () -> Unit,
+) {
+    var text by rememberSaveable { mutableStateOf(initial) }
+    val error = validate(text)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.settings_name_dialog_title)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text(stringResource(R.string.settings_name_label)) },
+                    placeholder = { Text(defaultName) },
+                    singleLine = true,
+                    isError = error != null,
+                    supportingText = {
+                        Text(
+                            if (error != null) stringResource(R.string.settings_name_err_too_long, DisplayNameRules.MAX_LENGTH)
+                            else stringResource(R.string.settings_name_counter, DisplayNameRules.normalize(text)?.length ?: 0, DisplayNameRules.MAX_LENGTH),
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(stringResource(R.string.settings_name_hint, defaultName), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                TextButton(onClick = onReset) { Text(stringResource(R.string.settings_name_reset)) }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onSave(text) }, enabled = error == null) { Text(stringResource(R.string.editor_save)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) } },
+    )
 }
 
 @Composable
@@ -152,7 +331,13 @@ private fun SimulationCard(state: SimulationUiState, message: SimulationMessage?
 
     SurfaceCard {
         Column(Modifier.padding(Spacing.m), verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
-            Text(stringResource(R.string.settings_simulation_title), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+            androidx.compose.foundation.layout.Row(
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.s),
+            ) {
+                Text(stringResource(R.string.settings_simulation_title), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f, fill = false).semantics { heading() })
+                if (state is SimulationUiState.Active) StatusTag(stringResource(R.string.settings_sim_active_tag))
+            }
             when (state) {
                 SimulationUiState.Loading -> Unit
                 is SimulationUiState.Inactive -> {
@@ -273,12 +458,19 @@ fun simulatedClockText(at: ZonedDateTime): String = Format.date(at.toLocalDate()
 @Composable
 private fun SettingsActivePreview() {
     val now = ZonedDateTime.of(LocalDate.of(2026, 11, 18), LocalTime.of(8, 0), DEFAULT_ZONE)
-    DispenserTheme { SettingsScreen(SimulationUiState.Active(now, now.minusDays(4)), SimulationMessage.Processed(3), SimulationActions()) }
+    DispenserTheme {
+        SettingsScreen(
+            AppSettingsUiState.Ready("Obývák 120 l", AppVersion("0.4.0", 4), cz.nowass.dispenser.data.MockSeed.default().reservoir, simulationActive = true),
+            SimulationUiState.Active(now, now.minusDays(4)), SimulationMessage.Processed(3), AppSettingsActions(), SimulationActions(),
+        )
+    }
 }
 
 @Preview(name = "Settings inactive", widthDp = 320, heightDp = 900, fontScale = 1.3f, showBackground = true, backgroundColor = 0xFF111820)
 @Composable
 private fun SettingsInactivePreview() {
     val now = ZonedDateTime.of(LocalDate.of(2026, 11, 15), LocalTime.of(12, 0), DEFAULT_ZONE)
-    DispenserTheme { SettingsScreen(SimulationUiState.Inactive(now), null, SimulationActions()) }
+    DispenserTheme {
+        SettingsScreen(AppSettingsUiState.Ready(null, AppVersion("0.4.0", 4), null, false), SimulationUiState.Inactive(now), null, AppSettingsActions(), SimulationActions())
+    }
 }

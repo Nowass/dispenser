@@ -23,6 +23,7 @@ Product and architecture sources of truth live in [`../docs`](../docs).
 | lifecycle-viewmodel/runtime-compose | 2.9.4 |
 | Room (runtime, compiler, Gradle plugin) | 2.8.5 |
 | KSP | 2.3.12 |
+| DataStore Preferences | 1.2.1 |
 | Test: kotlinx-coroutines-test / espresso | 1.9.0 / 3.6.1 |
 | Test: Robolectric / androidx.test core | 4.17 / 1.6.1 (Robolectric runs on SDK 35) |
 
@@ -144,6 +145,14 @@ ViewModels and domain models have no database dependencies; Room types live only
   (tap the dashboard card) shows remaining/capacity, low/blocked state, prediction (covered
   doses, "refill by" date with day precision) and the refill action. Historie lists simulated
   events newest first by day, each marked SIMULACE.
+- **Settings (A1.4a):** sections Aplikace (aquarium name shown in the dashboard header, demo
+  mode, timezone, version, "O aplikaci"), Zásobník (read-only capacity and estimate + shortcut
+  to reservoir management), Simulace (existing controls, "Aktivní" tag) and Zařízení ("Zařízení
+  není připojeno"; no connection is ever simulated). The name is stored with DataStore
+  (`app_settings.preferences_pb`), separate from both Room databases.
+- **Branding:** adaptive launcher icon (navy background, turquoise droplet with a dosing-nozzle
+  cut-out, monochrome themed variant; vector, no text) based on the reference image; Android 12+
+  splash in the same colors. Launcher name "Dispenser"; version 0.4.0 (4).
 - **Navigation:** floating icon-only dock (Přehled, Kalendář, Historie, Nastavení) plus
   horizontal swipe between these four screens (one `HorizontalPager` in the `main`
   destination; the pager state is the single source of truth for dock, header and swipes).

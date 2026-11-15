@@ -2,6 +2,12 @@ package cz.nowass.dispenser
 
 import android.app.Application
 import android.content.Context
+import androidx.core.content.pm.PackageInfoCompat
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.preferencesDataStoreFile
+import cz.nowass.dispenser.data.AppSettingsRepository
+import cz.nowass.dispenser.data.AppVersion
+import cz.nowass.dispenser.data.DataStoreAppSettingsRepository
 import cz.nowass.dispenser.data.LocalDispenserRepository
 import cz.nowass.dispenser.data.SimulationController
 import cz.nowass.dispenser.data.DispenserRepository
@@ -38,6 +44,18 @@ class AppContainer(context: Context) {
 
     /** DEMO-only simulation controls (Settings); not part of the device contract. */
     val simulation: SimulationController get() = localRepository.simulation
+
+    /** Presentation preferences (display name) in their own DataStore file; no DB involvement. */
+    val appSettings: AppSettingsRepository by lazy {
+        DataStoreAppSettingsRepository(
+            PreferenceDataStoreFactory.create { context.applicationContext.preferencesDataStoreFile(DataStoreAppSettingsRepository.FILE_NAME) },
+        )
+    }
+
+    val appVersion: AppVersion by lazy {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        AppVersion(name = info.versionName ?: "?", code = PackageInfoCompat.getLongVersionCode(info))
+    }
 }
 
 class DispenserApplication : Application() {

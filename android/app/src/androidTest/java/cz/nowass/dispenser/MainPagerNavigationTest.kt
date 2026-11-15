@@ -114,4 +114,13 @@ class MainPagerNavigationTest {
         rule.waitUntil(5_000) { rule.activityRule.scenario.state == Lifecycle.State.DESTROYED }
         assertTrue(rule.activityRule.scenario.state == Lifecycle.State.DESTROYED)
     }
+
+    @Test
+    fun settingsReservoirShortcut_opensReservoirDetail_backReturnsToSettings() {
+        rule.onNodeWithTag(SETTINGS.testTag).performClick()
+        rule.onNodeWithTag(cz.nowass.dispenser.ui.settings.SETTINGS_RESERVOIR_ROW_TEST_TAG).performScrollTo().performClick()
+        rule.onNodeWithText(str(R.string.reservoir_title)).assertIsDisplayed()
+        Espresso.pressBack()
+        assertActive(SETTINGS)
+    }
 }

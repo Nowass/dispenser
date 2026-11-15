@@ -276,7 +276,29 @@
     <string name="settings_mode">Režim</string>
     <string name="settings_mode_demo">Ukázkový režim (bez zařízení)</string>
     <string name="settings_timezone">Časové pásmo rozvrhu</string>
-    <string name="settings_device">Fyzické zařízení</string>
+    <string name="settings_device">Zařízení</string>
+    <string name="settings_device_not_connected">Zařízení není připojeno</string>
+    <string name="settings_section_app">Aplikace</string>
+    <string name="settings_section_reservoir">Zásobník</string>
+    <string name="settings_section_simulation">Simulace</string>
+    <string name="settings_name">Název akvária</string>
+    <string name="settings_name_default_suffix">%1$s (výchozí)</string>
+    <string name="settings_name_dialog_title">Název akvária</string>
+    <string name="settings_name_label">Název</string>
+    <string name="settings_name_counter">%1$d / %2$d</string>
+    <string name="settings_name_err_too_long">Název je příliš dlouhý (max. %1$d).</string>
+    <string name="settings_name_hint">Prázdný název obnoví výchozí „%1$s“.</string>
+    <string name="settings_name_reset">Obnovit výchozí</string>
+    <string name="settings_version">Verze aplikace</string>
+    <string name="settings_version_value">%1$s (sestavení %2$d)</string>
+    <string name="settings_about">O aplikaci</string>
+    <string name="settings_about_text">Dispenser plánuje dávkování tekutého uhlíku do akvária pro zařízení Dispenser V2.
+
+Režim DEMO: zařízení zatím nelze připojit. Údaje o zásobníku, baterii a historie jsou simulované a nepocházejí ze skutečného čerpadla. Rozvrhy jsou uložené pouze v telefonu.</string>
+    <string name="settings_reservoir_capacity">Kapacita</string>
+    <string name="settings_reservoir_estimate">Odhadovaný objem</string>
+    <string name="settings_reservoir_manage">Spravovat zásobník</string>
+    <string name="settings_sim_active_tag">Aktivní</string>
     <string name="settings_device_connect">Připojit zařízení</string>
     <string name="settings_device_coming_later">Připojení přes Bluetooth bude dostupné později.</string>
 </resources>

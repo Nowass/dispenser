@@ -44,6 +44,8 @@ A buildable Android app (`cz.nowass.dispenser`, minSdk 26), in Czech, launched o
 - Prevent simulated execution if estimated reservoir stock is insufficient for a dose. Remain blocked until simulated refill confirmation.
 - Low-volume warning appears only once per low-stock episode. All stock values clearly marked estimates.
 
+**A1.4a — settings and branding** (added 2026-11-15): sectioned Settings, persisted aquarium display name (DataStore), read-only reservoir summary, device placeholder, adaptive launcher icon + splash, version 0.4.0.
+
 **A1.4 — quality and handoff**
 
 - Unit tests for recurrence intervals, selected weekdays, multiple daily events, missed-dose skipping, DST Europe/Prague, stock blocking and refill reset.

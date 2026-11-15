@@ -47,6 +47,9 @@ import java.time.LocalDate
 import cz.nowass.dispenser.R
 import cz.nowass.dispenser.data.DispenserRepository
 import cz.nowass.dispenser.data.SimulationController
+import cz.nowass.dispenser.data.AppSettingsRepository
+import cz.nowass.dispenser.data.AppVersion
+import cz.nowass.dispenser.ui.settings.AppSettingsViewModel
 import cz.nowass.dispenser.ui.history.HistoryRoute
 import cz.nowass.dispenser.ui.history.HistoryViewModel
 import cz.nowass.dispenser.ui.reservoir.ReservoirRoute
@@ -92,7 +95,13 @@ const val MAIN_PAGER_TEST_TAG = "main_pager"
 const val RESERVOIR_ROUTE = "reservoir"
 
 @Composable
-fun DispenserApp(repository: DispenserRepository, simulation: SimulationController, isDemo: Boolean) {
+fun DispenserApp(
+    repository: DispenserRepository,
+    simulation: SimulationController,
+    appSettings: AppSettingsRepository,
+    appVersion: AppVersion,
+    isDemo: Boolean,
+) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
@@ -126,6 +135,10 @@ fun DispenserApp(repository: DispenserRepository, simulation: SimulationControll
     // Editor and reservoir detail are full-screen tasks with their own top bar (incl. DEMO badge).
     val inEditor = currentDestination?.route?.substringBefore('?') in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE)
 
+    // A1.4a: dashboard header shows the user's aquarium name (default "Moje akvárium").
+    val nameFlow = remember(appSettings) { appSettings.displayName }
+    val customName by nameFlow.collectAsStateWithLifecycle(initialValue = null)
+
     // D1: one visible simulation clock while the simulation runs.
     val deviceFlow = remember(repository) { repository.observeDevice() }
     val device by deviceFlow.collectAsStateWithLifecycle(initialValue = null)
@@ -149,9 +162,11 @@ fun DispenserApp(repository: DispenserRepository, simulation: SimulationControll
             // DEMO badge is persistent on every screen: all data in A1 is simulated.
             AppHeader(
                 brand = stringResource(R.string.app_brand),
-                title = stringResource(
-                    if (current == TopLevelDestination.DASHBOARD) R.string.dashboard_title else current.labelRes,
-                ),
+                title = if (current == TopLevelDestination.DASHBOARD) {
+                    customName ?: stringResource(R.string.dashboard_title)
+                } else {
+                    stringResource(current.labelRes)
+                },
                 showDemoBadge = isDemo,
                 simulationClock = simulationClockText,
             )
@@ -189,6 +204,8 @@ fun DispenserApp(repository: DispenserRepository, simulation: SimulationControll
                     pagerState = pagerState,
                     repository = repository,
                     simulation = simulation,
+                    appSettings = appSettings,
+                    appVersion = appVersion,
                     onOpenReservoir = { navController.navigate(RESERVOIR_ROUTE) { launchSingleTop = true } },
                     initialTab = entry.arguments?.getString(ARG_TAB),
                     onCreateSchedule = { date -> openEditor(date = date) },
@@ -256,6 +273,8 @@ private fun MainPager(
     pagerState: PagerState,
     repository: DispenserRepository,
     simulation: SimulationController,
+    appSettings: AppSettingsRepository,
+    appVersion: AppVersion,
     onOpenReservoir: () -> Unit,
     initialTab: String?,
     onCreateSchedule: (LocalDate) -> Unit,
@@ -301,7 +320,11 @@ private fun MainPager(
                 onEdit = onEditSchedule,
             )
             TopLevelDestination.HISTORY -> HistoryRoute(viewModel(factory = HistoryViewModel.factory(repository)))
-            TopLevelDestination.SETTINGS -> SettingsRoute(viewModel(factory = SimulationSettingsViewModel.factory(simulation, repository)))
+            TopLevelDestination.SETTINGS -> SettingsRoute(
+                simulationViewModel = viewModel(factory = SimulationSettingsViewModel.factory(simulation, repository)),
+                appViewModel = viewModel(factory = AppSettingsViewModel.factory(appSettings, repository, appVersion)),
+                onOpenReservoir = onOpenReservoir,
+            )
         }
     }
 }
@@ -314,6 +337,12 @@ private fun MainPager(
 private fun DispenserAppPreview() {
     cz.nowass.dispenser.ui.theme.DispenserTheme {
         val repo = cz.nowass.dispenser.data.MockDispenserRepository()
-        DispenserApp(repository = repo, simulation = repo.simulation, isDemo = true)
+        DispenserApp(
+            repository = repo,
+            simulation = repo.simulation,
+            appSettings = cz.nowass.dispenser.data.InMemoryAppSettingsRepository(),
+            appVersion = AppVersion("0.4.0", 4),
+            isDemo = true,
+        )
     }
 }

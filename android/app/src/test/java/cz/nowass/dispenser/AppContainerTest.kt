@@ -23,7 +23,10 @@ class AppContainerTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
 
     @Before @After
-    fun wipe() { context.deleteDatabase(DispenserDatabase.FILE_NAME) }
+    fun wipe() {
+        context.deleteDatabase(DispenserDatabase.FILE_NAME)
+        context.deleteDatabase(cz.nowass.dispenser.data.local.simulation.SimulationDatabase.FILE_NAME)
+    }
 
     @Test
     fun freshInstall_hasNoSchedules_noDemoSeed() = runBlocking {
@@ -36,5 +39,23 @@ class AppContainerTest {
     fun deviceTime_isThePhoneClock_notTheFixtureDate() = runBlocking {
         val now = AppContainer(context).repository.observeDevice().first().now
         assertTrue(Duration.between(now, Instant.now()).abs() < Duration.ofSeconds(5))
+    }
+
+    @Test
+    fun settings_areSeparateFromSchedulesAndSimulation() = runBlocking {
+        val container = AppContainer(context)
+        val repo = container.repository
+        repo.createSchedule(cz.nowass.dispenser.domain.ScheduleDraft("Ranní", 10.0, java.time.LocalDate.of(2026, 11, 1), java.time.LocalTime.of(8, 0), cz.nowass.dispenser.domain.RecurrenceKind.DAILY))
+        container.simulation.start(java.time.Instant.parse("2026-11-20T06:00:00Z"), 500_000, 400_000)
+        container.simulation.advanceDays(3)
+        val schedules = repo.observeSchedules().first()
+        val history = repo.observeHistory().first()
+
+        container.appSettings.setDisplayName("Obývák")
+        assertTrue(container.appSettings.displayName.first() == "Obývák")
+        assertTrue(repo.observeSchedules().first() == schedules)
+        assertTrue(repo.observeHistory().first() == history)
+        assertTrue(container.appVersion.name == "0.4.0" && container.appVersion.code == 4L)
+        container.appSettings.setDisplayName(null)
     }
 }
