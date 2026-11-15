@@ -7,6 +7,15 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
+  // No per-version preview URLs: the workers.dev URL is the only entry point.
+  "preview_urls": false,
+  // Workers Logs (the Worker logs one JSON line per request, never credentials or payloads).
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+    },
+  },
   "d1_databases": [
     {
       "binding": "DB",
