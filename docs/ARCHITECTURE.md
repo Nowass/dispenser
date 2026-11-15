@@ -48,7 +48,7 @@ With no measured liquid flow and no transactional actuator, truly *exactly-once*
 
 - An automatic occurrence may run only while `scheduled ≤ now ≤ scheduled + 10 min` (due window, configurable) and only with a valid clock; later it is `MISSED` and never caught up.
 - A claim is a durable `STARTED` record (write, commit, read-back) **before** the pump is authorized; any storage failure means no pump. Records in any state (`STARTED`, `COMPLETED`, `FAILED`, `INTERRUPTED`) block re-execution; nothing is retried automatically. At boot, leftover `STARTED` records become `INTERRUPTED`.
-- History = **one watermark record per schedule ID** (last claimed local date), **32 slots by default** (approved). It blocks that date and all earlier dates, also after a backward clock correction while the record exists. Records of other schedules may be reused (oldest first, only when full) once their date is more than **7 days** old. This is safe because such occurrences are missed anyway, **assuming the valid clock never moves back more than 7 days**. That is an assumption to be enforced by the future clock service, not a guarantee of M1.2 (see `firmware/README.md`, "Backward clock adjustments"). With no free or reusable slot, a new schedule's claim is refused without touching storage. Any corrupted record or duplicate schedule ID anywhere in the history blocks automatic dosing (approved).
+- History = **one watermark record per schedule ID** (last claimed local date), **32 slots by default** (approved). It blocks that date and all earlier dates, also after a backward clock correction while the record exists. Records of other schedules may be reused (oldest first, only when full) once their date is more than **7 days** old. This is safe because such occurrences are missed anyway, **assuming the valid clock never moves back more than 7 days**. That is an assumption to be enforced by the future clock service (M1.4 Time Management), not a guarantee of M1.2 (see `firmware/README.md`, "Backward clock adjustments"). With no free or reusable slot, a new schedule's claim is refused without touching storage. Any corrupted record or duplicate schedule ID anywhere in the history blocks automatic dosing (approved).
 - **Single owner:** the future dosing service task owns the coordinator and the history store and serializes all automatic and manual requests. Storage must replace one record atomically and durably; no multi-record atomicity is assumed.
 - Manual doses are separate: they never read, write or clear automatic history.
 - Schedule IDs: Android-generated UUIDs are preferred for schedule management (approved), never reused. A newly created schedule (new ID) may dose on the same day as a deleted one (approved).
@@ -195,6 +195,8 @@ Event:
 
 The actual binary/wire format must be versioned; no schema above should be implemented literally until storage/transport decisions are reviewed. Keep secrets in protected storage and exclude them from logs.
 
+**Implemented persistent schema (M1.3, pending review):** layout v1 with versioned, byte-exact little-endian records: `layout` marker, 32 history slots, one schedule-set record (up to 16 schedules plus 16 deleted-ID tombstones), and configuration v1 (reservoir capacity and estimated remaining volume, low-stock threshold, NTP interval 24–48 h, notification mask). Calibration, battery, device identity, Wi-Fi and notification endpoint are **not** in v1; credentials never go into these records. Formats, migration rules and the partition recommendation are in `firmware/README.md`, "Persistent storage and configuration".
+
 ## Persistence and flash health
 
 - NVS for small infrequently modified configuration, alert latches and essential checkpoint state.
@@ -202,6 +204,14 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - Use crash-tolerant records and explicit version/migration logic. Commit `STARTED` before GPIO activation, commit `COMPLETED` after motor OFF; avoid coupling GPIO transitions to fragile multi-key updates.
 - Journal-write failure must prevent actuator start (fail-safe).
 - Execution history (M1.2): fixed slots, one record per schedule (32 slots by default, approved; about 3 KB), one blob key per slot with a versioned encoding. Each slot update must be atomic (old or new value after power loss) and durable after `nvs_commit`. Two writes per automatic dose; the coordinator confirms each by reading it back.
+- **M1.3 storage (implemented, host-tested; not run on flash):**
+  - Domain code over a small key-value interface; a thin ESP-IDF NVS adapter in `components/dispenser_platform`.
+  - Verified in the ESP-IDF v6.1 sources: NVS replaces a single key atomically and `nvs_set_blob` is durable on return. Nothing spanning several keys is atomic. NVS **silently drops items that fail its CRC checks**, which then read as "not found".
+  - Hence **explicit presence** (approved): every key is provisioned at first boot (EMPTY history slots, empty schedule set, default configuration), with the layout marker written last. Keys are never deleted. A missing key afterwards means corruption, and storage errors disable automatic dosing.
+  - **The firmware never requests an NVS erase**, not even on `ESP_ERR_NVS_NO_FREE_PAGES` or `NEW_VERSION_FOUND`. ESP-IDF's own init may still write or erase pages as part of its internal recovery; that is library behavior.
+  - Multi-record atomicity is avoided by design: the whole schedule set is **one record** (approved), so create, edit, delete and a future full sync are atomic (acceptance test 8). Configuration is one record too. Dose outcome plus reservoir decrement span two keys: history first, then reservoir.
+  - Schedule IDs (approved: "UUID + bounded tombstones"): refused if active, among the 16 most recently deleted IDs, or present in the history. Beyond that, non-reuse relies on Android UUIDs.
+  - Partition: unchanged (2 MB, single app, NVS 24 KB is sufficient). Recommended final layout for a confirmed 4 MB board: NVS 64 KB plus two OTA slots, decided before field data exists.
 
 ## Wireless APIs
 

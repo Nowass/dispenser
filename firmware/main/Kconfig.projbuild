@@ -1,0 +1,17 @@
+menu "Dispenser V2"
+
+config DSP_STORAGE_SMOKE_TEST
+    bool "Read-only persistent storage check at boot (diagnostic)"
+    default n
+    help
+        Opens the NVS namespace read-only and runs the storage layout check
+        (dsp_storage_open without provisioning), then logs the result.
+        The check itself never writes dispenser keys and never requests an
+        erase. Note: the NVS initialization it relies on
+        (nvs_flash_init_partition, ESP-IDF) may write to flash internally,
+        e.g. initialize blank pages, finish or revert an interrupted NVS
+        operation, or erase and rewrite pages during its recovery; this
+        option cannot prevent that. Off by default; no dosing or hardware
+        activity.
+
+endmenu

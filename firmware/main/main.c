@@ -18,7 +18,38 @@
 #include "esp_log.h"
 #include "sdkconfig.h"
 
+#if CONFIG_DSP_STORAGE_SMOKE_TEST
+#include "dsp_nvs_kv.h"
+#include "dsp_storage.h"
+#endif
+
 static const char *TAG = "dispenser";
+
+#if CONFIG_DSP_STORAGE_SMOKE_TEST
+/* Diagnostic only (Kconfig, default off): the check opens the namespace read-only, does
+ * not provision, writes no dispenser keys and requests no erase. ESP-IDF's own NVS
+ * initialization (nvs_flash_init_partition) may still write to flash internally (blank
+ * page setup, completing or reverting interrupted operations, recovery erasing/rewriting
+ * pages); that is library behavior outside this code. The storage context (~8 KB) is
+ * static because the main task stack is small; main/ is the composition root. */
+static dsp_storage_t s_storage;
+
+static void storage_smoke_test(void)
+{
+    dsp_nvs_kv_t nvs;
+    dsp_kv_t kv;
+    dsp_nvs_status_t ns = dsp_nvs_kv_open(&nvs, DSP_NVS_DEFAULT_PARTITION, DSP_NVS_NAMESPACE,
+                                          true, &kv);
+    if (ns != DSP_NVS_OK) {
+        ESP_LOGW(TAG, "storage check: NVS unavailable (status %d, esp_err 0x%x), no erase requested",
+                 (int)ns, (unsigned)nvs.last_err);
+        return;
+    }
+    dsp_storage_status_t st = dsp_storage_open(&s_storage, &kv, &DSP_TZ_EUROPE_PRAGUE, false);
+    ESP_LOGI(TAG, "storage check (read-only): status %d", (int)st);
+    dsp_nvs_kv_close(&nvs);
+}
+#endif
 
 void app_main(void)
 {
@@ -39,6 +70,9 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "project=%s build=%s %s", app->project_name, app->date, app->time);
     ESP_LOGI(TAG, "M0.2 skeleton: no GPIO, radio, sleep or dosing activity");
+#if CONFIG_DSP_STORAGE_SMOKE_TEST
+    storage_smoke_test();
+#endif
 
     /* Returning from app_main is fine: the main task is deleted, the scheduler keeps
      * running idle. Deep sleep and wake-up handling come in a later milestone. */

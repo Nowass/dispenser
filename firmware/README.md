@@ -4,10 +4,12 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: M1.1 (recurrence engine) committed; M1.2 (execution history and
-deduplication) implemented, awaiting review.** At run time the firmware still only logs
-its identification: the domain components are compiled into the image's component
-library but not called by `app_main`, and nothing is dosed. It
+**Status: M1.1 (recurrence engine) and M1.2 (execution history and deduplication)
+committed; M1.3 (persistent storage and configuration) implemented, awaiting review.**
+At run time the firmware still only logs its identification. The domain and platform
+components are compiled into the image's component libraries but not called by
+`app_main` (an optional read-only storage check exists, off by default), and nothing is
+dosed. It
 has **not been run on physical hardware**: the board has not arrived yet. All
 verification so far is Linux host tests and cross-compilation for `esp32c3`.
 
@@ -21,17 +23,24 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   coordinator and history** that claim an occurrence durably before the pump may run and
   prevent repeated automatic dosing (see
   [Execution history and deduplication](#execution-history-and-deduplication-m12)),
-  tested against a fake storage with injected faults and power loss.
+  tested against a fake storage with injected faults and power loss, and (M1.3)
+  **persistent storage**: byte-exact versioned records, explicit-presence layout with
+  corruption detection, schedule repository (16 schedules, ID rules), device configuration
+  and the history store over a key-value interface (see
+  [Persistent storage and configuration](#persistent-storage-and-configuration-m13)).
+- ESP-IDF NVS key-value adapter in the platform component `dispenser_platform` (compiled;
+  not run on flash).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
 ### Not implemented
 
-Real NVS storage adapter, dosing service task (wiring of recurrence, coordinator, stock,
-limits and pump), schedule management and ID allocation, MONTHLY recurrence, reservoir
-logic, event journal, BLE and Wi-Fi, clock synchronization, deep sleep and wake-up, GPIO
-and motor control, service mode, OTA. The domain code decides and records; nothing
-drives hardware yet.
+Dosing service task (wiring of recurrence, coordinator, storage, stock, limits and pump),
+time management (M1.4: clock trust, time adjustments, rollback protection), MONTHLY
+recurrence, reservoir logic beyond storing the estimate, event journal, credential store,
+BLE and Wi-Fi, deep sleep and wake-up, GPIO and motor control, service mode, OTA, a
+storage maintenance/repair tool. The domain code decides and records; nothing drives
+hardware yet.
 
 ### Not verified
 
@@ -115,25 +124,36 @@ firmware/
 ├── version.txt                 firmware version, single source for both builds
 ├── sdkconfig.defaults          committed Kconfig defaults (target only); sdkconfig is generated
 ├── main/                       composition root: the only code calling ESP-IDF APIs
-│   ├── CMakeLists.txt          REQUIRES dispenser_domain esp_app_format log
-│   └── main.c                  app_main(): logs identification, nothing else
+│   ├── CMakeLists.txt          REQUIRES dispenser_domain dispenser_platform esp_app_format log
+│   ├── Kconfig.projbuild       DSP_STORAGE_SMOKE_TEST (default off)
+│   └── main.c                  app_main(): logs identification (+ optional read-only storage check)
 ├── components/
-│   └── dispenser_domain/       pure C11 business logic, no ESP-IDF dependency
-│       ├── CMakeLists.txt      dual-mode: IDF component or plain host library
-│       ├── include/dsp_identity.h    firmware identification
-│       ├── include/dsp_time.h        dates, UTC instants, timezone rule (M1.1)
-│       ├── include/dsp_recurrence.h  schedules and recurrence queries (M1.1)
-│       ├── include/dsp_history.h     execution records, storage contract (M1.2)
-│       ├── include/dsp_exec.h        execution coordinator (M1.2)
-│       └── src/                      matching .c files
+│   ├── dispenser_domain/       pure C11 business logic, no ESP-IDF dependency
+│   │   ├── CMakeLists.txt      dual-mode: IDF component or plain host library
+│   │   ├── include/dsp_identity.h    firmware identification
+│   │   ├── include/dsp_time.h        dates, UTC instants, timezone rule (M1.1)
+│   │   ├── include/dsp_recurrence.h  schedules and recurrence queries (M1.1)
+│   │   ├── include/dsp_history.h     execution records, storage contract (M1.2)
+│   │   ├── include/dsp_exec.h        execution coordinator (M1.2)
+│   │   ├── include/dsp_kv.h          key-value storage interface (M1.3)
+│   │   ├── include/dsp_codec.h       serialized record formats (M1.3)
+│   │   ├── include/dsp_storage.h     layout, provisioning, history store, config (M1.3)
+│   │   ├── include/dsp_schedule_set.h / dsp_schedule_repo.h  schedules (M1.3)
+│   │   ├── include/dsp_config.h      configuration model (M1.3)
+│   │   └── src/                      matching .c files
+│   └── dispenser_platform/     ESP-IDF adapters (never in the host build)
+│       ├── include/dsp_nvs_kv.h      NVS implementation of dsp_kv_t (M1.3)
+│       └── src/dsp_nvs_kv.c
 ├── test/host/                  host unit tests (CMake + CTest, no ESP-IDF)
 │   ├── CMakeLists.txt
 │   ├── support/dsp_test.h      minimal header-only test harness
 │   ├── support/fake_store.[ch] in-memory history store with fault/power-loss injection
+│   ├── support/fake_kv.[ch]    in-memory key-value store (NVS-like and staged modes, faults)
 │   ├── test_identity.c
 │   ├── test_recurrence.c          engine unit tests (C only)
 │   ├── test_recurrence_vectors.c  runs ../../test-vectors/*.txt
-│   └── test_exec.c                coordinator/history tests (M1.2)
+│   ├── test_exec.c                coordinator/history tests (M1.2)
+│   └── test_storage.c             persistent storage tests (M1.3)
 └── .devcontainer/              optional pinned ESP-IDF v6.1 build container
 
 ../test-vectors/                shared C/Kotlin test vectors (see its README)
@@ -360,7 +380,7 @@ an injected storage implementation.
   that: `DSP_EXEC_MISSED`, skipped forever. There is no catch-up, so accumulated occurrences
   are never executed after a restart. The window is a coordinator parameter (0 … 3600 s)
   so it can be retuned after RTC drift measurements.
-- A **valid clock** (`dsp_clock_t.valid`, set by the future clock service after SNTP or
+- A **valid clock** (`dsp_clock_t.valid`, set by the future clock service (M1.4) after SNTP or
   Android time, FR-031/FR-033) is required; otherwise `DSP_EXEC_ERR_CLOCK`.
 - **Disabled** schedules are never executed (`DSP_EXEC_DISABLED`).
 - The occurrence must be exactly what the **current** schedule yields on that date
@@ -461,7 +481,7 @@ slot) and `commit` (make durable):
 
 Deduplication of **recycled** records relies on an assumption, not on a mechanism: the
 *valid* clock never moves back by more than the 7-day retention window. M1.2 does not
-detect backward jumps; that belongs to the future clock service, which decides what
+detect backward jumps; that belongs to the future clock service (M1.4 Time Management), which decides what
 `dsp_clock_t.valid` means.
 
 | Situation | M1.2 behavior |
@@ -515,6 +535,225 @@ service task's stack must cover.
 - The record encoding, NVS key layout and wear figures belong to the NVS adapter
   milestone. Clock validity, stock/battery checks, limits, event journal and pump control
   are not part of M1.2.
+
+## Persistent storage and configuration (M1.3)
+
+Domain (pure C11, host-tested): `dsp_kv.h` (key-value interface), `dsp_codec.h`
+(byte formats), `dsp_storage.h` (layout, provisioning, history store, configuration),
+`dsp_schedule_repo.h` (schedules), `dsp_config.h` (configuration model). Platform
+(ESP-IDF only): `components/dispenser_platform` with `dsp_nvs_kv.h`, a thin NVS
+implementation of `dsp_kv_t`. **Implemented and host-tested; NVS runtime behavior on real
+flash has not been verified** (no hardware).
+
+```text
+dosing service (future) ──► dsp_exec ──► dsp_history_store_t ─┐
+                          ──► dsp_schedule_repo ───────────────┼─► dsp_storage ──► dsp_kv_t
+                          ──► dsp_storage_*_config ────────────┘                    │
+                                                         dispenser_platform: dsp_nvs_kv (NVS)
+```
+
+### What ESP-IDF v6.1 NVS actually guarantees (checked in its sources)
+
+- **Per-key atomic replacement:** a new value is written completely (blobs under an
+  alternate chunk version, then their index) before the old one is erased. After a power
+  loss, init removes incomplete new versions and older duplicates, so a key holds the old
+  or the new value.
+- `nvs_set_blob()` is **durable when it returns OK**; `nvs_commit()` is a no-op. That is
+  stricter than our contract requires and safe: a durable claim before a failed confirmation
+  blocks the occurrence (lost dose), it never doubles it.
+- **No atomicity across keys.**
+- **Corrupted items silently disappear:** items failing the header CRC at load, or the data
+  CRC on read, are erased and then read as `ESP_ERR_NVS_NOT_FOUND`. Therefore
+  **"not found" cannot mean "empty"** (see explicit presence below).
+- `ESP_ERR_NVS_NO_FREE_PAGES` / `ESP_ERR_NVS_NEW_VERSION_FOUND` at init: the ESP-IDF
+  examples erase the partition. **This firmware never requests an erase**: the adapter
+  reports the error and automatic dosing stays disabled.
+- **NVS initialization itself may write:** `nvs_flash_init_partition()` initializes blank
+  pages and, after an interrupted operation or a power loss, completes or reverts it. The
+  ESP-IDF docs note that its recovery may erase and rewrite some pages. This is internal
+  library behavior that the firmware neither performs nor can prevent.
+
+### Storage layout v1 (one NVS namespace, `dispenser`, partition `nvs`)
+
+| Key | Content | Size |
+|---|---|---|
+| `layout` | layout marker (version 1, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
+| `h00` … `h31` | execution history slot: M1.2 record or the explicit EMPTY record | 92 B each |
+| `sched` | the whole schedule set (schedules + deleted-ID tombstones + set revision) | 8 … 2,504 B |
+| `config` | device configuration | 18 B |
+
+**Explicit presence (approved):** on first boot every key is written with its
+provisioning value (EMPTY slots, empty set, default configuration), then the marker.
+Afterwards keys are never deleted, only overwritten, so:
+
+| Found at open | Result |
+|---|---|
+| Marker valid, every key present and valid | `DSP_STORAGE_OK` |
+| Marker valid, any key missing or malformed | `DSP_STORAGE_ERR_CORRUPT`, nothing modified |
+| Any record or the layout from a newer format | `DSP_STORAGE_ERR_UNSUPPORTED`, nothing modified |
+| No marker, all other keys absent or still at provisioning values | first boot or interrupted provisioning: the missing keys are written, then the marker |
+| No marker, any key holds real data | marker lost: `DSP_STORAGE_ERR_CORRUPT`, nothing modified |
+
+Open also runs the M1.2 whole-history validation (corrupted records, duplicate IDs). After
+a successful open, a missing history key reads as `DSP_STORE_ERR_READ` (the coordinator
+then refuses with `ERR_STORAGE_READ`), never as an empty slot. Any storage error means
+**no automatic dosing**; the firmware never erases, reformats or rewrites data to "repair" it
+(ESP-IDF's internal NVS recovery during init is separate, see above). Data stays
+in place for maintenance (no repair tool exists yet).
+
+### Persistent data format (all little-endian, explicit sizes, no structs)
+
+Every record: byte 0 = type (1 layout, 2 history, 3 schedule set, 4 config), byte 1 =
+format version (1). Decoders require the exact length, a known type and version, valid
+fields and zero padding. Encoders never produce an invalid record.
+
+```text
+history slot (92 B):  0 type | 1 ver | 2 state (0=EMPTY,1=STARTED,2=COMPLETED,3=FAILED,
+                      4=INTERRUPTED) | 3 id_len | 4..67 id (zero padded) | 68..69 year |
+                      70 month | 71 day | 72..75 revision | 76..83 scheduled_at (i64) |
+                      84..91 claimed_at (i64). EMPTY: state 0 and bytes 3..91 zero.
+schedule set:         0 type | 1 ver | 2..5 set revision | 6 count (<=16) |
+                      7 tombstones (<=16) | count x entry | tombstones x id
+  entry (91 B):       0 id_len | 1..64 id | 65..68 revision | 69 enabled (0/1) |
+                      70..73 amount_ul | 74..77 start date | 78 hour | 79 minute | 80 kind |
+                      81..84 interval | 85 weekday mask | 86 has_end (0/1) |
+                      87..90 end date (zero when absent)
+  tombstone (65 B):   0 id_len | 1..64 id
+config (18 B):        0 type | 1 ver | 2..5 revision | 6..9 reservoir capacity µl |
+                      10..13 estimated remaining µl | 14 low-stock % | 15..16 NTP interval h |
+                      17 notification mask
+layout (7 B):         0 type | 1 ver | 2..3 layout version | 4 history slots |
+                      5 schedule capacity | 6 tombstone capacity
+```
+
+Golden byte vectors for history, configuration and schedule set (computed independently
+with Python `struct`) are in `test_storage.c`.
+
+**No application-level checksum.** NVS protects every entry and every blob chunk with
+CRC32 and drops items that fail it. Explicit presence turns that into a detected
+corruption, and the strict decoders catch truncated, mis-sized, foreign or newer data. An
+extra CRC would only re-check what NVS already checks.
+
+### Atomicity
+
+| Operation | Keys written | Atomic? |
+|---|---|---|
+| History claim / outcome / recovery (M1.2) | one `hNN` | yes (one key) |
+| Create, edit or delete a schedule | `sched` | yes: the whole set is one record (approved) |
+| Future full schedule sync from Android | `sched` | yes (same record; acceptance test 8) |
+| Configuration change (e.g. refill: capacity + remaining) | `config` | yes |
+| Provisioning | all keys, marker last | resumable: a cut before the marker is completed at the next boot |
+| Dose outcome + reservoir decrement (future) | `hNN`, then `config` | **no**: two keys. Planned order: history first (dedup safety), then reservoir. A cut in between over-estimates the stock by one dose. |
+
+Every write is: encode → `set` → `commit` → read back → compare bytes. Any failure
+returns an error; the schedule repository then refuses changes until it re-reads the
+durable set (old or new, never a mix). In the randomized test, 400 operations per mode
+with injected faults and restarts always left exactly the old or the new set.
+
+### Schedule repository
+
+- Up to **16 schedules** (approved), each passing `dsp_schedule_validate` (M1.1 model,
+  unchanged, all fields stored).
+- **create:** revision 1. The ID must not be active (`ERR_DUPLICATE_ID`), in the
+  tombstone ring, or present in the execution history (`ERR_ID_REUSED`).
+- **update:** same ID, revision = stored + 1 (`ERR_REVISION` otherwise; optimistic
+  concurrency as in the Android repository). The ID never changes.
+- **delete:** expected revision must match; the ID moves to the **tombstone ring
+  (16 newest deleted IDs)**. History is not touched.
+- **Non-reuse (approved: "UUID + bounded tombstones"):** enforced against active IDs,
+  the 16 most recently deleted IDs and every ID in the 32-slot history. Beyond that it rests
+  on Android-generated UUIDv4 randomness. A reused ID can only suppress a dose its old
+  schedule already claimed, never cause a duplicate.
+
+### Device configuration (schema v1)
+
+| Field | Meaning | Default | Valid |
+|---|---|---|---|
+| `revision` | +1 on every save (enforced) | 0 | — |
+| `reservoir_capacity_ul` | configured reservoir volume | 0 (not configured) | — |
+| `reservoir_remaining_ul` | **estimated** remaining volume (FR-020) | 0 | ≤ capacity |
+| `low_stock_percent` | low-reservoir warning threshold (FR-021, PROPOSED 20 %) | 20 | 1–99 |
+| `time_sync_interval_h` | NTP interval (confirmed: about 24–48 h) | 24 | 24–48 |
+| `notify_mask` | low reservoir, low battery, device error notifications | all on | 3 bits |
+
+The defaults mean "reservoir not configured", so a future stock check blocks every dose
+until the user configures and refills. **Not in v1** (proposed for their milestones,
+with a new schema version):
+- pump calibration (µl/s, timestamp, FR-011/012);
+- battery thresholds and measurement constants;
+- device identity (e.g. a device UUID for the notification relay);
+- Wi-Fi SSID, the notification endpoint and alert policy.
+
+**No secrets** are stored: Wi-Fi passwords and relay tokens belong to a separate
+credential store (NVS encryption or a protected namespace) in the BLE provisioning and
+notification milestones, never in `config` and never in logs.
+
+### Capacity, flash layout and wear
+
+NVS entries are 32 B and blobs cost 2 entries plus 1 per 32 data bytes. History
+32 × 5 = 160 entries, schedule set ≤ 81, config 3, marker 3, namespace 1: **≤ about 250
+entries (8 KB)**, plus up to 81 free entries while the largest record is rewritten.
+The current partition table (ESP-IDF default `partitions_singleapp.csv`: `nvs` 24 KB =
+6 pages, about 630 usable entries) fits this with about half left for ESP-IDF's own
+Wi-Fi/PHY/BLE data later. Wear: about 10 entries per automatic dose. Even at 16 doses a
+day each NVS sector is erased only every few days, far inside flash endurance.
+
+**Unchanged in M1.3:** flash size 2 MB (ESP-IDF default) and the single-app partition
+table. The XIAO ESP32-C3 is specified with 4 MB, but no board has been checked.
+**Recommendation for the final layout** (to apply once a real board confirms 4 MB, and
+before any device holds field data, because moving or shrinking `nvs` requires erasing
+it):
+
+```text
+# Name,   Type, SubType, Offset,  Size
+nvs,      data, nvs,     0x9000,  64K     # more pages: headroom for Wi-Fi/BLE/PHY data, less wear
+otadata,  data, ota,     ,        8K
+phy_init, data, phy,     ,        4K
+ota_0,    app,  ota_0,   ,        1856K   # two OTA slots for the future OTA milestone
+ota_1,    app,  ota_1,   ,        1856K
+coredump, data, coredump,,        64K     # optional, crash diagnostics
+```
+
+The present image is about 145 KB; Wi-Fi, BLE and TLS will grow it substantially, which
+1.8 MB slots accommodate.
+
+### Schema migration strategy
+
+- Each record carries its own version, and the layout marker carries the layout version.
+- A newer firmware keeps decoders for older versions and writes records back in its own
+  format, one key at a time (each atomic). The marker is bumped **last**, so an interrupted
+  migration is detectable and resumable.
+- An older firmware that finds a newer version reports `ERR_UNSUPPORTED`, disables
+  automatic dosing and leaves the data untouched. Downgrades are therefore not supported
+  without maintenance.
+- Changing slot counts or capacities is a layout change, which needs a migration.
+
+### Optional boot smoke test
+
+`CONFIG_DSP_STORAGE_SMOKE_TEST` (menu "Dispenser V2", **default off**) makes `app_main`
+initialize NVS, open the `dispenser` namespace **read-only** and run `dsp_storage_open`
+without provisioning, then log the status. The distinction matters:
+
+- **The smoke test itself** is read-only at the application level. It writes no dispenser
+  keys, provisions nothing and requests no erase.
+- **ESP-IDF's NVS initialization** (`nvs_flash_init_partition()`, needed to open any
+  namespace) is not guaranteed write-free. It may initialize blank pages, complete or
+  revert an interrupted NVS operation, or erase and rewrite pages during its recovery.
+  Enabling the option therefore does not guarantee zero flash writes.
+
+The default image is unchanged. A build with the option enabled is checked, so the NVS
+adapter links.
+
+### Implemented vs not verified
+
+- Implemented and host-tested: codec, layout and provisioning, explicit presence,
+  configuration, schedule repository, history store over key-value, M1.2 coordinator on
+  persistent history, fault and power-loss behavior against the fake (NVS-like and staged
+  modes).
+- Compiled for ESP32-C3: the NVS adapter (`dispenser_platform`), linked in the smoke-test
+  build.
+- **Not verified:** the NVS adapter on real flash, real power-loss behavior, NVS wear and
+  GC timing, partition sizing on the actual board.
 
 ## Build (ESP32-C3, native)
 
@@ -575,6 +814,7 @@ Current host tests (CTest names):
 | `test_recurrence_vectors_TZ_*` | the same vectors with host `TZ=America/New_York` and `TZ=Asia/Kathmandu` (host timezone has no effect) |
 | `test_recurrence` | day arithmetic vs a naive calendar walk 1999–2101, jump search vs brute force (600 random schedules), buffer paging, argument errors, extreme instants and API range boundaries, identity across edits |
 | `test_exec` | execution coordinator and history: normal run, duplicates, restarts, power loss before and after the durable claim, write/commit/read/read-back failures, edits, same-instant schedules, dates and clock rollback, invalid clock, due window, manual independence, capacity/retention, corruption, invalid input; a randomized 60-day run with injected faults and restarts (no duplicate or late authorization) and a fault-free 200-day run (every occurrence exactly once) |
+| `test_storage` | persistent storage: first boot and provisioning (incl. power loss after every write), configuration save/reload and validation, schedule create/edit/delete with revision and ID rules, capacity and tombstone ring, power loss before/after commit (NVS-like and staged modes), marker loss, invalid/truncated/oversized/foreign records, unsupported versions, duplicate IDs, M1.2 coordinator on persistent history (missing slot = corruption, never empty), read/write/commit/no-space/read-back failures, golden bytes, maximum record sizes, randomized operation sequences with faults (always old or new set) |
 
 Planned host coverage (later milestones): reservoir depletion/refill and blocking, dose
 limits, service-mode transitions, event journal, NVS adapter (on target). The Android domain
@@ -620,11 +860,13 @@ alternative to the native setup, not a requirement.
 | Firmware version from `version.txt` | validated at configure time | yes (app descriptor) | not run |
 | Recurrence engine (`dsp_recurrence`, `dsp_time`) | implemented, unit- and vector-tested, Kotlin parity | compiled, not called | not run |
 | Execution coordinator and history (`dsp_exec`, `dsp_history`) | implemented, tested with fake storage (faults, power loss) | compiled, not called | not run |
+| Persistent storage: codec, layout, schedules, config (`dsp_storage`, `dsp_codec`, `dsp_schedule_repo`, `dsp_config`) | implemented, tested with fake key-value store (faults, power loss) | compiled, not called | not run |
+| NVS key-value adapter (`dispenser_platform`) | n/a (ESP-IDF only) | compiled; linked with the optional smoke test | **not run on flash** |
 | Host test infrastructure (CMake/CTest, sanitizers) | working | n/a | n/a |
-| NVS storage adapter, dosing service, reservoir, journal, service mode | not started | — | — |
+| Dosing service, reservoir logic, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
 | Deep sleep and wake-up | not started | — | — |
-| NVS persistence, BLE, Wi-Fi/SNTP, OTA | not started | — | — |
+| BLE, Wi-Fi/SNTP, OTA, credential store | not started | — | — |
 
 ## Hardware verification still pending
 
@@ -636,8 +878,10 @@ alternative to the native setup, not a requirement.
 - Button on a deep-sleep wake-capable GPIO (GPIO0–GPIO5) and indicator LED (the board has
   no user LED).
 - Deep-sleep current and RTC drift; battery measurement hardware.
+- NVS adapter on real flash: provisioning, power loss during writes, partition sizing and
+  the final partition layout (see "Capacity, flash layout and wear").
 
 ## Next milestone
 
-After the M1.2 review: next steps are to be agreed (candidates: event journal, reservoir
-and limits, NVS storage adapter). Not started.
+After the M1.3 review: **M1.4 — Time Management** (clock trust, significant time
+adjustments, rollback protection). Not started.

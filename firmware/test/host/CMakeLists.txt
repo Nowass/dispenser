@@ -67,6 +67,7 @@ dsp_add_host_test(test_recurrence_vectors test_recurrence_vectors.c)
 target_compile_definitions(test_recurrence_vectors PRIVATE DSP_VECTORS_DIR="${DSP_VECTORS_DIR}")
 dsp_add_host_test(test_recurrence test_recurrence.c)
 dsp_add_host_test(test_exec test_exec.c support/fake_store.c)
+dsp_add_host_test(test_storage test_storage.c support/fake_kv.c)
 
 # The engine never consults the C library timezone: identical results under any host TZ.
 foreach(tz "America/New_York" "Asia/Kathmandu")
