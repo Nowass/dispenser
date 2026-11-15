@@ -48,17 +48,18 @@ device (M1.5 queue)  --HTTPS POST /api/v1/events-->  Worker dispenser-notify  --
 
 ## Database compatibility
 
-- `migrations/0001_create_notifications.sql` reproduces the manually created table column
-  for column (names, types, `NOT NULL`, defaults, primary key).
-- It uses `CREATE TABLE IF NOT EXISTS`. Applied to production it changes no data or schema;
+- `migrations/0001_create_notifications.sql` reproduces the manually created production
+  schema exactly. This was verified read-only on 2026-11-15:
+  - names, types, `NOT NULL`, defaults and the primary key;
+  - `CHECK (delivery_status IN ('PENDING','SENT','FAILED'))`;
+  - the index `idx_notifications_delivery (delivery_status, received_at)`.
+- It uses `IF NOT EXISTS` throughout. Applied to production it changes no data or schema;
   it only records itself in `d1_migrations`.
 - **No schema change is needed for M1.6a.**
   - The Worker writes `event_id, device_id, event_type, severity, payload, payload_hash` and
     sets `delivery_status = 'PENDING'` explicitly.
   - `received_at` and `delivery_attempts` come from their defaults.
-- An index on `delivery_status` will probably help the future e-mail sender. It would be a
-  separate additive migration, proposed in that milestone.
-- Before relying on 0001 in production, compare it with the real schema (read-only):
+- Compare with the real schema (read-only) before any future migration:
 
   ```sh
   npx wrangler d1 execute dispenser-notifications --remote --command \

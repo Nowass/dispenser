@@ -11,9 +11,8 @@
     {
       "binding": "DB",
       "database_name": "dispenser-notifications",
-      // Replace with the existing database's ID before deploying (`wrangler d1 list`).
-      // The all-zero placeholder only works locally; a deploy with it fails safely.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      // The existing production database (`wrangler d1 list`); an ID, not a secret.
+      "database_id": "245fe0d1-4f8c-45c3-b21b-89e00c26be75",
       "migrations_dir": "migrations",
     },
   ],
