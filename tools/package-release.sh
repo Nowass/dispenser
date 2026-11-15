@@ -2,7 +2,7 @@
 # Verifies the locally signed release APK and prepares the GitHub Release assets in dist/.
 #
 #   cd android && ./gradlew clean assembleRelease      # with local signing configured
-#   tools/package-release.sh [--expected-cert-sha256 <hex>]
+#   tools/package-release.sh [--expected-cert-sha256 <hex>]   # default: the release certificate
 #
 # Produces:
 #   dist/dispenser-<version>.apk          signed APK (attach to the release)
@@ -14,7 +14,9 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-expected_cert="${DISPENSER_RELEASE_CERT_SHA256:-}"
+# Public fingerprint of the permanent release certificate (docs/RELEASING.md). Overridable for tests.
+release_cert="32:C2:4A:F8:B4:13:8D:49:CF:E8:D8:C6:95:19:A2:6D:44:2D:F6:4C:AF:F5:BE:E7:C7:29:56:FA:C7:CE:64:29"
+expected_cert="${DISPENSER_RELEASE_CERT_SHA256:-$release_cert}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --expected-cert-sha256) expected_cert="$2"; shift 2 ;;

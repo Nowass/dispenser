@@ -26,13 +26,17 @@ data class ChangelogSection(
 )
 
 data class Changelog(val intro: List<String>, val sections: List<ChangelogSection>) {
+    /** Sections with at least one item (an empty "Nevydáno" placeholder is not shown). */
+    val visibleSections: List<ChangelogSection> get() = sections.filter { s -> s.groups.any { it.items.isNotEmpty() } }
+
     /**
-     * Section for the installed version if released, else the unreleased section. SemVer build
-     * metadata (e.g. the debug suffix "+debug") is ignored.
+     * Visible section for the installed version if released, else the unreleased section. SemVer
+     * build metadata (e.g. the debug suffix "+debug") is ignored.
      */
     fun relevantFor(versionName: String): ChangelogSection? {
         val version = versionName.substringBefore('+')
-        return sections.firstOrNull { !it.isUnreleased && it.label == version } ?: sections.firstOrNull { it.isUnreleased }
+        val visible = visibleSections
+        return visible.firstOrNull { !it.isUnreleased && it.label == version } ?: visible.firstOrNull { it.isUnreleased }
     }
 }
 

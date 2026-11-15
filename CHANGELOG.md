@@ -5,30 +5,32 @@ Všechny podstatné změny aplikace Dispenser se zapisují do tohoto souboru.
 Formát vychází z [Keep a Changelog](https://keepachangelog.com/cs/1.1.0/) a verze se řídí
 [sémantickým verzováním](https://semver.org/lang/cs/).
 
-Zatím nebyla zveřejněna žádná verze (GitHub Releases). Položky níže shrnují interní vývojové
-milníky; nejde o publikovaná vydání. Při prvním vydání se přesunou pod číslo verze.
+## [Nevydáno]
 
-## [Nevydáno] – vývojové milníky
+## [0.5.0-beta.1] – 2026-11-15
+
+První beta verze aplikace pro Android. Aplikace zatím pracuje v režimu DEMO: připojení
+k dávkovači přes Bluetooth ještě není k dispozici, údaje o zásobníku, baterii a historie
+pocházejí ze simulace. Rozvrhy jsou skutečná data uložená v telefonu.
 
 ### Přidáno
-- Přehled s příští dávkou, odhadem zásobníku a simulovanou baterií; tmavý vzhled Material 3 (A1.1, A1.1.1).
-- Kalendář s měsíčním a týdenním zobrazením a detailem vybraného dne (A1.2a).
-- Editor rozvrhů: jednorázové, denní (každých N dní) a týdenní (každých N týdnů ve vybrané dny) dávkování, náhled nejbližších pěti termínů (A1.2b).
-- Ukládání rozvrhů v telefonu; stav „Uloženo v telefonu“ bez předstírání synchronizace se zařízením (A1.2c).
+- Přehled s příští dávkou, odhadem zásobníku a simulovanou baterií v tmavém vzhledu Material 3.
+- Kalendář s měsíčním a týdenním zobrazením a detailem vybraného dne.
+- Editor rozvrhů: jednorázové, denní (každých N dní) a týdenní (každých N týdnů ve vybrané dny) dávkování s náhledem nejbližších pěti termínů. Uložení je možné jen u platného formuláře; množství se zadává jako běžné desetinné číslo (např. 12,5).
+- Správné chování při přechodu na letní a zimní čas: neexistující čas se přeskočí, opakovaný čas proběhne jednou a jednorázovou dávku nelze naplánovat na čas, který neexistuje.
+- Ukládání rozvrhů v telefonu se stavem „Uloženo v telefonu“; aplikace nepředstírá synchronizaci se zařízením.
+- Nová instalace začíná s prázdným seznamem rozvrhů; rozvrhy si vytvoříte sami.
 - Plovoucí navigační lišta a přepínání obrazovek tažením.
-- Simulace dávkování se simulovaným časem, výpadkem zařízení a resetem; odhad zásobníku, blokace při nedostatku, doplnění a výhled zásoby; historie událostí (A1.3).
-- Nastavení s názvem akvária, ikona aplikace a úvodní obrazovka (A1.4a).
-- Obrazovka O aplikaci, Co je nového, licence knihoven třetích stran a kontrola aktualizací přes GitHub Releases (A1.4b).
-- Záloha a obnovení konfigurace (rozvrhy a název akvária, volitelně simulace a historie) do souboru JSON přes systémový výběr souborů; obnovení s potvrzením, kontrolou souboru a bezpečným návratem při chybě (A1.4c.1).
-- Aplikace je vydávána pod licencí Apache License 2.0; text licence je dostupný v obrazovce O aplikaci (A1.5).
-- Vývojová verze se instaluje jako samostatná aplikace „Dispenser DEBUG“ vedle vydané verze (A1.5).
+- Simulace dávkování se simulovaným časem, výpadkem zařízení a resetem; odhad zásobníku, blokace při nedostatku, doplnění, výhled zásoby a jednorázové varování při nízké zásobě (navržená hranice 20 %).
+- Historie simulovaných událostí.
+- Nastavení s názvem akvária, ikona aplikace a úvodní obrazovka.
+- Obrazovka O aplikaci s přehledem změn, licencemi knihoven třetích stran a kontrolou aktualizací přes GitHub Releases.
+- Záloha a obnovení konfigurace (rozvrhy a název akvária, volitelně simulace a historie) do souboru JSON přes systémový výběr souborů; obnovení s potvrzením, kontrolou souboru a bezpečným návratem při chybě.
+- Aplikace je vydávána pod licencí Apache License 2.0; text licence je dostupný v obrazovce O aplikaci.
 
-### Změněno
-- Automatická záloha Androidu (Google účet) a přenos do nového telefonu jsou pro data aplikace vypnuté; data se přenášejí jen ruční zálohou (A1.5).
-- Ruční uložení v editoru je zakázané, dokud formulář obsahuje chyby nebo se nezměnil.
-- Varování na nízkou zásobu (navržená hranice 20 %) se zobrazuje jednou za epizodu.
+### Zabezpečení a soukromí
+- Automatická záloha Androidu (Google účet) a přenos do nového telefonu jsou pro data aplikace vypnuté; data se přenášejí jen ruční zálohou, kterou sami uložíte.
+- Aplikace neobsahuje analytiku ani telemetrii; síť používá jen pro kontrolu aktualizací spuštěnou na vyžádání.
 
-### Opraveno
-- Opakování s velmi dlouhým intervalem nyní najde budoucí termíny.
-- Pole množství přijímá pouze běžná desetinná čísla (např. 12,5).
-- Jednorázovou dávku nelze uložit v čase, který kvůli přechodu na letní čas neexistuje.
+### Známá omezení
+- Režim DEMO: zařízení zatím nelze připojit; zásobník, baterie a historie jsou simulované.

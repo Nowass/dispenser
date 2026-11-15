@@ -48,8 +48,15 @@ class AppContainerTest {
 
     @Test
     fun freshInstall_hasNoSchedules_noDemoSeed() = runBlocking {
+        // First-run experience of the beta: nothing is inserted automatically. Demo schedules
+        // (MockSeed) exist only as explicit preview/test fixtures.
         val container = AppContainer(context)
         assertTrue(container.repository.observeSchedules().first().isEmpty())
+        assertTrue(container.repository.observeHistory().first().isEmpty())
+        assertTrue(container.repository.observeReservoir().first() == null)
+        assertTrue(container.simulation.observeSimulation().first() == null)
+        assertTrue(container.appSettings.displayName.first() == null)
+        assertTrue(container.repository.observeUnreadableScheduleCount().first() == 0)
         assertTrue(container.isDemo)
     }
 
@@ -82,7 +89,7 @@ class AppContainerTest {
         val container = AppContainer(context)
         assertTrue(container.sourceCodeUrl == null) // dispenser.github.sourceLinkEnabled=false
         assertTrue(container.appVersion.name.substringBefore('+') == "0.5.0-beta.1")
-        assertTrue(container.assets.read("CHANGELOG.md")?.contains("Nevydáno") == true)
+        assertTrue(container.assets.read("CHANGELOG.md")?.contains("## [0.5.0-beta.1]") == true)
         assertTrue(container.assets.read("licenses/third_party_licenses.json") != null)
     }
 }

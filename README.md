@@ -11,11 +11,14 @@ Android companion app.
 
 ## Installation (Android)
 
-No release has been published yet. The first planned release is `0.5.0-beta.1`, an APK attached
-to a GitHub Release together with its SHA-256 checksum:
+No release has been published yet. The first release, `0.5.0-beta.1`, is in preparation; it
+will be an APK attached to a GitHub Release together with its SHA-256 checksum:
 
 1. Download `dispenser-<version>.apk` and `dispenser-<version>.apk.sha256` from the release.
-2. Verify: `sha256sum -c dispenser-<version>.apk.sha256`.
+2. Verify the download: `sha256sum -c dispenser-<version>.apk.sha256`.
+   Optionally verify the signer with `apksigner verify --print-certs dispenser-<version>.apk`;
+   official APKs are signed only with this release certificate (SHA-256):
+   `32:C2:4A:F8:B4:13:8D:49:CF:E8:D8:C6:95:19:A2:6D:44:2D:F6:4C:AF:F5:BE:E7:C7:29:56:FA:C7:CE:64:29`
 3. Install the APK (Android 8.0+, "install unknown apps" must be allowed for the browser or file
    manager).
 

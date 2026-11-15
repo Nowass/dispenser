@@ -264,13 +264,13 @@ fun ChangelogScreen(changelog: Changelog?, versionName: String, isDemo: Boolean,
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = Spacing.m, vertical = Spacing.s),
             verticalArrangement = Arrangement.spacedBy(Spacing.m),
         ) {
-            if (changelog == null || changelog.sections.isEmpty()) {
+            if (changelog == null || changelog.visibleSections.isEmpty()) {
                 Text(stringResource(R.string.changelog_unavailable), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 return@Column
             }
             changelog.intro.forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             val relevant = changelog.relevantFor(versionName)
-            (listOfNotNull(relevant) + changelog.sections.filter { it != relevant }).forEach { section ->
+            (listOfNotNull(relevant) + changelog.visibleSections.filter { it != relevant }).forEach { section ->
                 SectionCard {
                     Column(Modifier.padding(Spacing.m), verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {

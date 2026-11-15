@@ -1,9 +1,9 @@
 # Releasing the Dispenser Android app (GitHub Releases)
 
-Status (A1.5): release engineering is prepared; **no release has been published yet**. The
-repository `Nowass/dispenser` is still **private**, so the in-app update check reports that
-release information is unavailable (unauthenticated GitHub API returns 404). No credentials
-are ever embedded in the app.
+Status: release engineering is in place and `0.5.0-beta.1` is being prepared. Until the
+repository `Nowass/dispenser` is public, the in-app update check reports that release
+information is unavailable (unauthenticated GitHub API returns 404). No credentials are ever
+embedded in the app.
 
 ## Build variants
 
@@ -24,8 +24,8 @@ metadata: the update checker ignores it, so a debug build compares equal to its 
 - `versionCode`: **strictly increasing integer for every published APK**, including
   pre-releases; assigned manually in `android/app/build.gradle.kts`, never reused, never derived
   from the version number. Sequence: `0.5.0-beta.1` → 5, `0.5.0-beta.2` → 6, `0.5.0` → 7.
-- Current: `0.5.0-beta.1` / 5 (first planned release). The previous development builds were
-  `0.4.0` / 4 (debug-signed, never published).
+- Current: `0.5.0-beta.1` / 5 (first release, prepared 2026-11-15). The previous development
+  builds were `0.4.0` / 4 (debug-signed, never published).
 
 ## Update channels (installed build decides; never switched automatically)
 
@@ -96,14 +96,26 @@ dispenser.signing.keyPassword=<password>
 
 ### Release certificate
 
-Not generated yet. After step 2: `SHA-256: <fingerprint>`.
+The permanent release key (generated 2026-11-15, backed up by the owner) is the only identity
+for official APKs. Every published APK must be signed with exactly this certificate:
+
+| | |
+|---|---|
+| Alias | `dispenser-release` |
+| Owner | `CN=Nowass, O=Dispenser` |
+| Algorithm | RSA 4096, SHA256withRSA |
+| SHA-256 | `32:C2:4A:F8:B4:13:8D:49:CF:E8:D8:C6:95:19:A2:6D:44:2D:F6:4C:AF:F5:BE:E7:C7:29:56:FA:C7:CE:64:29` |
+
+`tools/package-release.sh` checks this fingerprint by default. To check a downloaded APK:
+`apksigner verify --print-certs dispenser-<version>.apk` and compare the
+"certificate SHA-256 digest" with the value above (same hex digits without colons).
 
 ## Release procedure (example: `0.5.0-beta.1`)
 
 1. **Clean state:** on `main`, working tree clean, CI green.
 2. **Version:** `versionName` / `versionCode` in `android/app/build.gradle.kts` (here
    `0.5.0-beta.1` / 5; the next one must be higher).
-3. **Changelog:** move the items from `## [Nevydáno] – vývojové milníky` under a new heading
+3. **Changelog:** move the items from `## [Nevydáno]` under a new heading
    `## [0.5.0-beta.1] – YYYY-MM-DD` and leave an empty `## [Nevydáno]` section above it.
    Check: `tools/release-notes.sh 0.5.0-beta.1`.
 4. **Commit** the version/changelog change (`chore(release): 0.5.0-beta.1`).
@@ -113,7 +125,7 @@ Not generated yet. After step 2: `SHA-256: <fingerprint>`.
    cd android
    ./gradlew clean assembleDebug test lintDebug assembleDebugAndroidTest checkThirdPartyLicenses
    ./gradlew --no-configuration-cache assembleRelease      # signed with the local key
-   cd .. && tools/package-release.sh --expected-cert-sha256 <release certificate SHA-256>
+   cd .. && tools/package-release.sh      # checks the release certificate below by default
    ```
 
    `tools/package-release.sh` refuses unsigned, debug-signed or wrongly signed APKs and writes

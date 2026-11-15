@@ -25,7 +25,8 @@ import java.util.UUID
 /**
  * Fixture repository for previews and tests: in-memory stores pre-filled with
  * [MockSeed.schedules] (as PENDING, i.e. phone-only) and, if [simulationActive], an active
- * demo simulation at the fixture time with sample history. Not used by the running app.
+ * demo simulation at the fixture time with sample history. Explicit preview/test fixture only:
+ * the running app never inserts these schedules (a fresh installation starts empty).
  */
 fun MockDispenserRepository(
     seed: MockSeed = MockSeed.default(),

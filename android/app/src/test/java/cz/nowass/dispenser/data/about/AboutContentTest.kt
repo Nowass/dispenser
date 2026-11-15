@@ -40,13 +40,26 @@ class AboutContentTest {
     }
 
     @Test
-    fun realChangelog_isCzech_andContainsNoInventedReleases() {
+    fun realChangelog_isCzech_firstRelease_isCurrentForTheBuiltVersion() {
         val c = ChangelogParser.parse(changelogFile.readText())
-        assertEquals(1, c.sections.size)
-        assertTrue(c.sections.single().isUnreleased)
-        assertEquals(listOf("Přidáno", "Změněno", "Opraveno"), c.sections.single().groups.map { it.title })
-        assertTrue(c.intro.any { "nebyla zveřejněna žádná verze" in it })
-        assertTrue(c.relevantFor("0.4.0")!!.isUnreleased)
+        assertEquals(listOf("Nevydáno", "0.5.0-beta.1"), c.sections.map { it.label })
+        assertTrue(c.sections[0].isUnreleased)
+        // The empty unreleased placeholder is not shown; the release section is.
+        assertEquals(listOf("0.5.0-beta.1"), c.visibleSections.map { it.label })
+        assertEquals("0.5.0-beta.1 – 2026-11-15", c.sections[1].title)
+        assertEquals(listOf("Přidáno", "Zabezpečení a soukromí", "Známá omezení"), c.sections[1].groups.map { it.title })
+        assertTrue(c.sections[1].groups.first().items.any { "prázdným seznamem rozvrhů" in it })
+        // Release and debug builds of 0.5.0-beta.1 both show it as current.
+        assertEquals("0.5.0-beta.1", c.relevantFor("0.5.0-beta.1")!!.label)
+        assertEquals("0.5.0-beta.1", c.relevantFor("0.5.0-beta.1+debug")!!.label)
+    }
+
+    @Test
+    fun emptySections_areHidden_andNeverRelevant() {
+        val c = ChangelogParser.parse("## [Nevydáno]\n\n## [0.5.0] – 2027-01-10\n### Přidáno\n- A\n")
+        assertEquals(listOf("0.5.0"), c.visibleSections.map { it.label })
+        // An unreleased build falls back to the unreleased section only if it has items.
+        assertEquals(null, c.relevantFor("0.6.0"))
     }
 
     @Test
