@@ -165,6 +165,7 @@ fun DispenserApp(
     val snackbarHostState = remember { SnackbarHostState() }
     val savedMessage = stringResource(R.string.editor_saved_snackbar)
     val deletedMessage = stringResource(R.string.editor_deleted_snackbar)
+    val appLicenseTitle = stringResource(R.string.about_app_license_title)
 
     // Editor, reservoir, About and backup are full-screen tasks with their own top bar (incl. DEMO badge).
     val inEditor = isFullScreenRoute(currentDestination?.route)
@@ -255,6 +256,11 @@ fun DispenserApp(
                     onBack = { navController.popBackStack() },
                     onOpenChangelog = { navController.navigate(ABOUT_CHANGELOG_ROUTE) { launchSingleTop = true } },
                     onOpenLicenses = { navController.navigate(ABOUT_LICENSES_ROUTE) { launchSingleTop = true } },
+                    onOpenAppLicense = {
+                        navController.navigate(
+                            "$ABOUT_LICENSE_TEXT_ROUTE?$ARG_TITLE=${Uri.encode(appLicenseTitle)}&$ARG_PATH=${Uri.encode(cz.nowass.dispenser.ui.about.APP_LICENSE_TEXT_PATH)}",
+                        ) { launchSingleTop = true }
+                    },
                 )
             }
             if (backupViewModelFactory != null) {

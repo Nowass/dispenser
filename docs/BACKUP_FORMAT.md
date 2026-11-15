@@ -4,6 +4,10 @@ Configuration backups are exported and restored from **Nastavení → Záloha a 
 (milestone A1.4c.1). Files are chosen with the Android Storage Access Framework; the app
 needs no storage permission and never uploads a backup anywhere.
 
+Android system backup is disabled for the app (`allowBackup="false"`, all domains excluded in
+`backup_rules.xml` and `data_extraction_rules.xml`, A1.5): neither Google cloud backup nor
+device-to-device transfer carries app data. This manual export is the only way to move data.
+
 Encoding: UTF-8 JSON (a leading BOM is tolerated). Maximum size: 20 MB.
 Implementation: `data/backup/BackupCodec.kt` (encoder + strict validating decoder).
 

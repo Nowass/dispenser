@@ -48,7 +48,14 @@ unavailable (unauthenticated GitHub API returns 404). No credentials are ever em
 1. Set `dispenser.github.sourceLinkEnabled=true` in `android/gradle.properties` to show
    "Zdrojový kód projektu" in About.
 2. Verify the update check against a real published release.
-3. Decide the application source-code license (currently undecided; no `LICENSE` file).
+
+## Project license
+
+The Android application and the future ESP32 firmware are licensed under the Apache License,
+Version 2.0 (`LICENSE`, attributions in `NOTICE`). The app shows "Licence aplikace: Apache
+License 2.0" in About and opens the bundled official text
+(`android/app/src/main/assets/licenses/texts/Apache-2.0.txt`, identical to the root `LICENSE`).
+Hardware, PCB and mechanical design files are not covered; their license is undecided.
 
 ## Third-party licenses
 

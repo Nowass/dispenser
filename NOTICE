@@ -1,0 +1,28 @@
+Dispenser
+Copyright 2026 Nowass
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Scope of the Apache-2.0 license:
+- Android application (android/)
+- Future ESP32 firmware (firmware/)
+
+Not covered: hardware, PCB and mechanical design files. Their license has not been
+decided yet; no rights are granted for them until a license is published for them.
+
+Third-party material
+--------------------
+
+The Android application bundles third-party libraries. Their licenses and required
+notices are shown in the app (O aplikaci -> Licence knihoven třetích stran) and are
+kept in android/app/src/main/assets/licenses/ (generated from the resolved release
+dependencies by android/app/third-party-licenses.gradle.kts). This includes the
+BSD-3-Clause notice for the Protocol Buffers code shipped inside
+androidx.datastore:datastore-preferences-external-protobuf.
+
+Some vector icon paths in the Android application are taken from Google Material
+Icons, Copyright Google LLC, licensed under the Apache License, Version 2.0:
+- "history"     android/app/src/main/java/cz/nowass/dispenser/ui/components/DispenserIcons.kt
+- "battery"     android/app/src/main/res/drawable/ic_battery.xml
+- "local_drink" android/app/src/main/res/drawable/ic_reservoir.xml
+- "water_drop"  android/app/src/main/res/drawable/ic_water_drop.xml

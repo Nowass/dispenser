@@ -96,6 +96,11 @@ private fun rememberGitHubOpener(): (String) -> Unit {
 
 // ---- About ----
 
+const val ABOUT_APP_LICENSE_TEST_TAG = "about_app_license"
+
+/** Bundled official Apache License 2.0 text: the license of this application (A1.5). */
+const val APP_LICENSE_TEXT_PATH = "licenses/texts/Apache-2.0.txt"
+
 @Composable
 fun AboutRoute(
     viewModel: AboutViewModel,
@@ -103,9 +108,10 @@ fun AboutRoute(
     onBack: () -> Unit,
     onOpenChangelog: () -> Unit,
     onOpenLicenses: () -> Unit,
+    onOpenAppLicense: () -> Unit = {},
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
-    AboutScreen(state, isDemo, onBack, onOpenChangelog, onOpenLicenses, viewModel::checkForUpdates, rememberGitHubOpener())
+    AboutScreen(state, isDemo, onBack, onOpenChangelog, onOpenLicenses, viewModel::checkForUpdates, rememberGitHubOpener(), onOpenAppLicense)
 }
 
 @Composable
@@ -117,6 +123,8 @@ fun AboutScreen(
     onOpenLicenses: () -> Unit,
     onCheckForUpdates: () -> Unit,
     onOpenUrl: (String) -> Unit,
+    /** Opens the bundled Apache License 2.0 text (the app's own license). */
+    onOpenAppLicense: () -> Unit = {},
 ) {
     Column(Modifier.fillMaxSize()) {
         DetailTopBar(stringResource(R.string.about_title), isDemo, onBack)
@@ -149,7 +157,12 @@ fun AboutScreen(
                     )
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                ListItem(headlineContent = { Text(stringResource(R.string.about_app_license)) }, colors = itemColors())
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.about_app_license)) },
+                    supportingContent = { Text(stringResource(R.string.licenses_open_text)) },
+                    colors = itemColors(),
+                    modifier = Modifier.testTag(ABOUT_APP_LICENSE_TEST_TAG).clickable(onClick = onOpenAppLicense),
+                )
             }
             Text(stringResource(R.string.about_privacy), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (isDemo) Text(stringResource(R.string.about_demo_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -310,6 +323,7 @@ fun LicensesScreen(libraries: List<ThirdPartyLibrary>?, isDemo: Boolean, onBack:
             verticalArrangement = Arrangement.spacedBy(Spacing.s),
         ) {
             item { Text(stringResource(R.string.licenses_intro), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item { Text(stringResource(R.string.licenses_material_icons_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             item { Text(stringResource(R.string.licenses_texts_title), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = Spacing.s).semantics { heading() }) }
             items(bySpdx.entries.filter { it.key == "Apache-2.0" || it.key == "MIT" }.toList(), key = { "spdx-" + it.key }) { (spdx, libs) ->
                 SectionCard {

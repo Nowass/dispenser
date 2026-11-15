@@ -2,6 +2,8 @@ package cz.nowass.dispenser
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -9,6 +11,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.espresso.Espresso
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import cz.nowass.dispenser.ui.TopLevelDestination
+import cz.nowass.dispenser.ui.about.ABOUT_APP_LICENSE_TEST_TAG
 import cz.nowass.dispenser.ui.about.ABOUT_LICENSES_TEST_TAG
 import cz.nowass.dispenser.ui.about.ABOUT_WHATS_NEW_TEST_TAG
 import cz.nowass.dispenser.ui.settings.SETTINGS_ABOUT_ROW_TEST_TAG
@@ -29,7 +32,7 @@ class AboutNavigationTest {
     }
 
     @Test
-    fun about_showsVersionFromPackage_andUndecidedLicense() {
+    fun about_showsVersionFromPackage_andApacheLicense() {
         openAbout()
         val version = rule.activity.packageManager.getPackageInfo(rule.activity.packageName, 0).versionName!!
         rule.onNodeWithText(str(R.string.about_version).replace("%1\$s", version)).assertIsDisplayed()
@@ -46,5 +49,15 @@ class AboutNavigationTest {
         Espresso.pressBack()
         Espresso.pressBack()
         rule.onNodeWithTag(TopLevelDestination.SETTINGS.testTag).assertIsDisplayed()
+    }
+
+    @Test
+    fun appLicense_opensBundledApacheText() {
+        openAbout()
+        rule.onNodeWithTag(ABOUT_APP_LICENSE_TEST_TAG).performScrollTo().performClick()
+        // Title bar and the license body both contain the name.
+        rule.onAllNodesWithText("Apache License", substring = true).onFirst().assertIsDisplayed()
+        Espresso.pressBack()
+        rule.onNodeWithTag(ABOUT_APP_LICENSE_TEST_TAG).performScrollTo().assertIsDisplayed()
     }
 }

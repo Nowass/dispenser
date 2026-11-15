@@ -307,8 +307,9 @@
     <string name="about_check_updates">Zkontrolovat aktualizace</string>
     <string name="about_licenses">Licence a knihovny</string>
     <string name="about_source">Zdrojový kód projektu</string>
-    <string name="about_app_license">Licence aplikace: zatím neurčena</string>
-    <string name="about_privacy">Aplikace neobsahuje analytiku ani telemetrii a neodesílá rozvrhy, údaje o zásobníku ani historii. Kontrola aktualizací se spouští jen na vyžádání a stahuje pouze veřejné informace o vydáních z GitHubu.</string>
+    <string name="about_app_license">Licence aplikace: Apache License 2.0</string>
+    <string name="about_app_license_title">Apache License 2.0</string>
+    <string name="about_privacy">Aplikace neobsahuje analytiku ani telemetrii a neodesílá rozvrhy, údaje o zásobníku ani historii. Data zůstávají jen v telefonu: automatická záloha Androidu do Google účtu ani přenos do nového telefonu je nezahrnují. Data přenesete pouze ruční zálohou (Nastavení → Záloha a obnovení) do souboru, který sami uložíte. Kontrola aktualizací se spouští jen na vyžádání a stahuje pouze veřejné informace o vydáních z GitHubu.</string>
     <string name="about_demo_note">Režim DEMO: zařízení zatím nelze připojit. Údaje o zásobníku, baterii a historie jsou simulované.</string>
     <string name="update_checking">Kontroluji aktualizace…</string>
     <string name="update_up_to_date">Máte aktuální verzi.</string>
@@ -329,6 +330,7 @@
     <string name="changelog_current">Aktuální</string>
     <string name="changelog_unavailable">Seznam změn není k dispozici.</string>
     <string name="licenses_intro">Aplikace obsahuje níže uvedené knihovny třetích stran. Seznam je vygenerován z knihoven skutečně zabudovaných v aplikaci.</string>
+    <string name="licenses_material_icons_note">Některé ikony aplikace vycházejí z Material Icons (Copyright Google LLC, Apache License 2.0).</string>
     <string name="licenses_texts_title">Texty licencí</string>
     <string name="licenses_libraries_title">Knihovny</string>
     <plurals name="licenses_library_count">
@@ -348,7 +350,7 @@
     <string name="settings_backup">Záloha a obnovení</string>
     <string name="settings_backup_hint">Export a obnovení rozvrhů a nastavení</string>
     <string name="backup_title">Záloha a obnovení</string>
-    <string name="backup_intro">Záloha obsahuje rozvrhy a název akvária. Kam soubor uložit nebo který obnovit, vyberete v systémovém výběru souborů. Aplikace nepotřebuje oprávnění k úložišti a nic neodesílá.</string>
+    <string name="backup_intro">Záloha obsahuje rozvrhy a název akvária. Kam soubor uložit nebo který obnovit, vyberete v systémovém výběru souborů. Aplikace nepotřebuje oprávnění k úložišti a nic neodesílá. Automatická záloha Androidu ani přenos do nového telefonu data aplikace nezahrnují, proto si zálohu před výměnou telefonu nebo přeinstalováním vytvořte sami.</string>
     <string name="backup_export_title">Export</string>
     <string name="backup_export_button">Exportovat konfiguraci</string>
     <string name="backup_include_simulation">Zahrnout simulaci a historii</string>

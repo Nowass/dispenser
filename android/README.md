@@ -160,9 +160,14 @@ ViewModels and domain models have no database dependencies; Room types live only
   from package metadata, update channel, "Co je nového" (bundled from the repository's
   `CHANGELOG.md`), "Licence a knihovny" (generated from the resolved runtime dependencies),
   user-initiated GitHub Releases update check (public metadata only; opens the release page in
-  the browser, never downloads or installs), "Licence aplikace: zatím neurčena". The source-code
+  the browser, never downloads or installs), "Licence aplikace: Apache License 2.0" (opens the
+  bundled license text; see `../LICENSE` and `../NOTICE`). The source-code
   link is hidden while the repository is private (`dispenser.github.sourceLinkEnabled`).
   The app's only permission is `INTERNET`, used solely for that check. See `docs/RELEASING.md`.
+- **System backup (A1.5):** `allowBackup="false"`; `backup_rules.xml` and
+  `data_extraction_rules.xml` exclude all app domains from cloud backup and device transfer.
+  Data moves only via the manual JSON export (Nastavení → Záloha a obnovení,
+  `docs/BACKUP_FORMAT.md`).
 - **Navigation:** floating icon-only dock (Přehled, Kalendář, Historie, Nastavení) plus
   horizontal swipe between these four screens (one `HorizontalPager` in the `main`
   destination; the pager state is the single source of truth for dock, header and swipes).

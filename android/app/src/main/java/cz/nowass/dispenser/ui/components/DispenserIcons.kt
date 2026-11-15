@@ -9,7 +9,10 @@ import androidx.compose.ui.unit.dp
 /** Small app-specific icons not included in material-icons-core (avoids the large extended set). */
 object DispenserIcons {
 
-    /** Material "history" glyph (clock with counter-clockwise arrow), 24×24. */
+    /**
+     * Material "history" glyph (clock with counter-clockwise arrow), 24×24. Path from Google
+     * Material Icons, Copyright Google LLC, Apache License 2.0 (see NOTICE).
+     */
     val History: ImageVector by lazy {
         ImageVector.Builder(
             name = "History",

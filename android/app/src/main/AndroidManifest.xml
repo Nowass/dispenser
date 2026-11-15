@@ -5,9 +5,15 @@
     <!-- Only for the user-initiated update check (public GitHub release metadata). No other network use. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+        System backup is disabled (A1.5): schedules, simulation and settings never go to Google
+        cloud backup or device-to-device transfer. Users move data only with the explicit JSON
+        export in Nastavení -> Záloha a obnovení. The rule files also exclude every app domain
+        where the platform still consults them (e.g. device transfer on Android 12+).
+    -->
     <application
         android:name=".DispenserApplication"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
