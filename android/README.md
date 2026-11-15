@@ -24,6 +24,8 @@ Product and architecture sources of truth live in [`../docs`](../docs).
 | Room (runtime, compiler, Gradle plugin) | 2.8.5 |
 | KSP | 2.3.12 |
 | DataStore Preferences | 1.2.1 |
+| kotlinx-serialization-json | 1.7.3 (already resolved via Navigation; JSON tree API only) |
+| Test: OkHttp MockWebServer | 4.12.0 (test only) |
 | Test: kotlinx-coroutines-test / espresso | 1.9.0 / 3.6.1 |
 | Test: Robolectric / androidx.test core | 4.17 / 1.6.1 (Robolectric runs on SDK 35) |
 
@@ -151,8 +153,16 @@ ViewModels and domain models have no database dependencies; Room types live only
   není připojeno"; no connection is ever simulated). The name is stored with DataStore
   (`app_settings.preferences_pb`), separate from both Room databases.
 - **Branding:** adaptive launcher icon (navy background, turquoise droplet with a dosing-nozzle
-  cut-out, monochrome themed variant; vector, no text) based on the reference image; Android 12+
+  cut-out, monochrome themed variant; vector, no text) based on the approved reference image
+  `docs/assets/app-icon-reference.png`; Android 12+
   splash in the same colors. Launcher name "Dispenser"; version 0.4.0 (4).
+- **About (A1.4b):** Settings → O aplikaci opens a dedicated screen: icon, version and build
+  from package metadata, update channel, "Co je nového" (bundled from the repository's
+  `CHANGELOG.md`), "Licence a knihovny" (generated from the resolved runtime dependencies),
+  user-initiated GitHub Releases update check (public metadata only; opens the release page in
+  the browser, never downloads or installs), "Licence aplikace: zatím neurčena". The source-code
+  link is hidden while the repository is private (`dispenser.github.sourceLinkEnabled`).
+  The app's only permission is `INTERNET`, used solely for that check. See `docs/RELEASING.md`.
 - **Navigation:** floating icon-only dock (Přehled, Kalendář, Historie, Nastavení) plus
   horizontal swipe between these four screens (one `HorizontalPager` in the `main`
   destination; the pager state is the single source of truth for dock, header and swipes).

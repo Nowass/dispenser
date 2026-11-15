@@ -5,6 +5,41 @@ plugins {
     alias(libs.plugins.androidx.room)
 }
 
+/** Bundles the repository's CHANGELOG.md (single source of truth) into the app assets. */
+abstract class BundleChangelogTask : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val changelog: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun bundle() {
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
+        out.mkdirs()
+        changelog.get().asFile.copyTo(File(out, "CHANGELOG.md"), overwrite = true)
+    }
+}
+
+val bundleChangelog = tasks.register<BundleChangelogTask>("bundleChangelog") {
+    changelog.set(layout.projectDirectory.file("../../CHANGELOG.md"))
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(bundleChangelog, BundleChangelogTask::outputDir)
+    }
+}
+
+apply(from = "third-party-licenses.gradle.kts")
+
+/** Public GitHub Releases source (configured in gradle.properties; no credentials anywhere). */
+val githubOwner = providers.gradleProperty("dispenser.github.owner").get()
+val githubRepo = providers.gradleProperty("dispenser.github.repo").get()
+val githubSourceLinkEnabled = providers.gradleProperty("dispenser.github.sourceLinkEnabled").get()
+
 room {
     // Exported schema JSON is committed so future migrations can be written and tested.
     schemaDirectory("$projectDir/schemas")
@@ -24,6 +59,10 @@ android {
         versionName = "0.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        resValue("string", "github_owner", githubOwner)
+        resValue("string", "github_repo", githubRepo)
+        resValue("bool", "github_source_link_enabled", githubSourceLinkEnabled)
     }
 
     buildTypes {
@@ -40,6 +79,7 @@ android {
     }
     buildFeatures {
         compose = true
+        resValues = true
     }
     testOptions {
         // Robolectric (Room tests on the JVM) needs merged Android resources.
@@ -62,10 +102,12 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.kotlinx.serialization.json)
     ksp(libs.androidx.room.compiler)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+    testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

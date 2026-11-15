@@ -26,6 +26,9 @@ class MainActivity : ComponentActivity() {
                     appSettings = container.appSettings,
                     appVersion = container.appVersion,
                     isDemo = container.isDemo,
+                    updateChecker = container.updateChecker,
+                    assets = container.assets,
+                    sourceCodeUrl = container.sourceCodeUrl,
                 )
             }
         }

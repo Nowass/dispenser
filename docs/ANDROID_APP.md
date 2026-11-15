@@ -136,6 +136,7 @@ Implemented in `android/` (see `android/README.md`): A1.1 shell and dashboard, A
 - **Sync semantics:** every saved schedule is `PENDING`, displayed as "Uloženo v telefonu": stored locally, not transferred to or accepted by the device. No acknowledgement is simulated; `DEVICE_APPLIED` is reserved for future BLE read-back. The DEMO badge stays because device values are simulated.
 - **A1.3 dispensing simulation:** deterministic engine with a separate persisted `simulation.db`, Settings controls (start, +1 h, +1 day, advance to, outage, reset), a visible simulation clock while active, reservoir detail with prediction and refill, and a newest-first History screen with events marked SIMULACE. Service mode / tubing priming (FR-025) is documented and reserved only.
 - **A1.4a settings and branding:** sectioned Settings (app, reservoir summary, simulation, device placeholder "Zařízení není připojeno"), persisted aquarium name (DataStore), adaptive launcher icon and Android 12+ splash in brand colors, version 0.4.0.
+- **A1.4b app information:** About screen (version from package metadata, changelog, generated third-party licenses, undecided app license), user-initiated GitHub Releases update check with explicit stable/beta channel rules; repository private for now, so the check reports unavailable metadata. Release process in `docs/RELEASING.md`.
 - **Not yet done:** onboarding screen (A); history filters (E); BLE, real battery measurement, service mode.
 - **Known limitation:** the M3 date picker grid follows the device language for month/day names.
 

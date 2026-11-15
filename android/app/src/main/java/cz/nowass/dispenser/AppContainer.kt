@@ -9,6 +9,9 @@ import cz.nowass.dispenser.data.AppSettingsRepository
 import cz.nowass.dispenser.data.AppVersion
 import cz.nowass.dispenser.data.DataStoreAppSettingsRepository
 import cz.nowass.dispenser.data.LocalDispenserRepository
+import cz.nowass.dispenser.data.about.AssetTextSource
+import cz.nowass.dispenser.data.update.GitHubReleasesUpdateChecker
+import cz.nowass.dispenser.data.update.UpdateChecker
 import cz.nowass.dispenser.data.SimulationController
 import cz.nowass.dispenser.data.DispenserRepository
 import cz.nowass.dispenser.data.local.DispenserDatabase
@@ -50,6 +53,26 @@ class AppContainer(context: Context) {
         DataStoreAppSettingsRepository(
             PreferenceDataStoreFactory.create { context.applicationContext.preferencesDataStoreFile(DataStoreAppSettingsRepository.FILE_NAME) },
         )
+    }
+
+    /** Public GitHub Releases source (owner/repo from gradle.properties via resources; no credentials). */
+    private val githubOwner: String by lazy { context.getString(R.string.github_owner) }
+    private val githubRepo: String by lazy { context.getString(R.string.github_repo) }
+
+    /** Repository page, or null while the source link is disabled (repository still private, D5). */
+    val sourceCodeUrl: String? by lazy {
+        if (context.resources.getBoolean(R.bool.github_source_link_enabled)) "https://github.com/$githubOwner/$githubRepo" else null
+    }
+
+    /** User-initiated update check; only public release metadata is requested. */
+    val updateChecker: UpdateChecker by lazy {
+        GitHubReleasesUpdateChecker(githubOwner, githubRepo, userAgent = "Dispenser-Android/${appVersion.name}")
+    }
+
+    /** Bundled assets: CHANGELOG.md, license data and texts. */
+    val assets: AssetTextSource by lazy {
+        val am = context.applicationContext.assets
+        AssetTextSource { path -> runCatching { am.open(path).bufferedReader().use { it.readText() } }.getOrNull() }
     }
 
     val appVersion: AppVersion by lazy {

@@ -50,6 +50,14 @@ import cz.nowass.dispenser.data.SimulationController
 import cz.nowass.dispenser.data.AppSettingsRepository
 import cz.nowass.dispenser.data.AppVersion
 import cz.nowass.dispenser.ui.settings.AppSettingsViewModel
+import cz.nowass.dispenser.data.about.AssetTextSource
+import cz.nowass.dispenser.data.update.UpdateChecker
+import cz.nowass.dispenser.ui.about.AboutRoute
+import cz.nowass.dispenser.ui.about.AboutViewModel
+import cz.nowass.dispenser.ui.about.ChangelogRoute
+import cz.nowass.dispenser.ui.about.LicenseTextRoute
+import cz.nowass.dispenser.ui.about.LicensesRoute
+import android.net.Uri
 import cz.nowass.dispenser.ui.history.HistoryRoute
 import cz.nowass.dispenser.ui.history.HistoryViewModel
 import cz.nowass.dispenser.ui.reservoir.ReservoirRoute
@@ -94,6 +102,14 @@ const val MAIN_PAGER_TEST_TAG = "main_pager"
 /** Reservoir detail (full-screen route, like the schedule editor). */
 const val RESERVOIR_ROUTE = "reservoir"
 
+/** About and its sub-screens (full-screen routes). */
+const val ABOUT_ROUTE = "about"
+const val ABOUT_CHANGELOG_ROUTE = "about_changelog"
+const val ABOUT_LICENSES_ROUTE = "about_licenses"
+const val ABOUT_LICENSE_TEXT_ROUTE = "about_license_text"
+private const val ARG_TITLE = "title"
+private const val ARG_PATH = "path"
+
 @Composable
 fun DispenserApp(
     repository: DispenserRepository,
@@ -101,6 +117,9 @@ fun DispenserApp(
     appSettings: AppSettingsRepository,
     appVersion: AppVersion,
     isDemo: Boolean,
+    updateChecker: UpdateChecker,
+    assets: AssetTextSource,
+    sourceCodeUrl: String?,
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -133,7 +152,9 @@ fun DispenserApp(
     val deletedMessage = stringResource(R.string.editor_deleted_snackbar)
 
     // Editor and reservoir detail are full-screen tasks with their own top bar (incl. DEMO badge).
-    val inEditor = currentDestination?.route?.substringBefore('?') in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE)
+    val inEditor = currentDestination?.route?.substringBefore('?')?.let {
+        it in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE) || it.startsWith(ABOUT_ROUTE)
+    } == true
 
     // A1.4a: dashboard header shows the user's aquarium name (default "Moje akvárium").
     val nameFlow = remember(appSettings) { appSettings.displayName }
@@ -207,9 +228,42 @@ fun DispenserApp(
                     appSettings = appSettings,
                     appVersion = appVersion,
                     onOpenReservoir = { navController.navigate(RESERVOIR_ROUTE) { launchSingleTop = true } },
+                    onOpenAbout = { navController.navigate(ABOUT_ROUTE) { launchSingleTop = true } },
                     initialTab = entry.arguments?.getString(ARG_TAB),
                     onCreateSchedule = { date -> openEditor(date = date) },
                     onEditSchedule = { id -> openEditor(scheduleId = id) },
+                )
+            }
+            composable(ABOUT_ROUTE) {
+                AboutRoute(
+                    viewModel = viewModel(factory = AboutViewModel.factory(updateChecker, appVersion, sourceCodeUrl)),
+                    isDemo = isDemo,
+                    onBack = { navController.popBackStack() },
+                    onOpenChangelog = { navController.navigate(ABOUT_CHANGELOG_ROUTE) { launchSingleTop = true } },
+                    onOpenLicenses = { navController.navigate(ABOUT_LICENSES_ROUTE) { launchSingleTop = true } },
+                )
+            }
+            composable(ABOUT_CHANGELOG_ROUTE) {
+                ChangelogRoute(assets, appVersion.name, isDemo, onBack = { navController.popBackStack() })
+            }
+            composable(ABOUT_LICENSES_ROUTE) {
+                LicensesRoute(assets, isDemo, onBack = { navController.popBackStack() }) { title, path ->
+                    navController.navigate("$ABOUT_LICENSE_TEXT_ROUTE?$ARG_TITLE=${Uri.encode(title)}&$ARG_PATH=${Uri.encode(path)}")
+                }
+            }
+            composable(
+                route = "$ABOUT_LICENSE_TEXT_ROUTE?$ARG_TITLE={$ARG_TITLE}&$ARG_PATH={$ARG_PATH}",
+                arguments = listOf(
+                    navArgument(ARG_TITLE) { type = NavType.StringType; defaultValue = "" },
+                    navArgument(ARG_PATH) { type = NavType.StringType; defaultValue = "" },
+                ),
+            ) { entry ->
+                LicenseTextRoute(
+                    assets = assets,
+                    title = entry.arguments?.getString(ARG_TITLE).orEmpty(),
+                    path = entry.arguments?.getString(ARG_PATH).orEmpty(),
+                    isDemo = isDemo,
+                    onBack = { navController.popBackStack() },
                 )
             }
             composable(RESERVOIR_ROUTE) {
@@ -276,6 +330,7 @@ private fun MainPager(
     appSettings: AppSettingsRepository,
     appVersion: AppVersion,
     onOpenReservoir: () -> Unit,
+    onOpenAbout: () -> Unit,
     initialTab: String?,
     onCreateSchedule: (LocalDate) -> Unit,
     onEditSchedule: (String) -> Unit,
@@ -324,6 +379,7 @@ private fun MainPager(
                 simulationViewModel = viewModel(factory = SimulationSettingsViewModel.factory(simulation, repository)),
                 appViewModel = viewModel(factory = AppSettingsViewModel.factory(appSettings, repository, appVersion)),
                 onOpenReservoir = onOpenReservoir,
+                onOpenAbout = onOpenAbout,
             )
         }
     }
@@ -343,6 +399,9 @@ private fun DispenserAppPreview() {
             appSettings = cz.nowass.dispenser.data.InMemoryAppSettingsRepository(),
             appVersion = AppVersion("0.4.0", 4),
             isDemo = true,
+            updateChecker = { _, _ -> cz.nowass.dispenser.domain.update.UpdateCheckResult.RepositoryUnavailable },
+            assets = { null },
+            sourceCodeUrl = null,
         )
     }
 }

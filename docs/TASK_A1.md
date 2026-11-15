@@ -46,6 +46,8 @@ A buildable Android app (`cz.nowass.dispenser`, minSdk 26), in Czech, launched o
 
 **A1.4a — settings and branding** (added 2026-11-15): sectioned Settings, persisted aquarium display name (DataStore), read-only reservoir summary, device placeholder, adaptive launcher icon + splash, version 0.4.0.
 
+**A1.4b — application information, licenses and GitHub updates** (added 2026-11-15): About screen, `CHANGELOG.md` (Czech, no invented releases), generated third-party license notices, public GitHub Releases update check (stable/beta rules, no credentials), release/signing documentation. Application license undecided.
+
 **A1.4 — quality and handoff**
 
 - Unit tests for recurrence intervals, selected weekdays, multiple daily events, missed-dose skipping, DST Europe/Prague, stock blocking and refill reset.

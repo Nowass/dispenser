@@ -292,13 +292,55 @@
     <string name="settings_version">Verze aplikace</string>
     <string name="settings_version_value">%1$s (sestavení %2$d)</string>
     <string name="settings_about">O aplikaci</string>
-    <string name="settings_about_text">Dispenser plánuje dávkování tekutého uhlíku do akvária pro zařízení Dispenser V2.
-
-Režim DEMO: zařízení zatím nelze připojit. Údaje o zásobníku, baterii a historie jsou simulované a nepocházejí ze skutečného čerpadla. Rozvrhy jsou uložené pouze v telefonu.</string>
     <string name="settings_reservoir_capacity">Kapacita</string>
     <string name="settings_reservoir_estimate">Odhadovaný objem</string>
     <string name="settings_reservoir_manage">Spravovat zásobník</string>
     <string name="settings_sim_active_tag">Aktivní</string>
+    <!-- About (A1.4b) -->
+    <string name="about_title">O aplikaci</string>
+    <string name="about_description">Plánování dávkování tekutého uhlíku do akvária pro zařízení Dispenser V2.</string>
+    <string name="about_version">Verze %1$s</string>
+    <string name="about_build">Sestavení %1$d</string>
+    <string name="about_channel_stable">Kanál aktualizací: stabilní</string>
+    <string name="about_channel_beta">Kanál aktualizací: beta</string>
+    <string name="about_whats_new">Co je nového</string>
+    <string name="about_check_updates">Zkontrolovat aktualizace</string>
+    <string name="about_licenses">Licence a knihovny</string>
+    <string name="about_source">Zdrojový kód projektu</string>
+    <string name="about_app_license">Licence aplikace: zatím neurčena</string>
+    <string name="about_privacy">Aplikace neobsahuje analytiku ani telemetrii a neodesílá rozvrhy, údaje o zásobníku ani historii. Kontrola aktualizací se spouští jen na vyžádání a stahuje pouze veřejné informace o vydáních z GitHubu.</string>
+    <string name="about_demo_note">Režim DEMO: zařízení zatím nelze připojit. Údaje o zásobníku, baterii a historie jsou simulované.</string>
+    <string name="update_checking">Kontroluji aktualizace…</string>
+    <string name="update_up_to_date">Máte aktuální verzi.</string>
+    <string name="update_up_to_date_latest">Máte aktuální verzi. Nejnovější vydání: %1$s.</string>
+    <string name="update_available">K dispozici je verze %1$s.</string>
+    <string name="update_available_beta">K dispozici je beta verze %1$s.</string>
+    <string name="update_open_release">Otevřít stránku vydání</string>
+    <string name="update_without_apk">Je vydána verze %1$s, ale neobsahuje instalační soubor APK pro Android.</string>
+    <string name="update_no_releases">Zatím nebylo zveřejněno žádné vydání.</string>
+    <string name="update_repo_unavailable">Informace o vydáních nejsou dostupné. Repozitář projektu zatím není veřejný.</string>
+    <string name="update_offline">Nelze se připojit k internetu. Zkuste to později.</string>
+    <string name="update_rate_limited">GitHub dočasně omezil počet dotazů. Zkuste to později.</string>
+    <string name="update_rate_limited_until">GitHub dočasně omezil počet dotazů. Zkuste to znovu po %1$s.</string>
+    <string name="update_invalid">Informace o vydání jsou neplatné.</string>
+    <string name="update_http_error">Kontrola aktualizací selhala (HTTP %1$d).</string>
+    <string name="update_unsupported_version">Verzi aplikace nelze porovnat, protože není ve formátu sémantického verzování.</string>
+    <string name="update_manual_note">Aplikace nic nestahuje ani neinstaluje. Instalační soubor APK stáhnete na stránce vydání v prohlížeči.</string>
+    <string name="changelog_current">Aktuální</string>
+    <string name="changelog_unavailable">Seznam změn není k dispozici.</string>
+    <string name="licenses_intro">Aplikace obsahuje níže uvedené knihovny třetích stran. Seznam je vygenerován z knihoven skutečně zabudovaných v aplikaci.</string>
+    <string name="licenses_texts_title">Texty licencí</string>
+    <string name="licenses_libraries_title">Knihovny</string>
+    <plurals name="licenses_library_count">
+        <item quantity="one">%d knihovna</item>
+        <item quantity="few">%d knihovny</item>
+        <item quantity="many">%d knihovny</item>
+        <item quantity="other">%d knihoven</item>
+    </plurals>
+    <string name="licenses_open_text">Zobrazit text licence</string>
+    <string name="licenses_unavailable">Seznam licencí není k dispozici.</string>
+    <string name="license_text_title">Text licence</string>
+
     <string name="settings_device_connect">Připojit zařízení</string>
     <string name="settings_device_coming_later">Připojení přes Bluetooth bude dostupné později.</string>
 </resources>

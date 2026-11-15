@@ -65,6 +65,7 @@ fun SettingsRoute(
     simulationViewModel: SimulationSettingsViewModel,
     appViewModel: AppSettingsViewModel,
     onOpenReservoir: () -> Unit,
+    onOpenAbout: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by simulationViewModel.uiState.collectAsStateWithLifecycle()
@@ -79,6 +80,7 @@ fun SettingsRoute(
             saveName = appViewModel::saveName,
             resetName = appViewModel::resetName,
             openReservoir = onOpenReservoir,
+            openAbout = onOpenAbout,
         ),
         actions = SimulationActions(
             start = simulationViewModel::start,
@@ -106,7 +108,10 @@ data class AppSettingsActions(
     val saveName: (String) -> Unit = {},
     val resetName: () -> Unit = {},
     val openReservoir: () -> Unit = {},
+    val openAbout: () -> Unit = {},
 )
+
+const val SETTINGS_ABOUT_ROW_TEST_TAG = "settings_about_row"
 
 const val SETTINGS_NAME_ROW_TEST_TAG = "settings_name_row"
 const val SETTINGS_RESERVOIR_ROW_TEST_TAG = "settings_reservoir_row"
@@ -129,7 +134,6 @@ fun SettingsScreen(
         supportingColor = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     var showRename by rememberSaveable { mutableStateOf(false) }
-    var showAbout by rememberSaveable { mutableStateOf(false) }
     val ready = app as? AppSettingsUiState.Ready
     val defaultName = stringResource(R.string.dashboard_title)
 
@@ -172,7 +176,7 @@ fun SettingsScreen(
                 ListItem(
                     headlineContent = { Text(stringResource(R.string.settings_about)) },
                     colors = itemColors,
-                    modifier = Modifier.clickable { showAbout = true },
+                    modifier = Modifier.testTag(SETTINGS_ABOUT_ROW_TEST_TAG).clickable(onClick = appActions.openAbout),
                 )
             }
         }
@@ -241,19 +245,6 @@ fun SettingsScreen(
             onDismiss = { showRename = false },
             onSave = { appActions.saveName(it); showRename = false },
             onReset = { appActions.resetName(); showRename = false },
-        )
-    }
-    if (showAbout && ready != null) {
-        AlertDialog(
-            onDismissRequest = { showAbout = false },
-            title = { Text(stringResource(R.string.app_name)) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
-                    Text(stringResource(R.string.settings_version_value, ready.version.name, ready.version.code.toInt()), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(stringResource(R.string.settings_about_text))
-                }
-            },
-            confirmButton = { TextButton(onClick = { showAbout = false }) { Text(stringResource(R.string.dialog_ok)) } },
         )
     }
 }

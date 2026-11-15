@@ -20,7 +20,12 @@ import cz.nowass.dispenser.ui.dashboard.DashboardViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -49,7 +54,11 @@ class RoomBackedViewModelTest {
 
     private lateinit var db: DispenserDatabase
     private lateinit var repo: LocalDispenserRepository
-    private val collectors = CoroutineScope(Dispatchers.Default)
+    private val collectorJob = SupervisorJob()
+    private val collectors = CoroutineScope(Dispatchers.Default + collectorJob)
+
+    /** Owns the ViewModels so teardown can cancel their scopes before Dispatchers.Main is reset. */
+    private val viewModels = ViewModelStore()
 
     @Before
     fun setUp() {
@@ -61,8 +70,10 @@ class RoomBackedViewModelTest {
 
     @After
     fun tearDown() {
-        collectors.cancel()
-        db.close()
+        // Deterministic order: stop everything that may still dispatch to Main, then reset it.
+        viewModels.clear()                                   // cancels viewModelScopes (stateIn upstreams)
+        runBlocking { collectorJob.cancelAndJoin() }         // stop test collectors
+        db.close()                                           // no further Room emissions
         Dispatchers.resetMain()
     }
 
@@ -76,8 +87,10 @@ class RoomBackedViewModelTest {
 
     @Test
     fun calendarAndDashboard_followCreateEditDisableDelete() = runBlocking {
-        val calendar = CalendarViewModel(repo, SavedStateHandle(mapOf(CalendarViewModel.ARG_DATE to monday.toString())))
-        val dashboard = DashboardViewModel(repo)
+        val calendar = ViewModelProvider.create(viewModels, viewModelFactory {
+            initializer { CalendarViewModel(repo, SavedStateHandle(mapOf(CalendarViewModel.ARG_DATE to monday.toString()))) }
+        })[CalendarViewModel::class]
+        val dashboard = ViewModelProvider.create(viewModels, DashboardViewModel.factory(repo))[DashboardViewModel::class]
 
         // Empty database: no occurrences, no next dose.
         val empty = calendar.uiState.await { it is CalendarUiState.Ready } as CalendarUiState.Ready

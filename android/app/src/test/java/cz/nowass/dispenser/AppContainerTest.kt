@@ -58,4 +58,13 @@ class AppContainerTest {
         assertTrue(container.appVersion.name == "0.4.0" && container.appVersion.code == 4L)
         container.appSettings.setDisplayName(null)
     }
+
+    @Test
+    fun aboutConfiguration_sourceLinkDisabledWhilePrivate_versionFromPackage() {
+        val container = AppContainer(context)
+        assertTrue(container.sourceCodeUrl == null) // dispenser.github.sourceLinkEnabled=false
+        assertTrue(container.appVersion.name == "0.4.0")
+        assertTrue(container.assets.read("CHANGELOG.md")?.contains("Nevydáno") == true)
+        assertTrue(container.assets.read("licenses/third_party_licenses.json") != null)
+    }
 }
