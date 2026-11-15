@@ -1,9 +1,11 @@
 # Dispenser v2 — Android app
 
 Native Android companion app for the Dispenser v2 aquarium liquid-carbon doser
-(`cz.nowass.dispenser`). The current build is a fully offline **DEMO**: every value
-comes from an in-memory mock backend and is clearly marked as simulated. There is
-no Bluetooth, Wi-Fi, cloud or hardware access.
+(`cz.nowass.dispenser`). The app works fully offline. **Schedules are real user data,
+persisted locally on the phone (Room)**, while device-side values (battery, reservoir,
+history) are still simulated and the persistent **DEMO** badge marks them. There is no
+Bluetooth, Wi-Fi, cloud or hardware access, and nothing is ever reported as transferred
+to the dispenser.
 
 Product and architecture sources of truth live in [`../docs`](../docs).
 
@@ -19,7 +21,10 @@ Product and architecture sources of truth live in [`../docs`](../docs).
 | Compose BOM | 2026.02.01 (Material 3 1.4.0) |
 | navigation-compose | 2.9.8 |
 | lifecycle-viewmodel/runtime-compose | 2.9.4 |
+| Room (runtime, compiler, Gradle plugin) | 2.8.5 |
+| KSP | 2.3.12 |
 | Test: kotlinx-coroutines-test / espresso | 1.9.0 / 3.6.1 |
+| Test: Robolectric / androidx.test core | 4.17 / 1.6.1 (Robolectric runs on SDK 35) |
 
 All versions are pinned in [`gradle/libs.versions.toml`](gradle/libs.versions.toml).
 
@@ -47,15 +52,20 @@ Running the emulator alongside Android Studio needs several GB of free RAM.
 ```
 Compose screens -> ViewModels (StateFlow, immutable UI state)
   -> DispenserRepository (interface)
-       -> MockDispenserRepository (DEMO, now)
-       -> BleDispenserRepository  (future, NOT implemented)
-  -> pure domain: RecurrenceEngine, OccurrenceCalendar, NextDoseCalculator, ScheduleValidator
+       -> LocalDispenserRepository (now: schedules via ScheduleStore, device values simulated)
+            -> ScheduleStore -> RoomScheduleStore (app) | InMemoryScheduleStore (tests/previews)
+       -> BleDispenserRepository  (future, NOT implemented; can reuse ScheduleStore as cache)
+  -> pure domain: RecurrenceEngine, OccurrenceCalendar, NextDoseCalculator, ScheduleValidator, Volume
 ```
+
+ViewModels and domain models have no database dependencies; Room types live only in
+`data/local/`.
 
 | Package | Contents |
 |---|---|
 | `domain/` | Platform-independent model and pure rules (no Android imports). |
-| `data/` | `DispenserRepository` contract and the seeded `MockDispenserRepository`. |
+| `data/` | `DispenserRepository` contract, `LocalDispenserRepository`, `ScheduleStore`, demo fixtures (`MockSeed`, `MockDispenserRepository(...)` for previews/tests). |
+| `data/local/` | Room database, entity, DAO, validated entity mapper, `RoomScheduleStore`. |
 | `ui/dashboard` | Next dose, reservoir estimate, simulated battery, 7-day strip. |
 | `ui/calendar` | Month/week calendar, selected-day doses, schedule list with enable switches. |
 | `ui/schedule` | Recurring schedule editor and Czech recurrence texts. |
@@ -65,14 +75,34 @@ Compose screens -> ViewModels (StateFlow, immutable UI state)
 ### Mock vs. physical device
 
 - The UI talks only to `DispenserRepository`; it never touches BLE APIs.
-- Every mock value is tagged `DataSource.DEMO`, and the persistent **DEMO** badge is shown
-  on every screen, including the editor.
-- Schedule writes go `PENDING` → `SIMULATED_ACK` after a short simulated delay.
-  `DEVICE_APPLIED` is reserved for a future BLE read-back. DEMO never claims a device sync.
-- "Today" is the mock's simulated clock (seeded at 14 Nov 2026 07:30 Europe/Prague),
-  not the phone's clock.
+- Device values (battery, reservoir, history) are simulated and tagged `DataSource.DEMO`;
+  the persistent **DEMO** badge is shown on every screen, including the editor.
+- **Sync semantics:** every locally created/edited schedule is stored as `PENDING` and
+  shown as **"Uloženo v telefonu"** (also as a confirmation after saving). It has NOT been
+  transferred to or accepted by the dispenser. No device acknowledgement is simulated.
+  `DEVICE_APPLIED` is reserved for a future BLE read-back.
+- **Clock:** the running app uses the phone's real date and time (`java.time.Clock`,
+  zone `Europe/Prague`), refreshed every minute. Tests and Compose previews inject a fixed
+  `Clock`; the fixed demo date (14 Nov 2026 07:30) is used only together with fixture data.
 
-## Implemented functionality (A1.1 – A1.2b)
+### Local persistence
+
+- Room database `dispenser.db`, table `schedules` (schema exported to `app/schemas/`).
+- A fresh installation starts **empty**; demo schedules are never inserted into it.
+  Demo fixtures exist only for previews, unit tests and explicit simulation scenarios.
+- Amounts are stored as **integer microlitres** (`amount_ul`, 1 µl precision); the domain
+  and UI keep millilitres. Conversion (`domain/Volume.kt`) rejects values finer than 1 µl
+  and non-positive / non-finite / out-of-technical-range values instead of rounding.
+- Dates are ISO strings, time `HH:mm`, weekdays a bit mask (bit 0 = Monday).
+- Writes use optimistic concurrency: the stored revision is checked and incremented
+  atomically in a DB transaction; a stale write is a conflict.
+- Rows that fail validation on read never crash the app: they are excluded from the list,
+  left untouched (never deleted or repaired), reported to the user as a non-blocking
+  warning in the Rozvrhy section ("… nelze načíst"), and logged with id and failing check
+  only (no stored values).
+- Schema changes must ship explicit migrations; destructive migration is never enabled.
+
+## Implemented functionality (A1.1 – A1.2c)
 
 - **Dashboard:** next dose, estimated reservoir (normal/low/blocked styling), simulated
   battery, 7-day preview; tapping a day opens it in the calendar.
@@ -87,29 +117,42 @@ Compose screens -> ViewModels (StateFlow, immutable UI state)
   ONCE / DAILY every N days / WEEKLY every N weeks on selected weekdays, optional
   inclusive end date, enabled flag, live preview of the next five occurrences, and a
   floating Save button that stays disabled while the form is invalid (or unchanged).
-  Unsaved changes are confirmed before leaving.
+  "Modified" is a semantic comparison with the original values (restoring them clears it).
+  Unsaved changes are confirmed before leaving; while a save is running the editor cannot
+  be left and the form is frozen. After saving, "Uloženo v telefonu" is shown.
+- **Persistence (A1.2c):** schedules survive app restarts; calendar and dashboard update
+  immediately after every change.
 - **Navigation:** floating icon-only dock (Přehled, Kalendář, Historie, Nastavení).
   Historie is a placeholder (milestone A1.3), and Nastavení is static.
 
 ### Scheduling rules (pure domain, unit-tested)
 
 - Timezone `Europe/Prague`, shown explicitly in the editor.
-- DST: a local time that does not exist (spring forward) is **skipped** that day. A
-  repeated local time (autumn) produces **one** occurrence at the earlier instant.
+- DST: for recurring schedules a local time that does not exist (spring forward) is
+  **skipped** that day; a repeated local time (autumn) produces **one** occurrence at the
+  earlier instant. A **one-off** schedule at a nonexistent local time cannot be saved
+  ("Tento čas neexistuje kvůli přechodu na letní čas. Zvolte jiný čas.").
+- Weekly "every N weeks" counts from the Monday of the start date's week; selected days
+  before the start date in that first week are skipped. Daily "every N days" counts
+  calendar days from the start date. Any interval length is supported.
 - Missed doses are never caught up; only occurrences strictly after "now" are offered.
 - Revision-checked writes: a stale edit is rejected as a conflict instead of overwriting.
 - Occurrence ID = `scheduleId@localDate` (revision-independent), so at most one
   occurrence per schedule per day and an edit cannot duplicate a handled dose.
   *Proposed; pending product review.*
-- Validation: amount finite and > 0, interval ≥ 1, at least one weekday for WEEKLY,
-  end date ≥ start date. No physical pump limits are enforced (FR-016 is TBD).
+- Validation: amount finite and > 0 with at most 3 decimal places (1 µl), interval ≥ 1,
+  at least one weekday for WEEKLY, end date ≥ start date. No physical pump limits are
+  enforced (FR-016 is TBD); the only upper bound is the technical exact-storage range.
 - MONTHLY recurrence is intentionally not offered until missing-date semantics are decided.
 
 ## Tests
 
 - JVM unit tests: recurrence (intervals, weekdays, end date, ONCE, DST spring/autumn,
-  ID stability), validation, mock CRUD (revisions, conflicts, delete, sync states),
-  calendar/dashboard/editor ViewModels, Czech formatting.
+  ID stability), validation, ml/µl conversion, entity mapping and corrupted rows,
+  a shared repository contract run against both the in-memory and the Room store,
+  Room persistence across database reopen ("restart"), fresh-install emptiness,
+  real vs. simulated clock, calendar/dashboard updates from Room, editor ViewModel.
+  Room tests run on the JVM via Robolectric (no emulator needed).
 - Instrumented Compose tests (`src/androidTest`): navigation smoke test, editor
   screen states (Save visibility/enablement, discard dialog), create/edit/discard flows.
   These compile in CI-style runs but need an emulator to execute.
@@ -118,6 +161,7 @@ Compose screens -> ViewModels (StateFlow, immutable UI state)
 
 - The Material 3 date picker grid uses the device language for month/day names
   (M3 1.4.0 cannot force Czech there). Titles and buttons are Czech.
-- No simulation of time/dispensing yet: history, refill and stock blocking are A1.3.
-- In-memory mock: data resets when the app process is restarted.
+- No simulation of dispensing yet: history, refill and stock blocking are A1.3. Battery
+  and reservoir are fixed demo values.
+- Schedules are never sent to a device (no BLE yet); all stay `PENDING`.
 - One occurrence per schedule per day by design (use multiple schedules for multiple daily doses).

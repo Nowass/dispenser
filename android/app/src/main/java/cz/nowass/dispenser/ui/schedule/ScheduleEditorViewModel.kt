@@ -53,10 +53,17 @@ data class EditorForm(
     }
 }
 
+/** How the editor finished; null = closed without writing. */
+enum class EditorResult { SAVED, DELETED }
+
 enum class EditorFieldError {
     AMOUNT_MISSING,
     AMOUNT_INVALID,
     AMOUNT_NOT_POSITIVE,
+    AMOUNT_TOO_PRECISE,
+    AMOUNT_OUT_OF_RANGE,
+    /** ONCE whose local date/time does not exist (DST spring-forward gap). */
+    TIME_NONEXISTENT,
     INTERVAL_TOO_SMALL,
     NO_WEEKDAYS,
     END_BEFORE_START,
@@ -103,7 +110,8 @@ sealed interface ScheduleEditorUiState {
 private data class EditorMeta(
     val loaded: Boolean = false,
     val notFound: Boolean = false,
-    val dirty: Boolean = false,
+    /** Form as loaded/initialized; "modified" means a semantic difference from it (see [semanticKey]). */
+    val original: EditorForm? = null,
     val showErrors: Boolean = false,
     /** Amount field was edited at least once; enables the "missing amount" field error. */
     val amountTouched: Boolean = false,
@@ -123,10 +131,10 @@ class ScheduleEditorViewModel(
     private val scheduleId: String? = savedState.get<String>(ARG_SCHEDULE_ID)?.takeIf { it.isNotBlank() }
     private val form = MutableStateFlow<EditorForm?>(null)
     private val meta = MutableStateFlow(EditorMeta())
-    private val _closeRequested = MutableStateFlow(false)
+    private val _closeResult = MutableStateFlow<EditorResult?>(null)
 
-    /** True once a save/delete succeeded; the screen should navigate back. */
-    val closeRequested: StateFlow<Boolean> = _closeRequested.asStateFlow()
+    /** Set once a save/delete succeeded; the screen should navigate back and confirm it. */
+    val closeResult: StateFlow<EditorResult?> = _closeResult.asStateFlow()
 
     val uiState: StateFlow<ScheduleEditorUiState> = combine(
         form,
@@ -157,22 +165,25 @@ class ScheduleEditorViewModel(
             if (schedule == null) {
                 meta.update { it.copy(notFound = true) }
             } else {
-                commit(formFrom(schedule), EditorMeta(loaded = true, revision = schedule.revision))
+                val loaded = formFrom(schedule)
+                commit(loaded, EditorMeta(loaded = true, revision = schedule.revision, original = loaded))
             }
         } else {
             val device = repository.observeDevice().first()
             val today = device.now.atZone(device.zone).toLocalDate()
             val start = parseDate(savedState.get<String>(ARG_DATE)) ?: today
-            commit(EditorForm(startDate = start, weekdays = setOf(start.dayOfWeek)), EditorMeta(loaded = true))
+            val initial = EditorForm(startDate = start, weekdays = setOf(start.dayOfWeek))
+            commit(initial, EditorMeta(loaded = true, original = initial))
         }
     }
 
-    // ---- Field updates (each marks the form dirty and persists it) ----
+    // ---- Field updates (each persists the form; "modified" is derived semantically) ----
 
     fun setName(value: String) = edit { it.copy(name = value) }
     fun setAmountText(value: String) {
         val current = form.value ?: return
-        commit(current.copy(amountText = value), meta.value.copy(dirty = true, amountTouched = true))
+        if (meta.value.isSaving) return
+        commit(current.copy(amountText = value), meta.value.copy(amountTouched = true))
     }
     fun setStartDate(value: LocalDate) = edit { it.copy(startDate = value) }
     fun setTime(value: LocalTime) = edit { it.copy(time = value) }
@@ -195,7 +206,9 @@ class ScheduleEditorViewModel(
 
     private fun edit(transform: (EditorForm) -> EditorForm) {
         val current = form.value ?: return
-        commit(transform(current), meta.value.copy(dirty = true))
+        // While a save is in flight the form is frozen: an edit now would be silently lost.
+        if (meta.value.isSaving) return
+        commit(transform(current), meta.value)
     }
 
     // ---- Commands ----
@@ -234,7 +247,8 @@ class ScheduleEditorViewModel(
             if (schedule == null) {
                 meta.update { it.copy(deletedMeanwhile = true, conflict = false) }
             } else {
-                commit(formFrom(schedule), EditorMeta(loaded = true, revision = schedule.revision))
+                val loaded = formFrom(schedule)
+                commit(loaded, EditorMeta(loaded = true, revision = schedule.revision, original = loaded))
             }
         }
     }
@@ -242,8 +256,9 @@ class ScheduleEditorViewModel(
     private fun handleWrite(result: ScheduleWriteResult) {
         when (result) {
             is ScheduleWriteResult.Success -> {
-                commit(form.value ?: return, meta.value.copy(isSaving = false, dirty = false))
-                _closeRequested.value = true
+                val saved = form.value ?: return
+                commit(saved, meta.value.copy(isSaving = false, original = saved))
+                _closeResult.value = if (result.schedule == null) EditorResult.DELETED else EditorResult.SAVED
             }
             ScheduleWriteResult.Conflict -> meta.update { it.copy(isSaving = false, conflict = true) }
             ScheduleWriteResult.NotFound -> meta.update { it.copy(isSaving = false, deletedMeanwhile = true) }
@@ -255,6 +270,7 @@ class ScheduleEditorViewModel(
 
     private fun buildEditing(f: EditorForm, m: EditorMeta, device: DeviceStatus, sync: SyncState?): ScheduleEditorUiState.Editing {
         val (draft, errors) = f.toDraft()
+        val dirty = m.original != null && f.semanticKey() != m.original.semanticKey()
         val preview = if (draft == null || errors.isNotEmpty()) {
             PreviewUi.Invalid
         } else {
@@ -274,12 +290,12 @@ class ScheduleEditorViewModel(
                 it in LIVE_ERRORS || (it == EditorFieldError.AMOUNT_MISSING && m.amountTouched)
             },
             blockingErrors = errors,
-            canSave = !m.isSaving && !m.deletedMeanwhile && errors.isEmpty() && (scheduleId == null || m.dirty),
+            canSave = !m.isSaving && !m.deletedMeanwhile && errors.isEmpty() && (scheduleId == null || dirty),
             preview = preview,
             zoneId = DEFAULT_ZONE.id,
             baseRevision = m.revision.takeIf { it != NO_REVISION },
             storedSync = if (scheduleId == null) null else sync,
-            isDirty = m.dirty,
+            isDirty = dirty,
             isSaving = m.isSaving,
             conflict = m.conflict,
             deletedMeanwhile = m.deletedMeanwhile,
@@ -291,41 +307,49 @@ class ScheduleEditorViewModel(
     private fun commit(f: EditorForm, m: EditorMeta) {
         form.value = f
         meta.value = m
-        savedState[K_NAME] = f.name
-        savedState[K_AMOUNT] = f.amountText
-        savedState[K_START] = f.startDate.toString()
-        savedState[K_TIME] = f.time.toString()
-        savedState[K_KIND] = f.kind.name
-        savedState[K_INTERVAL] = f.interval
-        savedState[K_WEEKDAYS] = f.weekdays.map { it.value }.sorted().toIntArray()
-        savedState[K_HAS_END] = f.hasEndDate
-        savedState[K_END] = f.endDate?.toString()
-        savedState[K_ENABLED] = f.enabled
-        savedState[K_DIRTY] = m.dirty
+        writeForm(PREFIX_FORM, f)
+        m.original?.let { writeForm(PREFIX_ORIGINAL, it) }
         savedState[K_SHOW_ERRORS] = m.showErrors
         savedState[K_AMOUNT_TOUCHED] = m.amountTouched
         savedState[K_REVISION] = m.revision
         savedState[K_LOADED] = m.loaded
     }
 
+    private fun writeForm(prefix: String, f: EditorForm) {
+        savedState[prefix + "name"] = f.name
+        savedState[prefix + "amount"] = f.amountText
+        savedState[prefix + "start"] = f.startDate.toString()
+        savedState[prefix + "time"] = f.time.toString()
+        savedState[prefix + "kind"] = f.kind.name
+        savedState[prefix + "interval"] = f.interval
+        savedState[prefix + "weekdays"] = f.weekdays.map { it.value }.sorted().toIntArray()
+        savedState[prefix + "has_end"] = f.hasEndDate
+        savedState[prefix + "end"] = f.endDate?.toString()
+        savedState[prefix + "enabled"] = f.enabled
+    }
+
+    private fun readForm(prefix: String): EditorForm? {
+        val start = parseDate(savedState[prefix + "start"]) ?: return null
+        return EditorForm(
+            name = savedState[prefix + "name"] ?: "",
+            amountText = savedState[prefix + "amount"] ?: "",
+            startDate = start,
+            time = savedState.get<String>(prefix + "time")?.let { runCatching { LocalTime.parse(it) }.getOrNull() } ?: EditorForm.DEFAULT_TIME,
+            kind = RecurrenceKind.entries.firstOrNull { it.name == savedState.get<String>(prefix + "kind") } ?: RecurrenceKind.DAILY,
+            interval = savedState[prefix + "interval"] ?: 1,
+            weekdays = savedState.get<IntArray>(prefix + "weekdays")?.map(DayOfWeek::of)?.toSet() ?: emptySet(),
+            hasEndDate = savedState[prefix + "has_end"] ?: false,
+            endDate = parseDate(savedState[prefix + "end"]),
+            enabled = savedState[prefix + "enabled"] ?: true,
+        )
+    }
+
     private fun restore(): Pair<EditorForm, EditorMeta>? {
         if (savedState.get<Boolean>(K_LOADED) != true) return null
-        val start = parseDate(savedState[K_START]) ?: return null
-        val f = EditorForm(
-            name = savedState[K_NAME] ?: "",
-            amountText = savedState[K_AMOUNT] ?: "",
-            startDate = start,
-            time = savedState.get<String>(K_TIME)?.let { runCatching { LocalTime.parse(it) }.getOrNull() } ?: EditorForm.DEFAULT_TIME,
-            kind = RecurrenceKind.entries.firstOrNull { it.name == savedState.get<String>(K_KIND) } ?: RecurrenceKind.DAILY,
-            interval = savedState[K_INTERVAL] ?: 1,
-            weekdays = savedState.get<IntArray>(K_WEEKDAYS)?.map(DayOfWeek::of)?.toSet() ?: emptySet(),
-            hasEndDate = savedState[K_HAS_END] ?: false,
-            endDate = parseDate(savedState[K_END]),
-            enabled = savedState[K_ENABLED] ?: true,
-        )
+        val f = readForm(PREFIX_FORM) ?: return null
         val m = EditorMeta(
             loaded = true,
-            dirty = savedState[K_DIRTY] ?: false,
+            original = readForm(PREFIX_ORIGINAL) ?: f,
             showErrors = savedState[K_SHOW_ERRORS] ?: false,
             amountTouched = savedState[K_AMOUNT_TOUCHED] ?: false,
             revision = savedState[K_REVISION] ?: NO_REVISION,
@@ -343,22 +367,16 @@ class ScheduleEditorViewModel(
         private val LIVE_ERRORS = setOf(
             EditorFieldError.AMOUNT_INVALID,
             EditorFieldError.AMOUNT_NOT_POSITIVE,
+            EditorFieldError.AMOUNT_TOO_PRECISE,
+            EditorFieldError.AMOUNT_OUT_OF_RANGE,
+            EditorFieldError.TIME_NONEXISTENT,
             EditorFieldError.NO_WEEKDAYS,
             EditorFieldError.END_BEFORE_START,
             EditorFieldError.INTERVAL_TOO_SMALL,
         )
 
-        private const val K_NAME = "editor_name"
-        private const val K_AMOUNT = "editor_amount"
-        private const val K_START = "editor_start"
-        private const val K_TIME = "editor_time"
-        private const val K_KIND = "editor_kind"
-        private const val K_INTERVAL = "editor_interval"
-        private const val K_WEEKDAYS = "editor_weekdays"
-        private const val K_HAS_END = "editor_has_end"
-        private const val K_END = "editor_end"
-        private const val K_ENABLED = "editor_enabled"
-        private const val K_DIRTY = "editor_dirty"
+        private const val PREFIX_FORM = "editor_form_"
+        private const val PREFIX_ORIGINAL = "editor_original_"
         private const val K_SHOW_ERRORS = "editor_show_errors"
         private const val K_AMOUNT_TOUCHED = "editor_amount_touched"
         private const val K_REVISION = "editor_revision"
@@ -371,9 +389,15 @@ class ScheduleEditorViewModel(
         internal fun parseDate(value: String?): LocalDate? =
             try { value?.let(LocalDate::parse) } catch (_: DateTimeParseException) { null }
 
-        /** Accepts "12", "12.5" and Czech "12,5". Returns null for unparsable text. */
+        /** Plain decimal only: digits with an optional single comma or dot ("12", "12,5", "12.5", ",5"). */
+        private val AMOUNT_PATTERN = Regex("""^(\d+([.,]\d*)?|[.,]\d+)$""")
+
+        /**
+         * Accepts "12", "12.5" and Czech "12,5". Returns null for anything else, including
+         * scientific ("1e3"), hex, signed or grouped input, which toDouble() would accept.
+         */
         internal fun parseAmount(text: String): Double? =
-            text.trim().replace(',', '.').takeIf { it.isNotEmpty() }?.toDoubleOrNull()
+            text.trim().takeIf { AMOUNT_PATTERN.matches(it) }?.replace(',', '.')?.toDoubleOrNull()
 
         internal fun formFrom(s: Schedule): EditorForm {
             val d = s.toDraft()
@@ -390,6 +414,22 @@ class ScheduleEditorViewModel(
                 enabled = d.enabled,
             )
         }
+
+        /**
+         * Values that define the schedule, normalized so that equivalent input compares equal
+         * ("10" vs "10,0", trimmed name, fields irrelevant for the chosen recurrence ignored).
+         */
+        internal fun EditorForm.semanticKey(): List<Any?> = listOf(
+            name.trim(),
+            parseAmount(amountText) ?: amountText.trim(),
+            startDate,
+            time,
+            kind,
+            interval.takeIf { kind != RecurrenceKind.ONCE },
+            weekdays.takeIf { kind == RecurrenceKind.WEEKLY },
+            endDate.takeIf { hasEndDate && kind != RecurrenceKind.ONCE },
+            enabled,
+        )
 
         /** Converts the form to a draft; returns all field errors (parse + domain validation). */
         internal fun EditorForm.toDraft(): Pair<ScheduleDraft?, Set<EditorFieldError>> {
@@ -413,6 +453,9 @@ class ScheduleEditorViewModel(
                 when (e) {
                     ValidationError.AMOUNT_NOT_FINITE -> if (amount != null) errors += EditorFieldError.AMOUNT_INVALID
                     ValidationError.AMOUNT_NOT_POSITIVE -> errors += EditorFieldError.AMOUNT_NOT_POSITIVE
+                    ValidationError.AMOUNT_TOO_PRECISE -> errors += EditorFieldError.AMOUNT_TOO_PRECISE
+                    ValidationError.AMOUNT_OUT_OF_RANGE -> errors += EditorFieldError.AMOUNT_OUT_OF_RANGE
+                    ValidationError.TIME_NONEXISTENT -> errors += EditorFieldError.TIME_NONEXISTENT
                     ValidationError.INTERVAL_TOO_SMALL -> errors += EditorFieldError.INTERVAL_TOO_SMALL
                     ValidationError.NO_WEEKDAYS -> errors += EditorFieldError.NO_WEEKDAYS
                     ValidationError.END_BEFORE_START -> errors += EditorFieldError.END_BEFORE_START

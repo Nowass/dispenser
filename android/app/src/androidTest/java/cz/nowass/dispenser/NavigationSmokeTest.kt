@@ -20,10 +20,10 @@ class NavigationSmokeTest {
     val rule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun dashboardShowsSeededDataAndDemoBadge() {
+    fun dashboardShowsNextDoseCardAndDemoBadge() {
+        // No assumptions about stored schedules: the database persists between runs.
         rule.onNodeWithTag(DEMO_BADGE_TEST_TAG).assertIsDisplayed()
         rule.onNodeWithText(rule.activity.getString(R.string.dashboard_next_dose)).assertIsDisplayed()
-        rule.onNodeWithText("Ranní dávka", substring = true).assertIsDisplayed()
     }
 
     @Test

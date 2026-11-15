@@ -78,4 +78,24 @@ class ScheduleValidatorTest {
         assertNull(once.endDate)
         assertEquals(Recurrence.Once, once.recurrence)
     }
+
+    // ---- I3: one-off dose at a nonexistent DST local time ----
+
+    @Test
+    fun once_inSpringGap_isRejected_recurringIsAllowed() {
+        val gap = base.copy(kind = RecurrenceKind.ONCE, startDate = LocalDate.of(2027, 3, 28), localTime = LocalTime.of(2, 15))
+        assertEquals(setOf(ValidationError.TIME_NONEXISTENT), errors(gap))
+        // Recurring schedules keep the approved behaviour: the gap day is skipped, not an error.
+        assertTrue(errors(gap.copy(kind = RecurrenceKind.DAILY)).isEmpty())
+        assertTrue(errors(gap.copy(kind = RecurrenceKind.WEEKLY, weekdays = setOf(DayOfWeek.SUNDAY))).isEmpty())
+        // Boundaries: 01:59 and 03:00 exist on that day.
+        assertTrue(errors(gap.copy(localTime = LocalTime.of(1, 59))).isEmpty())
+        assertTrue(errors(gap.copy(localTime = LocalTime.of(3, 0))).isEmpty())
+    }
+
+    @Test
+    fun once_inAutumnOverlap_isAllowed() {
+        // 02:30 on 25 Oct 2026 occurs twice; it exists, so a one-off is valid (runs once, first instant).
+        assertTrue(errors(base.copy(kind = RecurrenceKind.ONCE, startDate = LocalDate.of(2026, 10, 25), localTime = LocalTime.of(2, 30))).isEmpty())
+    }
 }

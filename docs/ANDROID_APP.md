@@ -126,11 +126,14 @@ Use Czech for default UI strings (user's primary language), structured string re
 
 ## Implementation status (2026-11-15)
 
-Implemented in `android/` (see `android/README.md`): A1.1 shell and dashboard, A1.1.1 dark Material 3 design system, A1.2a calendar (month/week, selected-day details, dashboard deep link) and A1.2b schedule editor.
+Implemented in `android/` (see `android/README.md`): A1.1 shell and dashboard, A1.1.1 dark Material 3 design system, A1.2a calendar (month/week, selected-day details, dashboard deep link), A1.2b schedule editor and A1.2c local schedule persistence.
+
+- **Persistence (A1.2c):** schedules are stored on the phone with Room and survive restarts. A fresh install starts with no schedules (no demo seed). Amounts are stored as integer microlitres. The running app uses the phone's real clock. Stored records that cannot be loaded are kept untouched and reported as a non-blocking warning in Rozvrhy.
+- **DST for one-off doses (approved 2026-11-15):** a ONCE schedule whose local date/time does not exist (spring-forward gap) cannot be saved; recurring schedules keep the skip/once rule (FR-015).
 
 - **Calendar journey (B):** month/week views and day details are done. Tapping an occurrence opens the editor for the whole recurring schedule. A **Rozvrhy** list under the day details shows all schedules, including disabled ones, with enable/disable switches. Disabled schedules have no calendar occurrences. There is no separate per-schedule visibility setting.
 - **Create/edit (C):** ONCE, DAILY every N days and WEEKLY every N weeks with weekdays, optional inclusive end date, enabled flag, next-5 preview, and validation without physical pump limits. The start date is prefilled from the selected day. Delete asks for confirmation; leaving with unsaved changes asks to discard. A floating Save button stays disabled while the form is invalid or unchanged. MONTHLY is not offered (missing-date rule undecided).
-- **Sync semantics:** schedule writes are PENDING until the mock's simulated acknowledgement (`SIMULATED_ACK`). DEMO is always shown, and nothing claims device confirmation.
+- **Sync semantics:** every saved schedule is `PENDING`, displayed as "Uloženo v telefonu": stored locally, not transferred to or accepted by the device. No acknowledgement is simulated; `DEVICE_APPLIED` is reserved for future BLE read-back. The DEMO badge stays because device values are simulated.
 - **Not yet done:** time simulation, history, refill and stock blocking (A1.3); onboarding screen (A); Historie screen (E).
 - **Known limitation:** the M3 date picker grid follows the device language for month/day names.
 

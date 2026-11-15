@@ -22,7 +22,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** UI flow tests for the schedule editor (mock backend). Not run in CI here due to emulator memory limits. */
+/** UI flow tests for the schedule editor against the real local (Room) database. Need an emulator. */
 @RunWith(AndroidJUnit4::class)
 class ScheduleEditorFlowTest {
 
@@ -33,40 +33,60 @@ class ScheduleEditorFlowTest {
 
     private fun openCalendar() = rule.onNodeWithTag(TopLevelDestination.CALENDAR.testTag).performClick()
 
+    /** The app database persists between runs, so every test uses its own unique schedule. */
+    private fun unique(prefix: String) = "$prefix ${java.util.UUID.randomUUID().toString().take(6)}"
+
+    private fun waitForCalendar() =
+        rule.waitUntil(5_000) { rule.onAllNodesWithTag(TopLevelDestination.CALENDAR.testTag).fetchSemanticsNodes().isNotEmpty() }
+
+    private fun createSchedule(name: String, amount: String) {
+        openCalendar()
+        rule.onNodeWithText(str(R.string.schedules_add)).performScrollTo().performClick()
+        rule.onNodeWithTag(EDITOR_NAME_TEST_TAG).performTextInput(name)
+        rule.onNodeWithTag(EDITOR_AMOUNT_TEST_TAG).performTextInput(amount)
+        rule.onNodeWithTag(EDITOR_SAVE_TEST_TAG).performClick()
+        waitForCalendar()
+        rule.waitUntil(5_000) { rule.onAllNodes(hasText(name)).fetchSemanticsNodes().isNotEmpty() }
+    }
+
     @Test
-    fun createSchedule_saveDisabledUntilValid_thenReturnsToCalendar() {
+    fun createSchedule_saveDisabledUntilValid_thenSavedOnPhone() {
+        val name = unique("Nová")
         openCalendar()
         rule.onNodeWithText(str(R.string.schedules_add)).performScrollTo().performClick()
         rule.onNodeWithTag(EDITOR_SAVE_TEST_TAG).assertIsDisplayed().assertIsNotEnabled()
-        rule.onNodeWithTag(EDITOR_NAME_TEST_TAG).performTextInput("Testovací dávka")
+        rule.onNodeWithTag(EDITOR_NAME_TEST_TAG).performTextInput(name)
         rule.onNodeWithTag(EDITOR_AMOUNT_TEST_TAG).performTextInput("7,5")
         rule.onNodeWithTag(EDITOR_SAVE_TEST_TAG).assertIsEnabled().performClick()
-        // Back on the calendar (dock visible again) with the new schedule listed.
-        rule.waitUntil(5_000) { rule.onAllNodesWithTag(TopLevelDestination.CALENDAR.testTag).fetchSemanticsNodes().isNotEmpty() }
-        rule.waitUntil(5_000) { rule.onAllNodes(hasText("Testovací dávka")).fetchSemanticsNodes().isNotEmpty() }
-        rule.onNodeWithText("Testovací dávka").performScrollTo().assertIsDisplayed()
+        waitForCalendar()
+        // Confirmation never claims a device sync.
+        rule.waitUntil(5_000) { rule.onAllNodes(hasText(str(R.string.editor_saved_snackbar))).fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithText(name).performScrollTo().assertIsDisplayed()
     }
 
     @Test
     fun editSchedule_changesAmountInList() {
-        openCalendar()
-        rule.onNodeWithText("Večerní doplnění").performScrollTo().performClick()
+        val name = unique("Úprava")
+        createSchedule(name, "5")
+        rule.onNodeWithText(name).performScrollTo().performClick()
         rule.onNodeWithTag(EDITOR_AMOUNT_TEST_TAG).performTextClearance()
-        rule.onNodeWithTag(EDITOR_AMOUNT_TEST_TAG).performTextInput("6")
+        rule.onNodeWithTag(EDITOR_AMOUNT_TEST_TAG).performTextInput("6,25")
         rule.onNodeWithTag(EDITOR_SAVE_TEST_TAG).performClick()
-        rule.waitUntil(5_000) { rule.onAllNodes(hasText("6 ml", substring = true)).fetchSemanticsNodes().isNotEmpty() }
+        waitForCalendar()
+        rule.waitUntil(5_000) { rule.onAllNodes(hasText("6,25 ml", substring = true)).fetchSemanticsNodes().isNotEmpty() }
     }
 
     @Test
     fun unsavedChanges_backAsksToDiscard_andKeepsStoredValue() {
-        openCalendar()
-        rule.onNodeWithText("Večerní doplnění").performScrollTo().performClick()
+        val name = unique("Zahodit")
+        createSchedule(name, "3")
+        rule.onNodeWithText(name).performScrollTo().performClick()
         rule.onNodeWithTag(EDITOR_AMOUNT_TEST_TAG).performTextClearance()
-        rule.onNodeWithTag(EDITOR_AMOUNT_TEST_TAG).performTextInput("42")
+        rule.onNodeWithTag(EDITOR_AMOUNT_TEST_TAG).performTextInput("42,125")
         rule.activityRule.scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
         rule.onNodeWithText(str(R.string.editor_discard_title)).assertIsDisplayed()
         rule.onNodeWithText(str(R.string.editor_discard_confirm)).performClick()
-        rule.waitUntil(5_000) { rule.onAllNodesWithTag(TopLevelDestination.CALENDAR.testTag).fetchSemanticsNodes().isNotEmpty() }
-        assertTrue(rule.onAllNodes(hasText("42 ml", substring = true)).fetchSemanticsNodes().isEmpty())
+        waitForCalendar()
+        assertTrue(rule.onAllNodes(hasText("42,125 ml", substring = true)).fetchSemanticsNodes().isEmpty())
     }
 }

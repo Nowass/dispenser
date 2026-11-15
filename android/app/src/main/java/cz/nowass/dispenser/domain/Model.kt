@@ -81,10 +81,14 @@ data class DoseOccurrence(
 }
 
 /**
- * Whether a schedule configuration is confirmed. Demo mode only ever reaches
- * [SIMULATED_ACK]; [DEVICE_APPLIED] is reserved for a future BLE read-back.
+ * Device confirmation state of a schedule configuration.
+ *
+ * - [PENDING]: saved on the phone only ("Uloženo v telefonu"); NOT transferred to or
+ *   accepted by the dispenser. Every locally created/edited schedule is PENDING.
+ * - [DEVICE_APPLIED]: read back and confirmed by the physical device. Reserved for the
+ *   future BLE synchronization; nothing sets it today and nothing may simulate it.
  */
-enum class SyncState { PENDING, SIMULATED_ACK, DEVICE_APPLIED }
+enum class SyncState { PENDING, DEVICE_APPLIED }
 
 /**
  * Reservoir state. The remaining volume is always a model estimate based on

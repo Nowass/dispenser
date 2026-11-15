@@ -46,7 +46,6 @@ fun scheduleDisplayName(name: String): String = name.ifBlank { stringResource(R.
 fun syncStateText(state: SyncState): String = stringResource(
     when (state) {
         SyncState.PENDING -> R.string.sync_pending
-        SyncState.SIMULATED_ACK -> R.string.sync_simulated
         SyncState.DEVICE_APPLIED -> R.string.sync_device
     },
 )

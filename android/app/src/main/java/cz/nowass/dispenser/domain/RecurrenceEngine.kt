@@ -5,6 +5,8 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZonedDateTime
 import java.time.temporal.ChronoUnit
+import java.time.temporal.TemporalAdjusters
+import java.time.DayOfWeek
 
 /**
  * Pure, deterministic recurrence engine — the single source of truth for which
@@ -28,8 +30,8 @@ import java.time.temporal.ChronoUnit
  */
 object RecurrenceEngine {
 
-    /** Bound on days scanned when searching forward, keeps work bounded. */
-    const val MAX_SCAN_DAYS = 3L * 366
+    /** Safety cap on candidate dates examined per query (each candidate is a rule match). */
+    private const val MAX_CANDIDATES = 10_000
 
     /** Whether the recurrence rule matches [date] (ignores DST and enabled flag). */
     fun occursOn(schedule: Schedule, date: LocalDate): Boolean {
@@ -72,22 +74,55 @@ object RecurrenceEngine {
     fun nextOccurrence(schedule: Schedule, after: Instant): DoseOccurrence? =
         nextOccurrences(schedule, after, 1).firstOrNull()
 
-    /** Up to [count] occurrences strictly after [after], in time order. */
+    /**
+     * Up to [count] occurrences strictly after [after], in time order.
+     *
+     * Jumps directly from one rule-matching date to the next (no day-by-day scan), so any
+     * interval length works. A matching date whose local time falls into a DST gap is
+     * skipped and the search continues with the next matching date.
+     */
     fun nextOccurrences(schedule: Schedule, after: Instant, count: Int): List<DoseOccurrence> {
         require(count >= 0) { "count must be >= 0" }
         if (count == 0) return emptyList()
         val afterLocalDate = after.atZone(schedule.zone).toLocalDate()
         // Start one day early so a local date differing from the UTC date is never missed.
-        var date = maxOf(schedule.startDate, afterLocalDate.minusDays(1))
-        val lastDate = afterLocalDate.plusDays(MAX_SCAN_DAYS)
+        var date = firstMatchOnOrAfter(schedule, afterLocalDate.minusDays(1))
         val result = ArrayList<DoseOccurrence>(count)
-        while (!date.isAfter(lastDate) && result.size < count) {
+        var examined = 0
+        while (date != null && result.size < count && examined++ < MAX_CANDIDATES) {
             if (schedule.endDate != null && date.isAfter(schedule.endDate)) break
-            if (schedule.recurrence is Recurrence.Once && date.isAfter(schedule.startDate)) break
             val occ = occurrenceOn(schedule, date)
             if (occ != null && occ.scheduledAt.isAfter(after)) result += occ
-            date = date.plusDays(1)
+            date = firstMatchOnOrAfter(schedule, date.plusDays(1))
         }
         return result
     }
+
+    /**
+     * First date >= [from] (and >= start date) matching the rule, ignoring end date and DST.
+     * Null when there is none (ONCE already passed).
+     */
+    internal fun firstMatchOnOrAfter(schedule: Schedule, from: LocalDate): LocalDate? {
+        val start = schedule.startDate
+        val d0 = maxOf(from, start)
+        return when (val r = schedule.recurrence) {
+            Recurrence.Once -> if (d0 == start) start else null
+            is Recurrence.Daily -> {
+                val rem = Math.floorMod(ChronoUnit.DAYS.between(start, d0), r.intervalDays.toLong())
+                if (rem == 0L) d0 else d0.plusDays(r.intervalDays - rem)
+            }
+            is Recurrence.Weekly -> {
+                val startMonday = start.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+                var monday = d0.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY))
+                val offWeeks = Math.floorMod(ChronoUnit.WEEKS.between(startMonday, monday), r.intervalWeeks.toLong())
+                if (offWeeks != 0L) monday = monday.plusWeeks(r.intervalWeeks - offWeeks)
+                // This on-week from d0 onwards, otherwise the following on-week (weekdays is non-empty).
+                firstSelectedDay(monday, d0, r.weekdays)
+                    ?: firstSelectedDay(monday.plusWeeks(r.intervalWeeks.toLong()), d0, r.weekdays)
+            }
+        }
+    }
+
+    private fun firstSelectedDay(monday: LocalDate, notBefore: LocalDate, weekdays: Set<DayOfWeek>): LocalDate? =
+        (0L..6L).asSequence().map(monday::plusDays).firstOrNull { !it.isBefore(notBefore) && it.dayOfWeek in weekdays }
 }

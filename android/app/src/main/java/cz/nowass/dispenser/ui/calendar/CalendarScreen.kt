@@ -48,11 +48,7 @@ import cz.nowass.dispenser.ui.components.StatusTag
 import cz.nowass.dispenser.ui.czechPluralStringResource
 import cz.nowass.dispenser.ui.schedule.scheduleDisplayName
 import cz.nowass.dispenser.ui.schedule.scheduleSummary
-import cz.nowass.dispenser.ui.schedule.syncStateText
-import cz.nowass.dispenser.domain.SyncState
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
@@ -123,7 +119,7 @@ fun CalendarScreen(
                         verticalArrangement = Arrangement.spacedBy(Spacing.m),
                     ) {
                         DayDetails(state.selectedDay, onCreate, onEdit)
-                        SchedulesCard(state.schedules, onCreate = { onCreate(state.selectedDate) }, onEdit, onToggleEnabled)
+                        SchedulesCard(state.schedules, state.unreadableScheduleCount, onCreate = { onCreate(state.selectedDate) }, onEdit, onToggleEnabled)
                     }
                 }
             } else {
@@ -137,7 +133,7 @@ fun CalendarScreen(
                     PeriodControls(state, onShift, onToday, onModeChange)
                     GridCard(state, onSelectDate)
                     DayDetails(state.selectedDay, onCreate, onEdit)
-                    SchedulesCard(state.schedules, onCreate = { onCreate(state.selectedDate) }, onEdit, onToggleEnabled)
+                    SchedulesCard(state.schedules, state.unreadableScheduleCount, onCreate = { onCreate(state.selectedDate) }, onEdit, onToggleEnabled)
                 }
             }
         }
@@ -199,6 +195,7 @@ private fun PeriodControls(
                         selected = state.mode == mode,
                         onClick = { onModeChange(mode) },
                         shape = SegmentedButtonDefaults.itemShape(index, CalendarMode.entries.size),
+                        icon = {}, // no checkmark: keeps labels untruncated at large font sizes
                         colors = SegmentedButtonDefaults.colors(
                             activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
                             activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -348,6 +345,7 @@ private fun DayDetails(day: SelectedDayUi, onCreate: (LocalDate) -> Unit, onEdit
 @Composable
 private fun SchedulesCard(
     items: List<ScheduleListItemUi>,
+    unreadableCount: Int,
     onCreate: () -> Unit,
     onEdit: (String) -> Unit,
     onToggleEnabled: (String, Boolean) -> Unit,
@@ -363,6 +361,7 @@ private fun SchedulesCard(
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.semantics { heading() },
             )
+            if (unreadableCount > 0) UnreadableSchedulesWarning(unreadableCount)
             if (items.isEmpty()) {
                 Text(
                     stringResource(R.string.schedules_empty),
@@ -384,7 +383,33 @@ private fun SchedulesCard(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+/** Non-blocking warning: some stored schedules could not be loaded; nothing was deleted. */
+@Composable
+private fun UnreadableSchedulesWarning(count: Int) {
+    val warning = cz.nowass.dispenser.ui.theme.DispenserTheme.extendedColors.warning
+    androidx.compose.material3.Surface(
+        color = cz.nowass.dispenser.ui.theme.DispenserTheme.extendedColors.warningContainer,
+        contentColor = warning,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().padding(vertical = Spacing.xs),
+    ) {
+        Column(
+            Modifier.padding(Spacing.m).semantics(mergeDescendants = true) {},
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                czechPluralStringResource(R.plurals.schedules_unreadable, count, count),
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                stringResource(R.string.schedules_unreadable_detail),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 @Composable
 private fun ScheduleListRow(
     item: ScheduleListItemUi,
@@ -416,13 +441,7 @@ private fun ScheduleListRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            val tags = buildList {
-                if (muted) add(stringResource(R.string.schedule_disabled_tag))
-                if (item.sync == SyncState.PENDING) add(syncStateText(SyncState.PENDING))
-            }
-            if (tags.isNotEmpty()) {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) { tags.forEach { StatusTag(it) } }
-            }
+            if (muted) StatusTag(stringResource(R.string.schedule_disabled_tag))
         }
         val switchLabel = stringResource(R.string.schedule_enabled_switch_a11y, name)
         Switch(

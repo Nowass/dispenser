@@ -124,14 +124,19 @@ data class ScheduleEditorActions(
 )
 
 @Composable
-fun ScheduleEditorRoute(viewModel: ScheduleEditorViewModel, isDemo: Boolean, onClose: () -> Unit) {
+fun ScheduleEditorRoute(
+    viewModel: ScheduleEditorViewModel,
+    isDemo: Boolean,
+    /** Called with the result after a successful write, or null when closed without writing. */
+    onClose: (EditorResult?) -> Unit,
+) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val closeRequested by viewModel.closeRequested.collectAsStateWithLifecycle()
-    LaunchedEffect(closeRequested) { if (closeRequested) onClose() }
+    val closeResult by viewModel.closeResult.collectAsStateWithLifecycle()
+    LaunchedEffect(closeResult) { closeResult?.let(onClose) }
     ScheduleEditorScreen(
         state = state,
         isDemo = isDemo,
-        onClose = onClose,
+        onClose = { onClose(null) },
         actions = ScheduleEditorActions(
             onName = viewModel::setName,
             onAmount = viewModel::setAmountText,
@@ -160,9 +165,17 @@ fun ScheduleEditorScreen(
     var showDiscard by rememberSaveable { mutableStateOf(false) }
     val editing = state as? ScheduleEditorUiState.Editing
     val dirty = editing?.isDirty == true
-    val requestClose = { if (dirty) showDiscard = true else onClose() }
+    val saving = editing?.isSaving == true
+    val requestClose = {
+        when {
+            saving -> Unit // a save is in flight: stay until it completes (no lost/duplicate changes)
+            dirty -> showDiscard = true
+            else -> onClose()
+        }
+    }
 
-    BackHandler(enabled = dirty) { showDiscard = true }
+    // While saving, back is consumed and ignored; with unsaved changes it asks first.
+    BackHandler(enabled = dirty || saving) { requestClose() }
 
     // System navigation inset is already applied (and consumed) by the app shell; imePadding adds
     // only the keyboard excess, so the pinned Save bar sits above the keyboard and the gesture bar.
@@ -170,6 +183,7 @@ fun ScheduleEditorScreen(
         EditorTopBar(
             title = stringResource(if (editing?.isNew == false) R.string.editor_title_edit else R.string.editor_title_new),
             isDemo = isDemo,
+            closeEnabled = !saving,
             onClose = requestClose,
         )
         when (state) {
@@ -223,6 +237,7 @@ fun ScheduleEditorScreen(
 private fun EditorTopBar(
     title: String,
     isDemo: Boolean,
+    closeEnabled: Boolean,
     onClose: () -> Unit,
 ) {
     Row(
@@ -233,7 +248,7 @@ private fun EditorTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
     ) {
-        IconButton(onClick = onClose) {
+        IconButton(onClick = onClose, enabled = closeEnabled) {
             Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.editor_close))
         }
         Text(
@@ -252,6 +267,9 @@ private fun EditorFieldError.messageRes(): Int = when (this) {
     EditorFieldError.AMOUNT_MISSING -> R.string.editor_err_amount_missing
     EditorFieldError.AMOUNT_INVALID -> R.string.editor_err_amount_invalid
     EditorFieldError.AMOUNT_NOT_POSITIVE -> R.string.editor_err_amount_positive
+    EditorFieldError.AMOUNT_TOO_PRECISE -> R.string.editor_err_amount_precision
+    EditorFieldError.AMOUNT_OUT_OF_RANGE -> R.string.editor_err_amount_range
+    EditorFieldError.TIME_NONEXISTENT -> R.string.editor_err_time_nonexistent
     EditorFieldError.INTERVAL_TOO_SMALL -> R.string.editor_err_interval
     EditorFieldError.NO_WEEKDAYS -> R.string.editor_err_weekdays
     EditorFieldError.END_BEFORE_START -> R.string.editor_err_end_before_start
@@ -372,6 +390,8 @@ private fun EditorBody(
                 EditorFieldError.AMOUNT_MISSING,
                 EditorFieldError.AMOUNT_INVALID,
                 EditorFieldError.AMOUNT_NOT_POSITIVE,
+                EditorFieldError.AMOUNT_TOO_PRECISE,
+                EditorFieldError.AMOUNT_OUT_OF_RANGE,
             ).firstOrNull { it in errors }?.messageRes()
             OutlinedTextField(
                 value = f.amountText,
@@ -403,7 +423,9 @@ private fun EditorBody(
                 label = stringResource(R.string.editor_time),
                 value = Format.time(f.time),
                 onClick = { showTimePicker = true },
+                isError = EditorFieldError.TIME_NONEXISTENT in errors,
             )
+            if (EditorFieldError.TIME_NONEXISTENT in errors) ErrorText(stringResource(R.string.editor_err_time_nonexistent))
             Text(
                 stringResource(R.string.editor_timezone, state.zoneId),
                 style = MaterialTheme.typography.bodySmall,
@@ -419,6 +441,7 @@ private fun EditorBody(
                         selected = f.kind == kind,
                         onClick = { actions.onKind(kind) },
                         shape = SegmentedButtonDefaults.itemShape(i, kinds.size),
+                        icon = {}, // no checkmark: keeps labels untruncated at large font sizes
                         colors = SegmentedButtonDefaults.colors(
                             activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
                             activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -541,10 +564,26 @@ private fun EditorBody(
 @Composable
 private fun StatusLine(state: ScheduleEditorUiState.Editing) {
     if (state.isNew && !state.isDirty) return
+    // Unchanged: "Uloženo v telefonu · Revize N" describes what is on screen.
+    // Changed: the phone status is explicitly attributed to the saved version, so
+    // "Neuložené změny" and the stored state can never read as contradictory.
     FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.xs), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-        if (state.isDirty) StatusTag(stringResource(R.string.editor_unsaved))
-        state.storedSync?.let { StatusTag(syncStateText(it)) }
-        state.baseRevision?.let { StatusTag(stringResource(R.string.editor_revision, it)) }
+        val sync = state.storedSync
+        val revision = state.baseRevision
+        if (state.isDirty) {
+            StatusTag(stringResource(R.string.editor_unsaved))
+            if (sync != null && revision != null) {
+                StatusTag(
+                    stringResource(
+                        if (sync == SyncState.DEVICE_APPLIED) R.string.editor_saved_version_device else R.string.editor_saved_version_phone,
+                        revision,
+                    ),
+                )
+            }
+        } else {
+            sync?.let { StatusTag(syncStateText(it)) }
+            revision?.let { StatusTag(stringResource(R.string.editor_revision, it)) }
+        }
     }
 }
 
@@ -771,7 +810,7 @@ private fun previewEditing(kind: RecurrenceKind, errors: Set<EditorFieldError> =
     ),
     zoneId = "Europe/Prague",
     baseRevision = 2,
-    storedSync = SyncState.SIMULATED_ACK,
+    storedSync = SyncState.PENDING,
     isDirty = true,
     isSaving = false,
     conflict = false,

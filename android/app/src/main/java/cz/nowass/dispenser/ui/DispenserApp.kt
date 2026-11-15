@@ -25,7 +25,14 @@ import androidx.navigation.NavType
 import androidx.navigation.navArgument
 import cz.nowass.dispenser.ui.calendar.CalendarRoute
 import cz.nowass.dispenser.ui.calendar.CalendarViewModel
+import cz.nowass.dispenser.ui.schedule.EditorResult
 import cz.nowass.dispenser.ui.schedule.ScheduleEditorRoute
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import cz.nowass.dispenser.ui.schedule.ScheduleEditorViewModel
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.lifecycle.Lifecycle
@@ -94,11 +101,26 @@ fun DispenserApp(repository: DispenserRepository, isDemo: Boolean) {
         }
     }
 
+    // Confirmation after a successful editor write ("Uloženo v telefonu" — never a device sync claim).
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val savedMessage = stringResource(R.string.editor_saved_snackbar)
+    val deletedMessage = stringResource(R.string.editor_deleted_snackbar)
+
     // The editor is a full-screen task with its own top bar (incl. DEMO badge); hide header and dock.
     val inEditor = currentDestination?.route?.substringBefore('?') == SCHEDULE_ROUTE
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = {
+            SnackbarHost(snackbarHostState) { data ->
+                Snackbar(
+                    snackbarData = data,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        },
         topBar = {
             if (inEditor) return@Scaffold
             // DEMO badge is persistent on every screen: all data in A1 is simulated.
@@ -174,8 +196,16 @@ fun DispenserApp(repository: DispenserRepository, isDemo: Boolean) {
                     viewModel = viewModel(factory = ScheduleEditorViewModel.factory(repository)),
                     isDemo = isDemo,
                     // Pop only while this entry is resumed, so a repeated close can never pop the calendar too.
-                    onClose = {
-                        if (entry.lifecycle.currentState == Lifecycle.State.RESUMED) navController.popBackStack()
+                    onClose = { result ->
+                        if (entry.lifecycle.currentState == Lifecycle.State.RESUMED) {
+                            navController.popBackStack()
+                            val message = when (result) {
+                                EditorResult.SAVED -> savedMessage
+                                EditorResult.DELETED -> deletedMessage
+                                null -> null
+                            }
+                            if (message != null) scope.launch { snackbarHostState.showSnackbar(message) }
+                        }
                     },
                 )
             }

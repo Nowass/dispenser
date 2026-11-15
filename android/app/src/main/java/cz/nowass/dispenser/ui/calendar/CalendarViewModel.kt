@@ -42,6 +42,8 @@ sealed interface CalendarUiState {
         val selectedDay: SelectedDayUi,
         /** All schedules incl. disabled ones (the only place they are reachable), sorted by time then name. */
         val schedules: List<ScheduleListItemUi> = emptyList(),
+        /** Stored schedules that could not be loaded (corrupted); shown as a warning, never deleted. */
+        val unreadableScheduleCount: Int = 0,
     ) : CalendarUiState
 }
 
@@ -87,19 +89,28 @@ class CalendarViewModel(
         savedState.getStateFlow(KEY_SELECTED, parseIsoOrNull(savedState.get<String>(ARG_DATE))?.toString())
     private val modeName: StateFlow<String> = savedState.getStateFlow(KEY_MODE, CalendarMode.MONTH.name)
 
+    private data class StoreView(val schedules: List<Schedule>, val sync: Map<String, SyncState>, val unreadable: Int)
+
+    private val storeView = combine(
+        repository.observeSchedules(),
+        repository.observeScheduleSync(),
+        repository.observeUnreadableScheduleCount(),
+        ::StoreView,
+    )
+
     val uiState: StateFlow<CalendarUiState> = combine(
         repository.observeDevice(),
-        repository.observeSchedules(),
+        storeView,
         selectedIso,
         modeName,
-        repository.observeScheduleSync(),
-    ) { device, schedules, selected, mode, sync ->
+    ) { device, store, selected, mode ->
         buildState(
             device = device,
-            schedules = schedules,
+            schedules = store.schedules,
             selected = parseIsoOrNull(selected),
             mode = CalendarMode.entries.firstOrNull { it.name == mode } ?: CalendarMode.MONTH,
-            sync = sync,
+            sync = store.sync,
+            unreadableScheduleCount = store.unreadable,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CalendarUiState.Loading)
 
@@ -158,6 +169,7 @@ class CalendarViewModel(
             selected: LocalDate?,
             mode: CalendarMode,
             sync: Map<String, SyncState> = emptyMap(),
+            unreadableScheduleCount: Int = 0,
         ): CalendarUiState.Ready {
             val today = device.now.atZone(device.zone).toLocalDate()
             val selectedDate = selected ?: today
@@ -211,6 +223,7 @@ class CalendarViewModel(
                 schedules = schedules
                     .sortedWith(compareBy<Schedule>({ it.localTime }, { it.name.lowercase() }, { it.id }))
                     .map { ScheduleListItemUi(it, sync[it.id]) },
+                unreadableScheduleCount = unreadableScheduleCount,
             )
         }
 

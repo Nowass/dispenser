@@ -2,6 +2,7 @@ package cz.nowass.dispenser.domain
 
 import java.time.DayOfWeek
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
 
@@ -29,6 +30,15 @@ data class ScheduleDraft(
 enum class ValidationError {
     AMOUNT_NOT_FINITE,
     AMOUNT_NOT_POSITIVE,
+    /** Finer than the 1 µl storage precision (more than 3 decimal places in ml). */
+    AMOUNT_TOO_PRECISE,
+    /** Beyond the technical storage range (see [Volume.MAX_MICROLITRES]); not a dosing limit. */
+    AMOUNT_OUT_OF_RANGE,
+    /**
+     * ONCE whose local date/time does not exist in its zone (DST spring-forward gap).
+     * Recurring schedules are allowed: their gap day is skipped by [RecurrenceEngine].
+     */
+    TIME_NONEXISTENT,
     INTERVAL_TOO_SMALL,
     NO_WEEKDAYS,
     END_BEFORE_START,
@@ -40,9 +50,17 @@ enum class ValidationError {
  */
 object ScheduleValidator {
     fun validate(draft: ScheduleDraft): Set<ValidationError> = buildSet {
-        when {
-            !draft.amountMl.isFinite() -> add(ValidationError.AMOUNT_NOT_FINITE)
-            draft.amountMl <= 0.0 -> add(ValidationError.AMOUNT_NOT_POSITIVE)
+        when (Volume.mlToMicrolitres(draft.amountMl)) {
+            is Volume.Conversion.Ok -> Unit
+            Volume.Conversion.NotFinite -> add(ValidationError.AMOUNT_NOT_FINITE)
+            Volume.Conversion.NotPositive -> add(ValidationError.AMOUNT_NOT_POSITIVE)
+            Volume.Conversion.TooPrecise -> add(ValidationError.AMOUNT_TOO_PRECISE)
+            Volume.Conversion.OutOfRange -> add(ValidationError.AMOUNT_OUT_OF_RANGE)
+        }
+        if (draft.kind == RecurrenceKind.ONCE &&
+            draft.zone.rules.getValidOffsets(LocalDateTime.of(draft.startDate, draft.localTime)).isEmpty()
+        ) {
+            add(ValidationError.TIME_NONEXISTENT)
         }
         if (draft.kind != RecurrenceKind.ONCE && draft.interval < 1) add(ValidationError.INTERVAL_TOO_SMALL)
         if (draft.kind == RecurrenceKind.WEEKLY && draft.weekdays.isEmpty()) add(ValidationError.NO_WEEKDAYS)

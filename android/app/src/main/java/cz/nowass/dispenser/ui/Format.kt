@@ -15,7 +15,6 @@ object Format {
 
     private val time = DateTimeFormatter.ofPattern("HH:mm", CZECH)
     private val dayAndDate = DateTimeFormatter.ofPattern("EEEE d. M.", CZECH)
-    private val dateTime = DateTimeFormatter.ofPattern("d. M. yyyy HH:mm", CZECH)
     private val shortWeekday = DateTimeFormatter.ofPattern("EEE", CZECH)
     private val dayOfMonth = DateTimeFormatter.ofPattern("d", CZECH)
     private val fullDate = DateTimeFormatter.ofPattern("EEEE d. MMMM", CZECH)
@@ -35,8 +34,6 @@ object Format {
         java.math.BigDecimal.valueOf(value).stripTrailingZeros().toPlainString().replace('.', ',')
 
     fun time(at: ZonedDateTime): String = time.format(at)
-
-    fun dateTime(at: ZonedDateTime): String = dateTime.format(at)
 
     enum class RelativeDay { TODAY, TOMORROW, OTHER }
 

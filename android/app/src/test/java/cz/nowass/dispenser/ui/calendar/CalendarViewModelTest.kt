@@ -144,7 +144,7 @@ class CalendarViewModelTest {
 
     @Test
     fun setEnabled_showsDisabledScheduleInCalendar_andBumpsRevision() = runTest {
-        val repo = MockDispenserRepository(simulatedAckDelay = kotlin.time.Duration.ZERO)
+        val repo = MockDispenserRepository()
         val vm = CalendarViewModel(repo, SavedStateHandle(mapOf(CalendarViewModel.ARG_DATE to "2026-11-21")))
         val before = ready(vm)
         assertTrue(before.schedules.any { it.schedule.id == "demo-weekend" && !it.schedule.enabled })
@@ -157,5 +157,16 @@ class CalendarViewModelTest {
         assertEquals(3, item.schedule.revision)
         assertTrue(after.selectedDay.occurrences.any { it.scheduleId == "demo-weekend" })
         assertEquals(after.schedules.size, after.schedules.map { it.schedule.id }.toSet().size)
+    }
+
+    @Test
+    fun monthGrid_leapFebruary_andYearBoundaryPaging() {
+        val feb = build(selected = LocalDate.of(2028, 2, 29))
+        assertEquals(YearMonth.of(2028, 2), feb.visibleMonth)
+        assertEquals(29, feb.days.count { it.inVisibleMonth })
+        assertEquals(LocalDate.of(2028, 1, 31), feb.days.first().date) // Monday before 1 Feb 2028
+        val dec = build(selected = LocalDate.of(2026, 12, 31), mode = CalendarMode.WEEK)
+        assertEquals(LocalDate.of(2026, 12, 28), dec.days.first().date)
+        assertEquals(LocalDate.of(2027, 1, 3), dec.days.last().date)
     }
 }

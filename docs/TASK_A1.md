@@ -28,6 +28,14 @@ A buildable Android app (`cz.nowass.dispenser`, minSdk 26), in Czech, launched o
 - MONTHLY recurrence may be added only with explicitly documented/tested short-month behavior (proposal: skip missing dates).
 - Multiple schedules can occur on the same day. Missed occurrences are skipped, not made up later.
 
+**A1.2c — local schedule persistence** (added 2026-11-15; numbering of later stages unchanged)
+
+- Persist schedules on the phone with Room behind a `ScheduleStore` port; ViewModels and domain stay database-free.
+- Fresh installation starts with an empty database; demo fixtures only for previews, tests and explicit simulations.
+- Saved schedules are `PENDING` and shown as "Uloženo v telefonu"; no simulated device acknowledgement.
+- Running app uses the phone's real clock; an injectable `Clock` keeps tests/previews deterministic.
+- Quantities stored as integer microlitres with validated ml↔µl conversion; optimistic revisions; no destructive migrations.
+
 **A1.3 — reservoir and simulation**
 
 - Dashboard shows next dose, upcoming total, estimated remaining fluid and mock battery percentage.

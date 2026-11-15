@@ -35,7 +35,6 @@
 
     <string name="dashboard_estimate_label">odhad</string>
     <string name="dashboard_simulated_label">simulace</string>
-    <string name="dashboard_demo_clock">Simulovaný čas ukázky: %1$s</string>
 
     <string name="dashboard_week_title">Nadcházejících 7 dní</string>
     <string name="dashboard_week_action">Kalendář</string>
@@ -81,6 +80,13 @@
     <string name="schedules_title">Rozvrhy</string>
     <string name="schedules_empty">Zatím nemáte žádný rozvrh.</string>
     <string name="schedules_add">Nový rozvrh</string>
+    <plurals name="schedules_unreadable">
+        <item quantity="one">%d uložený rozvrh nelze načíst.</item>
+        <item quantity="few">%d uložené rozvrhy nelze načíst.</item>
+        <item quantity="many">%d uloženého rozvrhu nelze načíst.</item>
+        <item quantity="other">%d uložených rozvrhů nelze načíst.</item>
+    </plurals>
+    <string name="schedules_unreadable_detail">Data mohou být poškozená. Záznamy zůstávají v telefonu beze změny, nebyly smazány ani upraveny.</string>
     <string name="schedule_unnamed">Dávka bez názvu</string>
     <string name="schedule_enabled_switch_a11y">Rozvrh %1$s je aktivní</string>
     <string name="schedule_disabled_tag">Vypnuto</string>
@@ -103,8 +109,7 @@
     </plurals>
 
     <!-- Sync state (DEMO never claims device sync) -->
-    <string name="sync_pending">Čeká na potvrzení</string>
-    <string name="sync_simulated">Potvrzeno simulací (DEMO)</string>
+    <string name="sync_pending">Uloženo v telefonu</string>
     <string name="sync_device">Potvrzeno zařízením</string>
 
     <!-- Schedule editor -->
@@ -113,6 +118,8 @@
     <string name="editor_close">Zavřít bez uložení</string>
     <string name="editor_save">Uložit</string>
     <string name="editor_saving">Ukládám…</string>
+    <string name="editor_saved_snackbar">Uloženo v telefonu</string>
+    <string name="editor_deleted_snackbar">Rozvrh smazán</string>
     <string name="editor_save_disabled_unchanged">Žádné změny k uložení.</string>
     <string name="editor_unsaved">Neuložené změny</string>
     <string name="editor_revision">Revize %1$d</string>
@@ -154,6 +161,11 @@
     <string name="editor_discard_keep">Pokračovat v úpravách</string>
     <string name="editor_err_amount_missing">Zadejte množství v ml.</string>
     <string name="editor_err_amount_invalid">Zadejte platné číslo, např. 12,5.</string>
+    <string name="editor_err_amount_precision">Zadejte nejvýše 3 desetinná místa (přesnost 1 µl).</string>
+    <string name="editor_err_amount_range">Množství je mimo podporovaný rozsah.</string>
+    <string name="editor_err_time_nonexistent">Tento čas neexistuje kvůli přechodu na letní čas. Zvolte jiný čas.</string>
+    <string name="editor_saved_version_phone">Uložená verze (revize %1$d): v telefonu</string>
+    <string name="editor_saved_version_device">Uložená verze (revize %1$d): potvrzeno zařízením</string>
     <string name="editor_err_amount_positive">Množství musí být větší než 0 ml.</string>
     <string name="editor_err_interval">Interval musí být alespoň 1.</string>
     <string name="editor_err_weekdays">Vyberte alespoň jeden den.</string>

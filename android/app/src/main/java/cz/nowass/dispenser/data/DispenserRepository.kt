@@ -12,8 +12,8 @@ import kotlinx.coroutines.flow.Flow
 /**
  * Single boundary between UI/ViewModels and dispenser data.
  *
- * Implemented now by [MockDispenserRepository] (DEMO); a future
- * `BleDispenserRepository` will implement the same contract.
+ * Implemented by [LocalDispenserRepository] (schedules persisted on the phone, device
+ * values simulated); a future `BleDispenserRepository` will implement the same contract.
  */
 interface DispenserRepository {
     fun observeDevice(): Flow<DeviceStatus>
@@ -22,11 +22,18 @@ interface DispenserRepository {
     fun observeEvents(): Flow<List<DispenserEvent>>
 
     /**
-     * Confirmation state per schedule id. A locally written change is
-     * [SyncState.PENDING] until acknowledged; DEMO only simulates acknowledgement
-     * ([SyncState.SIMULATED_ACK]) and must never be presented as device sync.
+     * Device confirmation state per schedule id. Locally saved schedules are
+     * [SyncState.PENDING] ("Uloženo v telefonu"): stored on the phone, not transferred
+     * to or accepted by the dispenser. Only a future device read-back may report
+     * [SyncState.DEVICE_APPLIED]; it is never simulated.
      */
     fun observeScheduleSync(): Flow<Map<String, SyncState>>
+
+    /**
+     * Number of stored schedules that could not be loaded (corrupted data). They are kept
+     * untouched; the UI shows a non-blocking warning instead of hiding the problem.
+     */
+    fun observeUnreadableScheduleCount(): Flow<Int>
 
     /** Creates a schedule with a new stable id and revision 1. */
     suspend fun createSchedule(draft: ScheduleDraft): ScheduleWriteResult

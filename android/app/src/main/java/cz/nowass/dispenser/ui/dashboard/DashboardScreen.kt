@@ -78,14 +78,6 @@ fun DashboardScreen(
             NextDose(state)
             StatusCards(state)
             Week(state, onOpenCalendar)
-            if (state.isDemo) {
-                Text(
-                    text = stringResource(R.string.dashboard_demo_clock, Format.dateTime(state.now)),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = Spacing.s),
-                )
-            }
         }
     }
 }

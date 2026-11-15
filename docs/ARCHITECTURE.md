@@ -84,6 +84,7 @@ Use a **bounded subset inspired by iCalendar RFC 5545**, with a user-friendly An
 - Queries return only occurrences strictly after a given instant, so missed doses are never caught up.
 - `PROPOSED`, pending review: occurrence ID = `scheduleId@localDate`, independent of revision. This means at most one occurrence per schedule per local date, and editing a schedule cannot create a second occurrence for a date already handled. Multiple daily doses use multiple schedules.
 - Schedule writes use optimistic concurrency (`expectedRevision`; the revision is incremented on every update, a mismatch is a conflict).
+- A1.2c: schedules are persisted on the phone (Room, `schedules` table) with amounts as integer microlitres and weekdays as `weekdays_mask` (bit 0 = Monday), matching the data model sketch above. Locally saved schedules are `PENDING` until a future device read-back; the phone copy is never treated as applied device configuration.
 
 RFC 5545 is a reference for recurrence vocabulary (`FREQ`, `INTERVAL`, `BYDAY`), **not** a requirement to implement an arbitrary text RRULE parser on the MCU.
 

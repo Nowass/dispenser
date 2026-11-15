@@ -1,6 +1,7 @@
 package cz.nowass.dispenser.ui.schedule
 
 import androidx.lifecycle.SavedStateHandle
+import cz.nowass.dispenser.data.LocalDispenserRepository
 import cz.nowass.dispenser.data.MockDispenserRepository
 import cz.nowass.dispenser.domain.Recurrence
 import cz.nowass.dispenser.domain.RecurrenceKind
@@ -25,7 +26,6 @@ import org.junit.Test
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.LocalTime
-import kotlin.time.Duration
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ScheduleEditorViewModelTest {
@@ -36,12 +36,12 @@ class ScheduleEditorViewModelTest {
     @After
     fun tearDown() = Dispatchers.resetMain()
 
-    private fun repo() = MockDispenserRepository(simulatedAckDelay = Duration.ZERO, idGenerator = { "new-1" })
+    private fun repo() = MockDispenserRepository(idGenerator = { "new-1" })
 
-    private fun newEditor(repo: MockDispenserRepository, date: String? = "2026-11-20", handle: SavedStateHandle? = null) =
+    private fun newEditor(repo: LocalDispenserRepository, date: String? = "2026-11-20", handle: SavedStateHandle? = null) =
         ScheduleEditorViewModel(repo, handle ?: SavedStateHandle(buildMap { if (date != null) put(ScheduleEditorViewModel.ARG_DATE, date) }))
 
-    private fun editEditor(repo: MockDispenserRepository, id: String) =
+    private fun editEditor(repo: LocalDispenserRepository, id: String) =
         ScheduleEditorViewModel(repo, SavedStateHandle(mapOf(ScheduleEditorViewModel.ARG_SCHEDULE_ID to id)))
 
     private suspend fun TestScope.editing(vm: ScheduleEditorViewModel): ScheduleEditorUiState.Editing {
@@ -75,7 +75,7 @@ class ScheduleEditorViewModelTest {
         editing(vm)
         vm.save()
         assertEquals(setOf(EditorFieldError.AMOUNT_MISSING), editing(vm).visibleErrors)
-        assertFalse(vm.closeRequested.value)
+        assertEquals(null, vm.closeResult.value)
         assertTrue(repo.observeSchedules().first().none { it.id == "new-1" })
     }
 
@@ -121,7 +121,7 @@ class ScheduleEditorViewModelTest {
         assertTrue(editing(vm).isDirty)
 
         vm.save()
-        assertTrue(vm.closeRequested.value)
+        assertEquals(EditorResult.SAVED, vm.closeResult.value)
         val saved = repo.observeSchedules().first().single { it.id == "new-1" }
         assertEquals("Nová", saved.name)
         assertEquals(12.5, saved.amountMl, 0.0)
@@ -149,12 +149,12 @@ class ScheduleEditorViewModelTest {
         assertEquals(RecurrenceKind.WEEKLY, s.form.kind)
         assertEquals(setOf(DayOfWeek.MONDAY, DayOfWeek.THURSDAY), s.form.weekdays)
         assertEquals(1, s.baseRevision)
-        assertEquals(SyncState.SIMULATED_ACK, s.storedSync)
+        assertEquals(SyncState.PENDING, s.storedSync) // saved on the phone only
         assertFalse(s.isDirty)
 
         vm.toggleWeekday(DayOfWeek.SATURDAY)
         vm.save()
-        assertTrue(vm.closeRequested.value)
+        assertEquals(EditorResult.SAVED, vm.closeResult.value)
         val saved = repo.observeSchedules().first().single { it.id == "demo-evening" }
         assertEquals(2, saved.revision)
         assertEquals(setOf(DayOfWeek.MONDAY, DayOfWeek.THURSDAY, DayOfWeek.SATURDAY), (saved.recurrence as Recurrence.Weekly).weekdays)
@@ -173,7 +173,7 @@ class ScheduleEditorViewModelTest {
         vm.save()
         val s = editing(vm)
         assertTrue(s.conflict)
-        assertFalse(vm.closeRequested.value)
+        assertEquals(null, vm.closeResult.value)
         assertEquals(20.0, repo.observeSchedules().first().single { it.id == "demo-morning" }.amountMl, 0.0)
 
         vm.reloadStored()
@@ -189,7 +189,7 @@ class ScheduleEditorViewModelTest {
         val vm = editEditor(repo, "demo-weekend")
         editing(vm)
         vm.delete()
-        assertTrue(vm.closeRequested.value)
+        assertEquals(EditorResult.DELETED, vm.closeResult.value)
         assertTrue(repo.observeSchedules().first().none { it.id == "demo-weekend" })
     }
 
@@ -275,5 +275,27 @@ class ScheduleEditorViewModelTest {
         assertTrue(editing(vm).canSave)
         vm.setAmountText("0")
         assertFalse(editing(vm).canSave)
+    }
+
+    @Test
+    fun amountFinerThanOneMicrolitre_isRejectedWithPrecisionError() = runTest {
+        val vm = newEditor(repo())
+        editing(vm)
+        vm.setAmountText("12,3456")
+        val s = editing(vm)
+        assertEquals(setOf(EditorFieldError.AMOUNT_TOO_PRECISE), s.visibleErrors)
+        assertFalse(s.canSave)
+        vm.setAmountText("12,345")
+        assertTrue(editing(vm).canSave)
+    }
+
+    @Test
+    fun amountParser_acceptsPlainDecimalsOnly() {
+        for ((text, value) in listOf("12" to 12.0, "12,5" to 12.5, "12.5" to 12.5, ",5" to 0.5, "12," to 12.0, " 7,25 " to 7.25)) {
+            assertEquals(text, value, ScheduleEditorViewModel.parseAmount(text)!!, 0.0)
+        }
+        for (text in listOf("1e3", "0x1p3", "+5", "-5", "12,5,3", "1 000", "12.5.1", "NaN", "Infinity", ",", "")) {
+            assertEquals(text, null, ScheduleEditorViewModel.parseAmount(text))
+        }
     }
 }

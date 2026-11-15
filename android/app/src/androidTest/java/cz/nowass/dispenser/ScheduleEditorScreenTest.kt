@@ -12,6 +12,10 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import cz.nowass.dispenser.domain.RecurrenceKind
+import cz.nowass.dispenser.domain.SyncState
+import androidx.test.espresso.Espresso
+import androidx.compose.ui.test.assertCountEquals
+import org.junit.Assert.assertFalse
 import cz.nowass.dispenser.ui.schedule.EDITOR_SAVE_TEST_TAG
 import cz.nowass.dispenser.ui.schedule.EditorFieldError
 import cz.nowass.dispenser.ui.schedule.EditorForm
@@ -45,18 +49,23 @@ class ScheduleEditorScreenTest {
         errors: Set<EditorFieldError> = emptySet(),
         dirty: Boolean = true,
         isNew: Boolean = false,
+        saving: Boolean = false,
+        sync: SyncState? = null,
+        time: LocalTime = LocalTime.of(8, 0),
+        kind: RecurrenceKind = RecurrenceKind.WEEKLY,
     ) = ScheduleEditorUiState.Editing(
         isNew = isNew,
         form = EditorForm(
             name = "Večerní doplnění",
             amountText = amount,
             startDate = LocalDate.of(2026, 11, 16),
-            kind = RecurrenceKind.WEEKLY,
+            time = time,
+            kind = kind,
             weekdays = setOf(DayOfWeek.MONDAY, DayOfWeek.THURSDAY),
         ),
         visibleErrors = errors,
         blockingErrors = errors,
-        canSave = errors.isEmpty() && (isNew || dirty),
+        canSave = !saving && errors.isEmpty() && (isNew || dirty),
         preview = if (errors.isEmpty()) {
             PreviewUi.Items((0 until 5).map { PreviewItem("p$it", LocalDate.of(2026, 11, 16).plusDays(it * 3L), LocalTime.of(8, 0)) })
         } else {
@@ -64,9 +73,9 @@ class ScheduleEditorScreenTest {
         },
         zoneId = "Europe/Prague",
         baseRevision = 1,
-        storedSync = null,
+        storedSync = sync,
         isDirty = dirty,
-        isSaving = false,
+        isSaving = saving,
         conflict = false,
         deletedMeanwhile = false,
     )
@@ -129,5 +138,38 @@ class ScheduleEditorScreenTest {
         show(state(dirty = false), onClose = { closed = true })
         rule.onNodeWithContentDescription(str(R.string.editor_close)).performClick()
         assertTrue(closed)
+    }
+
+    @Test
+    fun whileSaving_closeIsDisabled_andBackIsIgnored() {
+        var closed = false
+        show(state(saving = true), onClose = { closed = true })
+        rule.onNodeWithContentDescription(str(R.string.editor_close)).assertIsNotEnabled()
+        rule.onNodeWithTag(EDITOR_SAVE_TEST_TAG).assertIsNotEnabled()
+        Espresso.pressBack()
+        assertFalse(closed)
+        assertEquals(0, rule.onAllNodesWithText(str(R.string.editor_discard_title)).fetchSemanticsNodes().size)
+    }
+
+    @Test
+    fun statusTags_neverContradict() {
+        show(state(dirty = true, sync = SyncState.PENDING))
+        rule.onNodeWithText(str(R.string.editor_unsaved)).assertIsDisplayed()
+        rule.onNodeWithText(ctx.getString(R.string.editor_saved_version_phone, 1)).assertIsDisplayed()
+        rule.onAllNodesWithText(str(R.string.sync_pending)).assertCountEquals(0)
+    }
+
+    @Test
+    fun unchangedSchedule_showsSavedOnPhone() {
+        show(state(dirty = false, sync = SyncState.PENDING))
+        rule.onNodeWithText(str(R.string.sync_pending)).assertIsDisplayed()
+        rule.onAllNodesWithText(str(R.string.editor_unsaved)).assertCountEquals(0)
+    }
+
+    @Test
+    fun onceInDstGap_showsTimeError_andDisablesSave() {
+        show(state(errors = setOf(EditorFieldError.TIME_NONEXISTENT), kind = RecurrenceKind.ONCE, time = LocalTime.of(2, 15)))
+        rule.onNodeWithTag(EDITOR_SAVE_TEST_TAG).assertIsNotEnabled()
+        assertTrue(rule.onAllNodesWithText(str(R.string.editor_err_time_nonexistent)).fetchSemanticsNodes().isNotEmpty())
     }
 }
