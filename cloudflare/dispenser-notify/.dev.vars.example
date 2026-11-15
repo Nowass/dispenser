@@ -1,0 +1,3 @@
+# Copy to .dev.vars (ignored by git) for `npm run dev`. Use a throwaway local value,
+# never the production DEVICE_API_TOKEN. At least 32 characters (shorter fails closed).
+DEVICE_API_TOKEN=local-development-token-not-a-secret-0001

@@ -8,6 +8,7 @@ Repository layout:
 
 - `android/`: existing Android Studio Kotlin + Jetpack Compose project (`cz.nowass.dispenser`), minSdk 26.
 - `firmware/`: ESP-IDF v6.1 project for Seeed XIAO ESP32-C3 (target `esp32c3`). Milestone M0.2 skeleton with Linux host tests; never run on hardware. See `firmware/README.md`.
+- `cloudflare/dispenser-notify/`: Cloudflare Worker + D1 notification backend (M1.6a, TypeScript). Protocol in its `PROTOCOL.md`. Needs Node.js ≥ 22.12.
 - `docs/`: source-of-truth product and architecture documents.
 
 Read these documents before making product decisions:
@@ -70,11 +71,20 @@ If any document is missing, **stop and ask** for it; do not guess missing busine
   - **Platform:** ESP-IDF clock/Wi-Fi/SNTP adapters (compiled; SNTP never sets the clock itself). Optional diagnostic `CONFIG_DSP_TIME_SYNC_DIAGNOSTIC`, default off; it never starts Wi-Fi without credentials.
   - **Not verified:** anything on hardware or a real network (RTC continuity, drift, Wi-Fi, SNTP, energy).
   - **Flash:** with Wi-Fi linked the image uses about 80 % of the 1 MB app partition. The partition recommendation must be applied before BLE/TLS.
-- **M1.5 — notification engine**, implemented and awaiting review (domain only, no transport):
+- **M1.5 — notification engine (`f02d64d`)**, approved and committed (domain only, no transport):
   - **Events:** reservoir LOW (warning) / BLOCKED, battery LOW (warning), dosing errors (one-shot), device errors (storage, sync overdue, clock unknown, queue overflow).
   - **Approved policy:** one event per episode plus a reminder every 7 days while unresolved; dosing errors one-shot. A 16-entry queue in one `notify` record (layout v3, v1/v2 migration); CRITICAL is never evicted; overflow is latched or counted, never silent.
   - **Delivery:** at-least-once, stable IDs `dsp-<device>-<epoch>-<seq>`, removed only on ACK, durable before sent. **No extra Wi-Fi wake-ups**: delivery waits for the regular session.
   - **Reservoir:** estimate from consumption (no sensor); every authorized dose (automatic or manual) subtracts the full requested volume before the pump. This is enforced by a single-use dose permit that the future actuator must require. Start/pump failures and interruptions set the persistent uncertainty flag in the same write; refill clears it.
   - **Review (2026-11-15):** a payload follows the latest value until the first transmission attempt, then is frozen; the freeze is persisted before the first send (survives power loss). A notify persistence failure returns `ERR_STORAGE` / `dsp_notify_storage_degraded()`, to be exposed via BLE diagnostics later. The device ID is the factory MAC, never a secret.
-- **Next (after M1.5 approval):** scope to be agreed. Do not start it without approval; stop for review at each milestone boundary.
+- **M1.6a — Cloudflare notification backend**, implemented and verified locally, awaiting review; **not deployed**:
+  - **Where:** `cloudflare/dispenser-notify` (Worker `dispenser-notify`, D1 `dispenser-notifications`, binding `DB`, secret `DEVICE_API_TOKEN`).
+  - **Protocol v1:** `POST /api/v1/events`, Bearer token, one JSON event, strict validation that mirrors the firmware validator.
+  - **Responses:** 201 accepted / 200 duplicate (identical canonical payload) / 409 conflict / 400, 401, 413, 415 / 503 retry.
+  - **Idempotency:** `event_id` is the primary key; `INSERT … ON CONFLICT DO NOTHING`, then a payload-hash comparison. Existing rows are never modified.
+  - **Delivery boundary:** an acknowledgement means durable acceptance (`PENDING`), not e-mail delivery; e-mail is a later milestone.
+  - **Safety rules:** never deploy, run remote D1 commands that write, or touch production secrets without explicit approval.
+  - **Approved for the firmware HTTPS milestone:** `DSP_TX_REJECTED` for 400/404/405/409/413/415. Record a persistent diagnostic (exposed via BLE), never block the queue, never discard silently. 401 and 5xx stay pending; timeouts stay UNCERTAIN with the same ID.
+  - **Open:** per-device credentials, rate limiting.
+- **Next (after M1.6a approval):** scope to be agreed. Do not start it without approval; stop for review at each milestone boundary.
 - **Shared test vectors:** when a scheduling rule changes, update `test-vectors/` first and make both the Kotlin and the C tests pass; never regenerate expected values from either implementation.

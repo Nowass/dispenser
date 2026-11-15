@@ -1,0 +1,28 @@
+{
+  "name": "dispenser-notify",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Dispenser V2 notification ingestion backend (Cloudflare Worker + D1)",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "types": "wrangler types",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "tsc --noEmit && prettier --check .",
+    "test": "vitest run",
+    "test:integration": "node test/integration/restart.mjs",
+    "check": "npm run lint && npm test && npm run test:integration"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.8.2",
+    "prettier": "3.10.1",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0",
+    "wrangler": "4.162.0"
+  }
+}

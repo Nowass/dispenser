@@ -260,7 +260,16 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - **Delivery (approved):** at-least-once over an injected transport (`ACK` / `FAILED` / `UNCERTAIN`), highest severity first, then oldest. An entry is removed only on ACK, keeps its stable ID `dsp-<device>-<epoch>-<seq>` across retries, and is never sent before it is durable. Delivery happens only in the next regular Wi-Fi session: **no extra wake-ups for any notification**.
 - **Payload freshness (M1.5 review):** an entry reports the latest known value until its first transmission attempt (RAM-only refresh). Its final payload and the freeze marker are persisted in one write before the first send (nothing is sent if that write fails), so retries with the same ID are identical even after a power cut.
 - **Storage failures:** a failed `notify` write never leads to transmitting a non-durable event. Every call returns `ERR_STORAGE`, and `dsp_notify_storage_degraded()` stays true until a write succeeds. The BLE diagnostics milestone must expose it.
+- **Transport (M1.6a):** HTTPS `POST /api/v1/events` to the Cloudflare backend, protocol v1 in `cloudflare/dispenser-notify/PROTOCOL.md`. 201/200 → ACK, 503 or a network failure → FAILED, timeout after sending → UNCERTAIN. **Approved (integration requirement for the HTTPS transport milestone):** 400/404/405/409/413/415 → `DSP_TX_REJECTED`. The entry leaves the queue only after a persistent local diagnostic (event, reason) is written, exposed through future BLE diagnostics; it never blocks later notifications and is never silently discarded. 401 and retryable server failures keep the event pending.
 - **Reservoir estimate (approved: conservative):** consumption-based, no level sensor. Every authorized dose (automatic or manual) subtracts its full requested volume before the pump runs. This is enforced by a single-use `dsp_dose_permit_t` that only a durable consumption issues, and the future actuator must require it. Start/pump failures and interruptions set the persistent uncertainty flag in the same write as the dosing error; a refill (`dsp_notify_on_refill`) clears it. The estimate stays in the `config` record (revision + 1 per dose).
+
+### Notification backend (Cloudflare, M1.6a, implemented and tested locally; not deployed)
+
+- **Components:** Worker `dispenser-notify` and D1 database `dispenser-notifications` (binding `DB`, existing `notifications` table, `event_id` primary key). TypeScript, wrangler 4, Vitest in the Workers runtime.
+- **Ingestion:** `POST /api/v1/events` with `Authorization: Bearer <DEVICE_API_TOKEN>` (constant-time check; a missing or short secret fails closed). Strict validation of one v1 event (≤ 4 KiB). The payload is stored in a canonical JSON form with its SHA-256 hash.
+- **Idempotency:** `INSERT … ON CONFLICT(event_id) DO NOTHING`, then a hash comparison: 201 accepted, 200 duplicate, 409 conflict (the stored row is never modified). Any D1 failure returns 503 and is never acknowledged.
+- **Delivery boundary:** an acknowledgement transfers responsibility to the backend and means durable acceptance (`delivery_status = PENDING`), not e-mail delivery; e-mail is a later milestone.
+- **Security limits of v1:** one shared token (no per-device binding), no rate limiting, no read API.
 
 ## Dependency boundaries and test doubles
 

@@ -1,0 +1,20 @@
+// Dispenser V2 notification backend (M1.6a). Targets the EXISTING Worker and D1 database.
+// No secrets in this file: DEVICE_API_TOKEN is a Worker secret (production) or comes from
+// the ignored .dev.vars file (local development).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dispenser-notify",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "dispenser-notifications",
+      // Replace with the existing database's ID before deploying (`wrangler d1 list`).
+      // The all-zero placeholder only works locally; a deploy with it fails safely.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+}
