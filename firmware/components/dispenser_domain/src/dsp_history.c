@@ -20,7 +20,8 @@ bool dsp_history_record_equal(const dsp_history_record_t *a, const dsp_history_r
     return strncmp(a->schedule_id, b->schedule_id, sizeof a->schedule_id) == 0 &&
            dsp_date_compare(a->local_date, b->local_date) == 0 && a->state == b->state &&
            a->schedule_revision == b->schedule_revision &&
-           a->scheduled_at == b->scheduled_at && a->claimed_at == b->claimed_at;
+           a->scheduled_at == b->scheduled_at && a->claimed_at == b->claimed_at &&
+           a->volume_ul == b->volume_ul;
 }
 
 bool dsp_history_store_is_valid(const dsp_history_store_t *store)

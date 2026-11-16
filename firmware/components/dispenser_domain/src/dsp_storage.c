@@ -8,8 +8,10 @@
 #define KEY_CONFIG "config"
 #define KEY_TIME "time"
 #define KEY_NOTIFY "notify"
+#define KEY_DOSING "dosing"
 
-/* Layout written by this firmware (v3 = v2 + "notify" record, M1.5; v2 = v1 + "time"). */
+/* Layout written by this firmware (v4 = v3 + "dosing" record, M1.9a; v3 = v2 + "notify"
+ * record, M1.5; v2 = v1 + "time"). */
 static const dsp_layout_t LAYOUT_CURRENT = {
     .layout_version = DSP_STORAGE_LAYOUT_VERSION,
     .history_slots = DSP_STORAGE_HISTORY_SLOTS,
@@ -18,6 +20,7 @@ static const dsp_layout_t LAYOUT_CURRENT = {
 };
 #define LAYOUT_V1_VERSION 1 /* M1.3 */
 #define LAYOUT_V2_VERSION 2 /* M1.4 */
+#define LAYOUT_V3_VERSION 3 /* M1.5 */
 
 static dsp_storage_status_t from_kv_read(dsp_kv_status_t s)
 {
@@ -97,7 +100,14 @@ dsp_storage_status_t dsp_storage_put(dsp_storage_t *st, const char *key, size_t 
 
 /* ---- Provisioning values ----------------------------------------------------------- */
 
-typedef enum { KEY_HISTORY, KEY_SET, KEY_CONFIG_REC, KEY_TIME_REC, KEY_NOTIFY_REC } key_kind_t;
+typedef enum {
+    KEY_HISTORY,
+    KEY_SET,
+    KEY_CONFIG_REC,
+    KEY_TIME_REC,
+    KEY_NOTIFY_REC,
+    KEY_DOSING_REC,
+} key_kind_t;
 
 static size_t encode_pristine(dsp_storage_t *st, key_kind_t kind)
 {
@@ -116,6 +126,11 @@ static size_t encode_pristine(dsp_storage_t *st, key_kind_t kind)
         dsp_time_meta_t meta;
         memset(&meta, 0, sizeof meta); /* never synced */
         return dsp_codec_encode_time(&meta, st->buf, sizeof st->buf);
+    }
+    case KEY_DOSING_REC: {
+        dsp_dosing_state_t d;
+        dsp_dosing_state_defaults(&d); /* SERVICE_REQUIRED: never enables dosing */
+        return dsp_codec_encode_dosing(&d, st->buf, sizeof st->buf);
     }
     default:
         memset(&st->notify_scratch, 0, sizeof st->notify_scratch); /* no events */
@@ -168,6 +183,14 @@ static dsp_storage_status_t check_value(dsp_storage_t *st, key_kind_t kind, cons
         }
         break;
     }
+    case KEY_DOSING_REC: {
+        dsp_dosing_state_t d;
+        cs = dsp_codec_decode_dosing(v, len, &d);
+        if (cs == DSP_CODEC_OK) {
+            *pristine = dsp_dosing_state_is_provisioning(&d);
+        }
+        break;
+    }
     default: {
         cs = dsp_codec_decode_notify(v, len, &st->notify_scratch);
         if (cs == DSP_CODEC_OK) {
@@ -185,11 +208,12 @@ static dsp_storage_status_t check_value(dsp_storage_t *st, key_kind_t kind, cons
     return cs == DSP_CODEC_OK ? DSP_STORAGE_OK : dsp_storage_from_codec(cs);
 }
 
-/* Data keys (everything except the marker), in this order: h00..h31, sched, config, time.
- * Layout v1 has the first DATA_KEYS_V1 of them. */
-#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 4)
+/* Data keys (everything except the marker), in this order: h00..h31, sched, config, time,
+ * notify, dosing. Layout vN has the first DATA_KEYS_VN of them. */
+#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 5)
 #define DATA_KEYS_V1 (DSP_STORAGE_HISTORY_SLOTS + 2) /* h00..h31, sched, config */
 #define DATA_KEYS_V2 (DSP_STORAGE_HISTORY_SLOTS + 3) /* + time */
+#define DATA_KEYS_V3 (DSP_STORAGE_HISTORY_SLOTS + 4) /* + notify */
 
 static void data_key(size_t i, char key[8], key_kind_t *kind)
 {
@@ -205,9 +229,12 @@ static void data_key(size_t i, char key[8], key_kind_t *kind)
     } else if (i == DSP_STORAGE_HISTORY_SLOTS + 2) {
         strcpy(key, KEY_TIME);
         *kind = KEY_TIME_REC;
-    } else {
+    } else if (i == DSP_STORAGE_HISTORY_SLOTS + 3) {
         strcpy(key, KEY_NOTIFY);
         *kind = KEY_NOTIFY_REC;
+    } else {
+        strcpy(key, KEY_DOSING);
+        *kind = KEY_DOSING_REC;
     }
 }
 
@@ -305,7 +332,24 @@ static dsp_storage_status_t provision(dsp_storage_t *st, bool allow)
     return verify_all(st);
 }
 
-/* Older layout (v1: M1.3, v2: M1.4) -> current: validate the keys of the old layout,
+/* The "dosing" record written by a migration: the provisioning value (SERVICE_REQUIRED),
+ * plus the BLOCKED latch if the existing notification state shows an active
+ * RESERVOIR_BLOCKED episode (approved M1.9a: migration never enables dosing and never
+ * forgets a block). The "notify" key exists and is valid here (checked before). */
+static size_t encode_migrated_dosing(dsp_storage_t *st)
+{
+    dsp_dosing_state_t d;
+    dsp_dosing_state_defaults(&d);
+    size_t len = 0;
+    if (raw_get(st, KEY_NOTIFY, st->readback, &len) == DSP_STORAGE_OK &&
+        dsp_codec_decode_notify(st->readback, len, &st->notify_scratch) == DSP_CODEC_OK &&
+        (st->notify_scratch.cond[DSP_COND_RESERVOIR_BLOCKED].flags & DSP_COND_F_ACTIVE)) {
+        d.flags |= DSP_DOSING_F_BLOCKED;
+    }
+    return dsp_codec_encode_dosing(&d, st->buf, sizeof st->buf);
+}
+
+/* Older layout (v1: M1.3, v2: M1.4, v3: M1.5) -> current: validate the keys of the old layout,
  * provision the keys added since (unless an interrupted migration already wrote their
  * provisioning values), then rewrite the marker LAST. A newer key holding real data next
  * to an old marker is inconsistent: CORRUPT. Resumable after a power loss. */
@@ -348,7 +392,7 @@ static dsp_storage_status_t migrate(dsp_storage_t *st, size_t old_keys, bool all
         char key[8];
         key_kind_t kind;
         data_key(i, key, &kind);
-        size_t len = encode_pristine(st, kind);
+        size_t len = kind == KEY_DOSING_REC ? encode_migrated_dosing(st) : encode_pristine(st, kind);
         s = len == 0 ? DSP_STORAGE_ERR_ARG : raw_put(st, key, len);
         if (s != DSP_STORAGE_OK) {
             return s;
@@ -393,7 +437,8 @@ dsp_storage_status_t dsp_storage_open(dsp_storage_t *st, const dsp_kv_t *kv, con
             s = dsp_storage_from_codec(cs);
         } else if ((layout.layout_version != LAYOUT_CURRENT.layout_version &&
                     layout.layout_version != LAYOUT_V1_VERSION &&
-                    layout.layout_version != LAYOUT_V2_VERSION) ||
+                    layout.layout_version != LAYOUT_V2_VERSION &&
+                    layout.layout_version != LAYOUT_V3_VERSION) ||
                    layout.history_slots != LAYOUT_CURRENT.history_slots ||
                    layout.schedule_capacity != LAYOUT_CURRENT.schedule_capacity ||
                    layout.tombstone_capacity != LAYOUT_CURRENT.tombstone_capacity) {
@@ -402,6 +447,8 @@ dsp_storage_status_t dsp_storage_open(dsp_storage_t *st, const dsp_kv_t *kv, con
             s = migrate(st, DATA_KEYS_V1, allow_provision);
         } else if (layout.layout_version == LAYOUT_V2_VERSION) {
             s = migrate(st, DATA_KEYS_V2, allow_provision);
+        } else if (layout.layout_version == LAYOUT_V3_VERSION) {
+            s = migrate(st, DATA_KEYS_V3, allow_provision);
         } else {
             s = verify_all(st);
         }
@@ -567,4 +614,35 @@ dsp_storage_status_t dsp_storage_save_notify(dsp_storage_t *st, const dsp_notify
         return DSP_STORAGE_ERR_INVALID;
     }
     return dsp_storage_put(st, KEY_NOTIFY, len);
+}
+
+/* ---- Dosing state (layout v4) -------------------------------------------------------- */
+
+dsp_storage_status_t dsp_storage_load_dosing(dsp_storage_t *st, dsp_dosing_state_t *out)
+{
+    if (out == NULL) {
+        return DSP_STORAGE_ERR_ARG;
+    }
+    size_t len;
+    dsp_storage_status_t s = dsp_storage_get(st, KEY_DOSING, &len);
+    if (s != DSP_STORAGE_OK) {
+        return s;
+    }
+    dsp_codec_status_t cs = dsp_codec_decode_dosing(st->buf, len, out);
+    return cs == DSP_CODEC_OK ? DSP_STORAGE_OK : dsp_storage_from_codec(cs);
+}
+
+dsp_storage_status_t dsp_storage_save_dosing(dsp_storage_t *st, const dsp_dosing_state_t *d)
+{
+    if (st == NULL || !st->open) {
+        return DSP_STORAGE_ERR_NOT_OPEN;
+    }
+    if (d == NULL || !dsp_dosing_state_is_valid(d)) {
+        return DSP_STORAGE_ERR_INVALID;
+    }
+    size_t len = dsp_codec_encode_dosing(d, st->buf, sizeof st->buf);
+    if (len == 0) {
+        return DSP_STORAGE_ERR_INVALID;
+    }
+    return dsp_storage_put(st, KEY_DOSING, len);
 }

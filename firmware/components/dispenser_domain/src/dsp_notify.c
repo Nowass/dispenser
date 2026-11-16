@@ -270,12 +270,11 @@ dsp_notify_status_t dsp_notify_observe_battery(dsp_notify_t *n, dsp_battery_obs_
     return finish(n, changed, full ? DSP_NOTIFY_QUEUE_FULL : DSP_NOTIFY_OK);
 }
 
-dsp_notify_status_t dsp_notify_report_dosing_error(dsp_notify_t *n, const dsp_dosing_error_t *e,
-                                                   dsp_notify_clock_t clock)
+/* Queues a dosing error into RAM (no write): returns true if queued, false if counted
+ * as dropped (queue full). Sets the uncertainty flag for START/PUMP/INTERRUPTED. */
+static bool queue_dosing_error(dsp_notify_t *n, const dsp_dosing_error_t *e,
+                               dsp_notify_clock_t clock)
 {
-    if (n == NULL || !n->loaded || e == NULL || e->code < 1 || e->code > DSP_DOSEERR_MAX) {
-        return DSP_NOTIFY_ERR_ARG;
-    }
     if (e->code == DSP_DOSEERR_START_FAILED || e->code == DSP_DOSEERR_PUMP_FAILED ||
         e->code == DSP_DOSEERR_INTERRUPTED) {
         /* The volume was consumed before the pump: the estimate is now uncertain. */
@@ -283,12 +282,61 @@ dsp_notify_status_t dsp_notify_report_dosing_error(dsp_notify_t *n, const dsp_do
     }
     if (enqueue(n, DSP_NOTE_DOSING_ERROR, DSP_COND_NONE, e->code, e->requested_ul, 0,
                 e->manual ? DSP_NOTE_F_MANUAL : 0, 0, clock)) {
-        return finish(n, true, DSP_NOTIFY_OK);
+        return true;
     }
     if (n->s.dropped < UINT16_MAX) {
         n->s.dropped++;
     }
-    return finish(n, true, DSP_NOTIFY_QUEUE_FULL);
+    return false;
+}
+
+dsp_notify_status_t dsp_notify_report_dosing_error(dsp_notify_t *n, const dsp_dosing_error_t *e,
+                                                   dsp_notify_clock_t clock)
+{
+    if (n == NULL || !n->loaded || e == NULL || e->code < 1 || e->code > DSP_DOSEERR_MAX) {
+        return DSP_NOTIFY_ERR_ARG;
+    }
+    bool queued = queue_dosing_error(n, e, clock);
+    return finish(n, true, queued ? DSP_NOTIFY_OK : DSP_NOTIFY_QUEUE_FULL);
+}
+
+bool dsp_notify_report_key_known(const dsp_notify_t *n, uint64_t key)
+{
+    for (int i = 0; n != NULL && key != 0 && i < n->s.report_key_count; i++) {
+        if (n->s.report_keys[i] == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+dsp_notify_status_t dsp_notify_report_dosing_error_once(dsp_notify_t *n,
+                                                        const dsp_dosing_error_t *e,
+                                                        uint64_t key, dsp_notify_clock_t clock,
+                                                        bool *duplicate)
+{
+    if (duplicate != NULL) {
+        *duplicate = false;
+    }
+    if (n == NULL || !n->loaded || e == NULL || e->code < 1 || e->code > DSP_DOSEERR_MAX ||
+        key == 0) {
+        return DSP_NOTIFY_ERR_ARG;
+    }
+    if (dsp_notify_report_key_known(n, key)) {
+        if (duplicate != NULL) {
+            *duplicate = true;
+        }
+        return finish(n, false, DSP_NOTIFY_OK); /* already reported: nothing queued */
+    }
+    bool queued = queue_dosing_error(n, e, clock);
+    /* Remember the key (oldest dropped when full) in the same write as the event. */
+    if (n->s.report_key_count == DSP_NOTIFY_REPORT_KEYS) {
+        memmove(&n->s.report_keys[0], &n->s.report_keys[1],
+                (DSP_NOTIFY_REPORT_KEYS - 1) * sizeof n->s.report_keys[0]);
+        n->s.report_key_count--;
+    }
+    n->s.report_keys[n->s.report_key_count++] = key;
+    return finish(n, true, queued ? DSP_NOTIFY_OK : DSP_NOTIFY_QUEUE_FULL);
 }
 
 dsp_notify_status_t dsp_notify_set_device_condition(dsp_notify_t *n, dsp_condition_t cond,

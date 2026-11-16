@@ -23,6 +23,7 @@
 #include "dsp_schedule_set.h"
 #include "dsp_time.h"
 #include "dsp_notify_state.h"
+#include "dsp_dosing_state.h"
 #include "dsp_time_meta.h"
 
 #ifdef __cplusplus
@@ -36,19 +37,28 @@ enum {
     DSP_REC_TYPE_CONFIG = 4,
     DSP_REC_TYPE_TIME = 5,   /* layout v2 (M1.4) */
     DSP_REC_TYPE_NOTIFY = 6, /* layout v3 (M1.5) */
+    DSP_REC_TYPE_DOSING = 7, /* layout v4 (M1.9a) */
 };
 
 #define DSP_CODEC_VERSION 1 /* format version written by this firmware for every type */
 
 #define DSP_LAYOUT_RECORD_BYTES 7
-#define DSP_HISTORY_RECORD_BYTES 92
+/* History slot: format 2 (M1.9a, 96 B) = format 1 (92 B) + claimed volume (u32). */
+#define DSP_HISTORY_RECORD_V1_BYTES 92
+#define DSP_HISTORY_RECORD_BYTES 96
+#define DSP_HISTORY_FORMAT_V2 2
 #define DSP_SCHEDULE_ENTRY_BYTES 91
 #define DSP_TOMBSTONE_ENTRY_BYTES 65
 #define DSP_SCHEDULE_SET_HEADER_BYTES 8
 #define DSP_SCHEDULE_SET_MAX_BYTES                                                           \
     (DSP_SCHEDULE_SET_HEADER_BYTES + DSP_SCHEDULE_CAPACITY * DSP_SCHEDULE_ENTRY_BYTES +      \
      DSP_TOMBSTONE_CAPACITY * DSP_TOMBSTONE_ENTRY_BYTES)
-#define DSP_CONFIG_RECORD_BYTES 18
+/* Configuration: format 2 (M1.9a, 46 B) = format 1 (18 B) + calibration and limits. */
+#define DSP_CONFIG_RECORD_V1_BYTES 18
+#define DSP_CONFIG_RECORD_BYTES 46
+#define DSP_CONFIG_FORMAT_V2 2
+/* Dosing state (layout v4, M1.9a). */
+#define DSP_DOSING_RECORD_BYTES 52
 #define DSP_TIME_RECORD_BYTES 42
 #define DSP_NOTIFY_HEADER_BYTES 14
 #define DSP_NOTIFY_COND_BYTES 26
@@ -58,15 +68,19 @@ enum {
     (DSP_NOTIFY_HEADER_BYTES + DSP_COND_COUNT * DSP_NOTIFY_COND_BYTES +                      \
      DSP_NOTIFY_QUEUE_CAPACITY * DSP_NOTIFY_ENTRY_BYTES)
 /* Format 2 (M1.7, 758 B) = format 1 + diagnostics (4 B) + rejection log header (8 B) +
- * 4 rejection entries x 16 B. The only format written. */
+ * 4 rejection entries x 16 B. Format 3 (M1.9a, 794 B) = format 2 + report keys (4 B header
+ * + 4 x 8 B). Format 3 is the only format written. */
 #define DSP_NOTIFY_FORMAT_V1 1
 #define DSP_NOTIFY_FORMAT_V2 2
+#define DSP_NOTIFY_FORMAT_V3 3
+#define DSP_NOTIFY_RECORD_V2_BYTES                                                           \
+    (DSP_NOTIFY_RECORD_V1_BYTES + DSP_NOTIFY_DIAG_BYTES + DSP_NOTIFY_REJLOG_HEADER_BYTES +   \
+     DSP_REJECTION_LOG_CAPACITY * DSP_NOTIFY_REJECTION_BYTES)
+#define DSP_NOTIFY_REPORT_KEYS_BYTES (4 + DSP_NOTIFY_REPORT_KEYS * 8)
 #define DSP_NOTIFY_DIAG_BYTES 4
 #define DSP_NOTIFY_REJLOG_HEADER_BYTES 8
 #define DSP_NOTIFY_REJECTION_BYTES 16
-#define DSP_NOTIFY_RECORD_BYTES                                                              \
-    (DSP_NOTIFY_RECORD_V1_BYTES + DSP_NOTIFY_DIAG_BYTES + DSP_NOTIFY_REJLOG_HEADER_BYTES +   \
-     DSP_REJECTION_LOG_CAPACITY * DSP_NOTIFY_REJECTION_BYTES)
+#define DSP_NOTIFY_RECORD_BYTES (DSP_NOTIFY_RECORD_V2_BYTES + DSP_NOTIFY_REPORT_KEYS_BYTES)
 #define DSP_RECORD_MAX_BYTES DSP_SCHEDULE_SET_MAX_BYTES
 
 typedef enum {
@@ -91,7 +105,8 @@ size_t dsp_codec_encode_layout(const dsp_layout_t *layout, uint8_t *buf, size_t 
 dsp_codec_status_t dsp_codec_decode_layout(const uint8_t *buf, size_t len, dsp_layout_t *out);
 
 /* rec == NULL encodes the explicit EMPTY slot record. Decoding EMPTY returns
- * DSP_CODEC_EMPTY and leaves *out untouched. */
+ * DSP_CODEC_EMPTY and leaves *out untouched. Format 2 (96 B, M1.9a) is written; format 1
+ * (92 B, M1.2) is still read, with volume_ul = 0 ("unknown"). */
 size_t dsp_codec_encode_history(const dsp_history_record_t *rec, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_history(const uint8_t *buf, size_t len,
                                             dsp_history_record_t *out);
@@ -103,6 +118,9 @@ size_t dsp_codec_encode_schedule_set(const dsp_schedule_set_t *set, const dsp_tz
 dsp_codec_status_t dsp_codec_decode_schedule_set(const uint8_t *buf, size_t len,
                                                  const dsp_tz_t *tz, dsp_schedule_set_t *out);
 
+/* Format 2 (46 B, M1.9a) is written: format 1 + 18..21 pump_flow_ul_per_s | 22..29
+ * calibrated_at (i64) | 30..33 max_dose_ul | 34..37 max_daily_ul | 38..41 max_runtime_ms |
+ * 42..45 min_interval_s. Format 1 (18 B) is still read, with these fields 0. */
 size_t dsp_codec_encode_config(const dsp_config_t *cfg, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_config(const uint8_t *buf, size_t len, dsp_config_t *out);
 
@@ -111,7 +129,8 @@ dsp_codec_status_t dsp_codec_decode_config(const uint8_t *buf, size_t len, dsp_c
 size_t dsp_codec_encode_time(const dsp_time_meta_t *meta, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_time(const uint8_t *buf, size_t len, dsp_time_meta_t *out);
 
-/* notify, format 2 (758 B; format 1 = the first 682 B with version byte 1):
+/* notify, format 3 (794 B; format 2 = the first 758 B, format 1 = the first 682 B, with
+ * the matching version byte):
  * header 0 type | 1 version | 2..5 epoch | 6..9 next_seq | 10..11 dropped |
  * 12 flags | 13 zero; then 6 conditions x 26 B (flags, reminders, opened_at i64,
  * next_reminder_at i64, value u32, value2 u32); then 16 entries x 32 B (0..3 seq | 4 type | 5 severity |
@@ -121,8 +140,16 @@ dsp_codec_status_t dsp_codec_decode_time(const uint8_t *buf, size_t len, dsp_tim
  * at 686: rejection log 0..3 total | 4..5 lost_unread | 6 unread | 7 count;
  * at 694: 4 rejections x 16 B (0..3 seq | 4 type | 5 flags | 6..7 code | 8..9 http_status |
  * 10 error | 11 field | 12..13 attempts | 14..15 zero).
- * The decoder accepts format 1 (diagnostics and log zero) and 2; the encoder writes 2.
- * Forward-only: firmware that knows only format 1 reports format 2 as unsupported. */
+ * format 3 only, at 758: report keys 0 count | 1..3 zero | 4.. 4 x u64 key (unused: zero).
+ * The decoder accepts formats 1, 2 (missing parts zero) and 3; the encoder writes 3.
+ * Forward-only: older firmware reports a newer format as unsupported. */
+/* dosing (52 B, layout v4, M1.9a): 0 type | 1 version | 2 readiness | 3 flags |
+ * 4..7 refill_capacity | 8..11 refill_remaining | 12..15 refill_seq | 16..19 manual_volume |
+ * 20..27 manual_started_at (i64) | 28..31 manual_seq | 32..35 ledger_date (year u16, month,
+ * day) | 36..39 ledger_sum | 40..47 last_start (i64) | 48..51 next_seq. */
+size_t dsp_codec_encode_dosing(const dsp_dosing_state_t *s, uint8_t *buf, size_t cap);
+dsp_codec_status_t dsp_codec_decode_dosing(const uint8_t *buf, size_t len, dsp_dosing_state_t *out);
+
 size_t dsp_codec_encode_notify(const dsp_notify_state_t *s, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_notify(const uint8_t *buf, size_t len, dsp_notify_state_t *out);
 

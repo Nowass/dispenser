@@ -130,6 +130,7 @@ dsp_exec_status_t dsp_exec_claim(dsp_exec_t *ex, const dsp_schedule_t *schedule,
     rec.schedule_revision = schedule->revision;
     rec.scheduled_at = occ->at;
     rec.claimed_at = clock.now;
+    rec.volume_ul = schedule->amount_ul; /* durable claimed volume (M1.9a, Q11) */
 
     st = dsp_history_put(ex->cfg.store, slot, &rec);
     if (st != DSP_EXEC_OK) {
@@ -236,6 +237,62 @@ dsp_exec_status_t dsp_exec_recover(dsp_exec_t *ex, size_t *interrupted)
         }
     }
     return DSP_EXEC_OK;
+}
+
+dsp_exec_status_t dsp_exec_find_started(const dsp_exec_t *ex, size_t *slot,
+                                        dsp_history_record_t *rec)
+{
+    if (!ready(ex) || slot == NULL || rec == NULL) {
+        return DSP_EXEC_ERR_ARG;
+    }
+    const dsp_history_store_t *store = ex->cfg.store;
+    dsp_history_scan_t scan;
+    dsp_exec_status_t vst = dsp_history_scan(store, NULL, INT32_MIN, &scan);
+    if (vst != DSP_EXEC_OK) {
+        return vst;
+    }
+    for (size_t i = 0; i < store->slot_count; i++) {
+        dsp_history_record_t r;
+        dsp_store_status_t rs = store->read(store->ctx, i, &r);
+        if (rs == DSP_STORE_EMPTY) {
+            continue;
+        }
+        if (rs != DSP_STORE_OK) {
+            return DSP_EXEC_ERR_STORAGE_READ;
+        }
+        if (!dsp_history_record_is_valid(&r)) {
+            return DSP_EXEC_ERR_INTERNAL;
+        }
+        if (r.state == DSP_HISTORY_STARTED) {
+            *slot = i;
+            *rec = r;
+            return DSP_EXEC_OK;
+        }
+    }
+    return DSP_EXEC_NOT_FOUND;
+}
+
+dsp_exec_status_t dsp_exec_mark_interrupted(dsp_exec_t *ex, size_t slot,
+                                            const dsp_history_record_t *rec)
+{
+    if (!ready(ex) || rec == NULL || slot >= ex->cfg.store->slot_count ||
+        rec->state != DSP_HISTORY_STARTED) {
+        return DSP_EXEC_ERR_ARG;
+    }
+    if (ex->active.kind != DSP_EXEC_KIND_NONE) {
+        return DSP_EXEC_BUSY;
+    }
+    const dsp_history_store_t *store = ex->cfg.store;
+    dsp_history_record_t cur;
+    dsp_store_status_t rs = store->read(store->ctx, slot, &cur);
+    if (rs != DSP_STORE_OK) {
+        return rs == DSP_STORE_EMPTY ? DSP_EXEC_ERR_ARG : DSP_EXEC_ERR_STORAGE_READ;
+    }
+    if (!dsp_history_record_equal(&cur, rec)) {
+        return DSP_EXEC_ERR_ARG; /* the slot changed: never rewrite something else */
+    }
+    cur.state = DSP_HISTORY_INTERRUPTED;
+    return dsp_history_put(store, slot, &cur);
 }
 
 dsp_exec_status_t dsp_exec_lookup(const dsp_exec_t *ex, const char *schedule_id,

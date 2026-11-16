@@ -1410,14 +1410,15 @@ static dsp_notify_state_t sample_state(void)
 
 static void test_notify_codec(void)
 {
-    DSP_CHECK_EQ_INT(758, DSP_NOTIFY_RECORD_BYTES); /* format 2 (M1.7) */
+    DSP_CHECK_EQ_INT(794, DSP_NOTIFY_RECORD_BYTES); /* format 3 (M1.9a) */
+    DSP_CHECK_EQ_INT(758, DSP_NOTIFY_RECORD_V2_BYTES);
     DSP_CHECK_EQ_INT(682, DSP_NOTIFY_RECORD_V1_BYTES);
     dsp_notify_state_t s = sample_state();
     DSP_CHECK(dsp_notify_state_is_valid(&s));
     uint8_t b[DSP_NOTIFY_RECORD_BYTES];
     DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, dsp_codec_encode_notify(&s, b, sizeof b));
     /* Golden bytes of the header, one condition and one entry (little-endian). */
-    const uint8_t header[14] = {6, 2, 0x44, 0x33, 0x22, 0x11, 0x10, 0, 0, 0, 0x02, 0x01, 1, 0};
+    const uint8_t header[14] = {6, 3, 0x44, 0x33, 0x22, 0x11, 0x10, 0, 0, 0, 0x02, 0x01, 1, 0};
     DSP_CHECK(memcmp(b, header, sizeof header) == 0);
     const uint8_t cond0[26] = {1,    2,    0xF0, 0xEF, 0xFF, 0x6A, 0, 0, 0, 0, /* T0 */
                                0x70, 0x2A, 0x09, 0x6B, 0,    0,    0, 0,       /* T0 + 7 d */
@@ -1453,7 +1454,7 @@ static void test_notify_codec(void)
         dsp_codec_status_t expect;
     } bad[] = {
         {0, 5, DSP_CODEC_ERR_TYPE},
-        {1, 3, DSP_CODEC_ERR_VERSION},                         /* newer format */
+        {1, 4, DSP_CODEC_ERR_VERSION},                         /* newer format */
         {12, 2, DSP_CODEC_ERR_FIELD},                          /* unknown header flag */
         {13, 1, DSP_CODEC_ERR_FIELD},                          /* header padding */
         {14 + 26 + 18, 1, DSP_CODEC_ERR_FIELD},                /* inactive cond with payload */
@@ -2115,9 +2116,113 @@ static void test_notify_format1_compat(void)
     DSP_CHECK(e != NULL);
     if (e != NULL) {
         DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, e->len);
-        DSP_CHECK_EQ_INT(DSP_NOTIFY_FORMAT_V2, e->value[1]);
+        DSP_CHECK_EQ_INT(DSP_NOTIFY_FORMAT_V3, e->value[1]);
     }
     DSP_CHECK(in_sync());
+}
+
+/* ---- M1.9a: dose-bound (idempotent) reports, notify format 3 ------------------------- */
+
+static void test_report_once_idempotent(void)
+{
+    fresh();
+    dsp_dosing_error_t e = {DSP_DOSEERR_INTERRUPTED, false, 1500};
+    bool dup = true;
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error_once(&n, &e, 0x1234, at(T0), &dup));
+    DSP_CHECK(!dup);
+    DSP_CHECK_EQ_INT(1, count_type(DSP_NOTE_DOSING_ERROR));
+    DSP_CHECK(n.s.flags & DSP_NOTIFY_F_ESTIMATE_UNCERTAIN);
+    DSP_CHECK(dsp_notify_report_key_known(&n, 0x1234));
+    DSP_CHECK(in_sync());
+    /* Same key again (e.g. recovery repeated after a power loss): nothing queued, no write. */
+    kv.sets = 0;
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error_once(&n, &e, 0x1234, at(T0), &dup));
+    DSP_CHECK(dup);
+    DSP_CHECK_EQ_INT(1, count_type(DSP_NOTE_DOSING_ERROR));
+    DSP_CHECK_EQ_INT(0, kv.sets);
+    /* Survives a restart. */
+    boot();
+    DSP_CHECK(dsp_notify_report_key_known(&n, 0x1234));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error_once(&n, &e, 0x1234, at(T0), &dup));
+    DSP_CHECK(dup);
+    DSP_CHECK_EQ_INT(1, count_type(DSP_NOTE_DOSING_ERROR));
+    /* Key 0 is not a key. */
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_ERR_ARG, dsp_notify_report_dosing_error_once(&n, &e, 0, at(T0), &dup));
+    /* A power cut before the write lands: neither the event nor the key are durable; the
+     * repeat queues it (exactly once overall). */
+    fresh();
+    kv.power_cut_after_sets = 1;
+    kv.durable_on_set = false;
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_ERR_STORAGE,
+                     dsp_notify_report_dosing_error_once(&n, &e, 0x55, at(T0), &dup));
+    boot();
+    DSP_CHECK(!dsp_notify_report_key_known(&n, 0x55));
+    DSP_CHECK_EQ_INT(0, count_type(DSP_NOTE_DOSING_ERROR));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error_once(&n, &e, 0x55, at(T0), &dup));
+    DSP_CHECK(!dup);
+    DSP_CHECK_EQ_INT(1, count_type(DSP_NOTE_DOSING_ERROR));
+    /* The ring keeps the 4 most recent keys (oldest dropped). */
+    fresh();
+    for (uint64_t k = 1; k <= 6; k++) {
+        DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error_once(&n, &e, k * 100, at(T0), &dup));
+    }
+    DSP_CHECK_EQ_INT(4, n.s.report_key_count);
+    DSP_CHECK(!dsp_notify_report_key_known(&n, 100));
+    DSP_CHECK(!dsp_notify_report_key_known(&n, 200));
+    DSP_CHECK(dsp_notify_report_key_known(&n, 300));
+    DSP_CHECK(dsp_notify_report_key_known(&n, 600));
+    /* Queue full: the event is counted as dropped, and the key still recorded (a repeat
+     * does not count it twice). */
+    fresh();
+    for (int k = 0; k < DSP_NOTIFY_QUEUE_CAPACITY; k++) {
+        dsp_dosing_error_t f = {DSP_DOSEERR_PUMP_FAILED, false, 10};
+        DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error(&n, &f, at(T0)));
+    }
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_QUEUE_FULL,
+                     dsp_notify_report_dosing_error_once(&n, &e, 0x77, at(T0), &dup));
+    DSP_CHECK_EQ_INT(1, n.s.dropped);
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error_once(&n, &e, 0x77, at(T0), &dup));
+    DSP_CHECK(dup);
+    DSP_CHECK_EQ_INT(1, n.s.dropped);
+}
+
+static void test_notify_codec_v3_keys(void)
+{
+    dsp_notify_state_t s = sample_state_v2();
+    s.report_key_count = 2;
+    s.report_keys[0] = 0x0102030405060708ull;
+    s.report_keys[1] = 0xFFFFFFFFFFFFFFFFull;
+    DSP_CHECK(dsp_notify_state_is_valid(&s));
+    uint8_t b[DSP_NOTIFY_RECORD_BYTES];
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, dsp_codec_encode_notify(&s, b, sizeof b));
+    const uint8_t tail[12] = {2, 0, 0, 0, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01};
+    DSP_CHECK(memcmp(b + 758, tail, sizeof tail) == 0);
+    dsp_notify_state_t out;
+    DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_notify(b, sizeof b, &out));
+    DSP_CHECK(state_equal(&s, &out));
+    DSP_CHECK(out.report_keys[1] == 0xFFFFFFFFFFFFFFFFull);
+    size_t bad[] = {758 + 1, 758 + 4 + 16}; /* padding; an unused key slot not zero */
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        uint8_t m[DSP_NOTIFY_RECORD_BYTES];
+        memcpy(m, b, sizeof m);
+        m[bad[i]] = 1;
+        DSP_CHECK_EQ_INT(DSP_CODEC_ERR_FIELD, dsp_codec_decode_notify(m, sizeof m, &out));
+    }
+    uint8_t m[DSP_NOTIFY_RECORD_BYTES];
+    memcpy(m, b, sizeof m);
+    m[758] = 5; /* count > capacity */
+    DSP_CHECK_EQ_INT(DSP_CODEC_ERR_FIELD, dsp_codec_decode_notify(m, sizeof m, &out));
+    memcpy(m, b, sizeof m);
+    memcpy(m + 758 + 12, m + 758 + 4, 8); /* duplicate key */
+    DSP_CHECK_EQ_INT(DSP_CODEC_ERR_FIELD, dsp_codec_decode_notify(m, sizeof m, &out));
+    /* Format 2 (M1.7) still decodes, without keys. */
+    s.report_key_count = 0;
+    s.report_keys[0] = s.report_keys[1] = 0;
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, dsp_codec_encode_notify(&s, b, sizeof b));
+    b[1] = DSP_NOTIFY_FORMAT_V2;
+    DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_notify(b, DSP_NOTIFY_RECORD_V2_BYTES, &out));
+    DSP_CHECK(state_equal(&s, &out));
+    DSP_CHECK_EQ_INT(DSP_CODEC_ERR_SIZE, dsp_codec_decode_notify(b, DSP_NOTIFY_RECORD_BYTES, &out));
 }
 
 int main(void)
@@ -2163,5 +2268,7 @@ int main(void)
     DSP_RUN(test_budget_leaves_entries_untouched);
     DSP_RUN(test_notify_codec_v2);
     DSP_RUN(test_notify_format1_compat);
+    DSP_RUN(test_report_once_idempotent);
+    DSP_RUN(test_notify_codec_v3_keys);
     return dsp_test_finish();
 }

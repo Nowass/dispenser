@@ -11,6 +11,8 @@ set(DSP_DOMAIN_SRCS
     "src/dsp_codec.c"
     "src/dsp_config.c"
     "src/dsp_connectivity.c"
+    "src/dsp_dosing.c"
+    "src/dsp_dosing_state.c"
     "src/dsp_exec.c"
     "src/dsp_history.c"
     "src/dsp_https_transport.c"

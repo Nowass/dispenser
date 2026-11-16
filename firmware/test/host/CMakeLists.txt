@@ -76,6 +76,7 @@ dsp_add_host_test(test_time test_time.c support/fake_kv.c)
 dsp_add_host_test(test_notify test_notify.c support/fake_kv.c)
 dsp_add_host_test(test_proto test_proto.c)
 dsp_add_host_test(test_https test_https.c support/fake_kv.c)
+dsp_add_host_test(test_dosing test_dosing.c support/fake_kv.c)
 
 # The engine never consults the C library timezone: identical results under any host TZ.
 foreach(tz "America/New_York" "Asia/Kathmandu")

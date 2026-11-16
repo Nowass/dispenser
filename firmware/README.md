@@ -4,9 +4,9 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: M1.1–M1.5 and M1.7 (recurrence, execution history, persistent storage, time
-management, notification engine, HTTPS notification transport) committed; M1.8 (integration
-and robustness tests) implemented, awaiting review.**
+**Status: M1.1–M1.5, M1.7 and M1.8 (recurrence, execution history, persistent storage, time
+management, notification engine, HTTPS notification transport, integration tests) committed;
+M1.9a (Dosing Service, storage layout v4) implemented, awaiting review.**
 At run time the firmware still only logs its identification. The domain and platform
 components are compiled into the image's component libraries but not called by
 `app_main` (optional diagnostics exist, off by default), Wi-Fi is never started, and
@@ -52,13 +52,20 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   end-to-end harness (real domain code, real TLS, the committed Worker under `wrangler dev`,
   local D1, fake Gmail, fault-injection proxy, 1,000 randomized sessions). See
   [Verification levels](#verification-levels-m18).
+- (M1.9a) **Dosing Service** (domain only): the sole owner of the pump port; readiness
+  (default SERVICE_REQUIRED), reservoir BLOCKED latch, restart-safe refill, durable manual
+  in-flight marker, calibration and safety limits (per dose, daily per local date, runtime,
+  minimum interval), idempotent recovery of interrupted doses; storage layout v4 (`dosing`
+  record) with history format 2 (claimed volume), configuration format 2 and `notify`
+  format 3. No real pump driver. See [Dosing Service](#dosing-service-m19a).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
 ### Not implemented
 
 Dosing service task (wiring of recurrence, coordinator, storage, time, stock, limits and
-pump) and the application service that calls the M1.7 connectivity session, power manager
+pump) and the application service that calls the Dosing Service and the M1.7 connectivity
+session (M1.9b), the real pump GPIO driver with hardware cutoff, power manager
 and deep-sleep lifecycle, production credential provisioning (authenticated BLE,
 per-device credentials), battery measurement, MONTHLY recurrence, event journal, BLE, GPIO
 and motor control, service mode, OTA (update client and rollback; only the partitions
@@ -178,6 +185,8 @@ firmware/
 │   │   ├── include/dsp_notify_proto.h  protocol-v1 encoder and response classifier (M1.7)
 │   │   ├── include/dsp_https_transport.h  HTTPS transport over an injected HTTP port (M1.7)
 │   │   ├── include/dsp_connectivity.h  connectivity session: sync, then delivery (M1.7)
+│   │   ├── include/dsp_dosing_state.h  persistent dosing record model (M1.9a)
+│   │   ├── include/dsp_dosing.h      Dosing Service: sole pump owner (M1.9a)
 │   │   └── src/                      matching .c files
 │   └── dispenser_platform/     ESP-IDF adapters (never in the host build)
 │       ├── Kconfig                   DSP_SNTP_SERVER (M1.4), DSP_NOTIFY_URL, DSP_NOTIFY_HEALTH_URL (M1.7)
@@ -200,7 +209,8 @@ firmware/
 │   ├── test_notify.c              notification engine and reservoir tests (M1.5, + M1.7 rejections)
 │   ├── test_proto.c               protocol encoder and response classifier (M1.7)
 │   ├── test_https.c               HTTPS transport and connectivity session (M1.7)
-│   └── test_proto_vectors.c       runs ../../test-vectors/notification_protocol_v1.txt (M1.8)
+│   ├── test_proto_vectors.c       runs ../../test-vectors/notification_protocol_v1.txt (M1.8)
+│   └── test_dosing.c              Dosing Service (M1.9a)
 ├── test/integration/           local end-to-end harness (M1.8, see its README)
 │   ├── notify_harness.c           real domain code driven over stdin
 │   ├── posix_https_port.[ch]      host HTTP port: real TLS (OpenSSL), test CA, timeouts
@@ -625,16 +635,17 @@ dosing service (future) ──► dsp_exec ──► dsp_history_store_t ─┐
   ESP-IDF docs note that its recovery may erase and rewrite some pages. This is internal
   library behavior that the firmware neither performs nor can prevent.
 
-### Storage layout v3 (one NVS namespace, `dispenser`, partition `nvs`)
+### Storage layout v4 (one NVS namespace, `dispenser`, partition `nvs`)
 
 | Key | Content | Size |
 |---|---|---|
-| `layout` | layout marker (version 3, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
-| `h00` … `h31` | execution history slot: M1.2 record or the explicit EMPTY record | 92 B each |
+| `layout` | layout marker (version 4, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
+| `h00` … `h31` | execution history slot: M1.2 record (format 2 since M1.9a: + claimed volume) or the explicit EMPTY record | 96 B each (format 1: 92 B) |
 | `sched` | the whole schedule set (schedules + deleted-ID tombstones + set revision) | 8 … 2,504 B |
-| `config` | device configuration | 18 B |
+| `config` | device configuration (format 2 since M1.9a: + pump calibration and safety limits) | 46 B (format 1: 18 B) |
 | `time` | time metadata (M1.4): last sync, high-water time, rollback hold, last correction, dosing floor | 42 B |
-| `notify` | notification state (M1.5): ID epoch and sequence, condition latches, 16-entry queue; since M1.7 (format 2) also the transport diagnostics and the 4-entry rejection log | 758 B (format 1: 682 B) |
+| `notify` | notification state (M1.5): ID epoch and sequence, condition latches, 16-entry queue; since M1.7 (format 2) also the transport diagnostics and the 4-entry rejection log; since M1.9a (format 3) the dose-bound report keys | 794 B (format 2: 758 B, format 1: 682 B) |
+| `dosing` | dosing state (M1.9a, layout v4): readiness, BLOCKED latch, refill intent, manual in-flight marker, daily ledger, last pump start | 52 B |
 
 **Explicit presence (approved):** on first boot every key is written with its
 provisioning value (EMPTY slots, empty set, default configuration), then the marker.
@@ -659,14 +670,16 @@ in place for maintenance (no repair tool exists yet).
 
 Every record: byte 0 = type (1 layout, 2 history, 3 schedule set, 4 config, 5 time,
 6 notify), byte 1 =
-format version (1; `notify` is at format 2 since M1.7 and still reads format 1). Decoders require the exact length, a known type and version, valid
+format version (1; since M1.9a `notify` is at format 3, `h00`–`h31` and `config` at format 2;
+older formats are still read and upgraded by the next write). Decoders require the exact length, a known type and version, valid
 fields and zero padding. Encoders never produce an invalid record.
 
 ```text
-history slot (92 B):  0 type | 1 ver | 2 state (0=EMPTY,1=STARTED,2=COMPLETED,3=FAILED,
+history slot (96 B):  0 type | 1 ver (2) | 2 state (0=EMPTY,1=STARTED,2=COMPLETED,3=FAILED,
                       4=INTERRUPTED) | 3 id_len | 4..67 id (zero padded) | 68..69 year |
                       70 month | 71 day | 72..75 revision | 76..83 scheduled_at (i64) |
-                      84..91 claimed_at (i64). EMPTY: state 0 and bytes 3..91 zero.
+                      84..91 claimed_at (i64) | 92..95 claimed volume µl (format 2; format 1
+                      = the first 92 B, volume unknown = 0). EMPTY: state 0, rest zero.
 schedule set:         0 type | 1 ver | 2..5 set revision | 6 count (<=16) |
                       7 tombstones (<=16) | count x entry | tombstones x id
   entry (91 B):       0 id_len | 1..64 id | 65..68 revision | 69 enabled (0/1) |
@@ -674,9 +687,11 @@ schedule set:         0 type | 1 ver | 2..5 set revision | 6 count (<=16) |
                       81..84 interval | 85 weekday mask | 86 has_end (0/1) |
                       87..90 end date (zero when absent)
   tombstone (65 B):   0 id_len | 1..64 id
-config (18 B):        0 type | 1 ver | 2..5 revision | 6..9 reservoir capacity µl |
+config (46 B):        0 type | 1 ver (2) | 2..5 revision | 6..9 reservoir capacity µl |
                       10..13 estimated remaining µl | 14 low-stock % | 15..16 NTP interval h |
-                      17 notification mask
+                      17 notification mask | 18..21 pump flow µl/s | 22..29 calibrated_at (i64) |
+                      30..33 max dose µl | 34..37 max daily µl | 38..41 max runtime ms |
+                      42..45 min interval s (format 2; format 1 = the first 18 B, these 0)
 layout (7 B):         0 type | 1 ver | 2..3 layout version | 4 history slots |
                       5 schedule capacity | 6 tombstone capacity
 time (42 B):          0 type | 1 ver | 2..9 last_sync | 10..17 high_water | 18..25 hold_until |
@@ -696,6 +711,12 @@ notify (758 B, format 2; format 1 = the first 682 B with version byte 1):
   log header (8 B):   0..3 total (saturating) | 4..5 lost_unread | 6 unread | 7 count (<= 4)
   rejection (16 B):   0..3 seq | 4 type | 5 entry flags | 6..7 code | 8..9 HTTP status (400..499) |
                       10 error | 11 field | 12..13 attempts | 14..15 zero (unused slots all zero)
+  report keys (36 B): 0 count (<= 4) | 1..3 zero | 4 x u64 dose-bound report key (format 3)
+dosing (52 B):        0 type (7) | 1 ver | 2 readiness (1 READY, 2 SERVICE_REQUIRED) | 3 flags
+                      (1 BLOCKED, 2 REFILL_PENDING, 4 MANUAL_ACTIVE) | 4..7 refill capacity |
+                      8..11 refill remaining | 12..15 refill seq | 16..19 manual volume |
+                      20..27 manual started_at (i64) | 28..31 manual seq | 32..35 ledger date |
+                      36..39 ledger sum µl | 40..47 last pump start (i64) | 48..51 next seq
 ```
 
 Golden byte vectors for history, configuration and schedule set (computed independently
@@ -718,6 +739,10 @@ extra CRC would only re-check what NVS already checks.
 | Automatic dose: claim + reservoir consumption (M1.5 order) | `hNN` (claim), then `config`, then pump | **no**: two keys, ordered so that a cut is safe. The claim comes first (dedup safety). The full requested volume is subtracted **before** the pump runs, so a cut after the claim leaves the pump off and the estimate correct, and a cut after the consumption can only make the estimate too low, never too high. |
 | Notification event: latch + enqueue + sequence (M1.5) | `notify` | yes: one record |
 | Permanent rejection: log entry + queue removal (M1.7) | `notify` | yes: one record, written before anything else happens |
+| Automatic dose (M1.9a order) | `hNN` (claim + volume), `dosing` (ledger, last start), `config` (consumption → permit), pump, `hNN` (outcome) | **no**: restricting writes first, the enabling write (permit) last; a cut can only cost a dose or make accounting stricter |
+| Manual dose (M1.9a) | `dosing` (marker + ledger + last start), `config`, pump, `dosing` (marker cleared) | **no**: same rule; the marker makes the interruption recoverable |
+| Interruption report (M1.9a recovery) | `notify` (event + report key), then `hNN` / `dosing` cleared | report first and keyed: a repeat is idempotent, never lost |
+| Refill (M1.9a) | `dosing` (intent) → `notify` → `config` → `dosing` (latch + intent cleared) | **no**: roll-forward; dosing disabled until the last write |
 
 Every write is: encode → `set` → `commit` → read back → compare bytes. Any failure
 returns an error; the schedule repository then refuses changes until it re-reads the
@@ -750,10 +775,21 @@ with injected faults and restarts always left exactly the old or the new set.
 | `time_sync_interval_h` | NTP interval (confirmed: about 24–48 h) | 24 | 24–48 |
 | `notify_mask` | low reservoir, low battery, device error notifications | all on | 3 bits |
 
-The defaults mean "reservoir not configured", so a future stock check blocks every dose
-until the user configures and refills. **Not in v1** (proposed for their milestones,
-with a new schema version):
-- pump calibration (µl/s, timestamp, FR-011/012);
+Format 2 (M1.9a) adds the pump calibration and safety limits, all **0 = not configured**
+(no production defaults are invented):
+
+| Field | Meaning | Required for pump activation |
+|---|---|---|
+| `pump_flow_ul_per_s` | calibrated flow (FR-011) | > 0 |
+| `calibrated_at` | trusted UTC of the calibration | ≠ 0, valid instant |
+| `max_dose_ul` | per-dose limit (FR-016) | > 0 |
+| `max_daily_ul` | per local day (Europe/Prague) | ≥ `max_dose_ul` |
+| `max_runtime_ms` | per dose | > 0 and ≤ the platform's hardware cutoff |
+| `min_interval_s` | between two pump starts | ≥ 1 |
+
+The defaults mean "reservoir not configured" and "pump not configured", so no dose can run
+until the user configures, calibrates, sets the limits and makes the device READY. **Not in
+the configuration** (proposed for their milestones):
 - battery thresholds and measurement constants;
 - device identity (e.g. a device UUID for the notification relay);
 - Wi-Fi SSID, the notification endpoint and alert policy.
@@ -782,12 +818,19 @@ first full flash; no field device exists.
 
 ### Schema migration strategy
 
-**Layout v1/v2 → v3 (M1.4 and M1.5, implemented and tested):** a v1 marker (M1.3: no
-`time`, no `notify`) or a v2 marker (M1.4: no `notify`) with valid data is migrated. The
-newer keys may be absent, or all-zero as left by an interrupted migration:
-- the missing keys are provisioned with zeros (`time`, then `notify`);
-- the marker is rewritten as v3 **last**;
+**Layout v1/v2/v3 → v4 (M1.4, M1.5, M1.9a; implemented and tested):** a v1 marker (M1.3: no
+`time`, `notify`, `dosing`), a v2 marker (M1.4: no `notify`, `dosing`) or a v3 marker (M1.5:
+no `dosing`) with valid data is migrated. The newer keys may be absent, or hold their
+provisioning value as left by an interrupted migration:
+- the missing keys are provisioned (`time`, `notify`, then `dosing`);
+- `dosing` is provisioned **SERVICE_REQUIRED** (never enabling dosing), with the BLOCKED
+  latch set if the existing `notify` record has an active RESERVOIR_BLOCKED episode;
+- the marker is rewritten as v4 **last**;
 - a power cut before the marker is resumed at the next boot.
+
+Record formats inside a layout: history 1 → 2, configuration 1 → 2 and `notify` 1/2 → 3 are
+read as before (new fields 0) and upgraded by the next write of that record; no migration
+step is needed.
 
 Without write permission the open reports `ERR_MIGRATION_REQUIRED` and writes nothing. An old
 marker next to a newer key with real data is `CORRUPT`. Older firmware reading a newer layout
@@ -799,7 +842,8 @@ reports `UNSUPPORTED` (intended).
   migration is detectable and resumable.
 - An older firmware that finds a newer version reports `ERR_UNSUPPORTED`, disables
   automatic dosing and leaves the data untouched. Downgrades are therefore not supported
-  without maintenance.
+  without maintenance. **Rollback limitation (R3):** firmware older than M1.9a cannot read
+  layout v4 or the new record formats; a future OTA must never roll back across them.
 - Changing slot counts or capacities is a layout change, which needs a migration.
 
 ### Optional boot smoke test
@@ -1116,6 +1160,110 @@ rejection log) is the `notify` record (758 B), written only when something chang
   rejection log (about +76 B); caller-owned. No heap, no globals; every loop is bounded by
   16 entries × 6 conditions (and 4 log entries).
 
+## Dosing Service (M1.9a)
+
+Pure domain code (`dsp_dosing`, `dsp_dosing_state`) over the M1.2 coordinator, M1.3 storage,
+M1.5 reservoir accounting and notification engine. It is the **sole owner of the pump port**
+(`dsp_pump_port_t`: `run(runtime_ms)` and `force_off()`); nothing else can reach the pump.
+**There is no real pump driver yet** (GPIO, hardware cutoff and pin map are hardware-review
+items); the host tests use a fake pump. Nothing calls the service from `app_main`.
+
+### Gates (all must be open for any pump activation)
+
+| Gate | Opened by |
+|---|---|
+| dosing record loaded, no storage failure earlier in this wake (DEGRADED) | a clean boot |
+| readiness READY (a new or migrated record is **SERVICE_REQUIRED**) | `dsp_dosing_set_readiness(READY)`, which re-checks every gate below except the clock |
+| BLOCKED latch clear (FR-007/022; also blocks manual doses, Q7) | a completed refill only |
+| no refill pending, no manual marker (recovery not yet run) | `dsp_dosing_recover()` |
+| trusted clock | M1.4 timekeeper |
+| configuration format 2 with valid calibration and limits | the user (future BLE); missing values are a diagnostic, never BLOCKED |
+| configured reservoir (capacity > 0) | the user; never BLOCKED |
+
+### Limits (overflow-safe 64-bit arithmetic)
+
+- **Per dose:** volume ≤ `max_dose_ul`; runtime = ⌈volume × 1000 / flow⌉ ms ≤ `max_runtime_ms`
+  ≤ the platform's hardware cutoff (passed at init; 0 = unknown = never actuates).
+- **Daily:** per Europe/Prague local date of the trusted clock. The ledger keeps the
+  **highest** local date seen: midnight starts a new budget only when the local date is
+  greater; a clock moved back to an earlier date keeps counting against the highest date
+  (never a fresh budget). DST days (23/25 h) are simply one local date.
+- **Interval:** `now ≥ last_start + min_interval_s`; a clock behind the last start waits.
+  `last_start` is durable, so the cooldown survives restarts and power loss.
+- **Untrusted clock:** no activation, ledger untouched.
+
+### Write order (approved: restricting before enabling)
+
+| Dose | Writes |
+|---|---|
+| automatic | claim `hNN` (STARTED, **claimed volume**) → `dosing` (ledger, last start) → `config` (consumption → single-use permit) → permit redeemed → pump → fault report (if any) → `hNN` outcome |
+| manual | `dosing` (marker {volume, start, seq} + ledger + last start) → `config` (permit) → pump → fault report → `dosing` (marker cleared) |
+| uncovered automatic dose | `dosing` (BLOCKED latch) → `notify` (RESERVOIR_BLOCKED); nothing claimed |
+
+A power cut can only cost a dose or make the accounting stricter. The fake pump checks at
+every activation that the claim or marker (with the volume), the ledger, the last start and
+the consumption of exactly that volume are **durable**.
+
+### Refill (restart-safe roll-forward)
+
+`dosing` (intent: target capacity/remaining) → `notify` (`dsp_notify_on_refill`: uncertainty
+cleared, BLOCKED closed, LOW re-evaluated) → `config` (estimate; skipped if already equal) →
+`dosing` (latch and intent cleared together). Dosing is enabled only after the last write;
+a cut anywhere leaves the intent pending (dosing disabled) and `dsp_dosing_recover()`
+completes it (every step idempotent).
+
+### Recovery (idempotent)
+
+At boot, `dsp_dosing_recover()`: completes a pending refill; then for every interrupted
+automatic dose (history STARTED) and an active manual marker, **reports** `DOSING_ERROR /
+INTERRUPTED` with the **durable claimed volume** (format-1 records: 0 = unknown, never
+reconstructed from the current schedule) and only then rewrites the record / clears the
+marker. Reports are keyed per dose (`dsp_notify_report_dosing_error_once`, `notify` format 3
+keeps the last 4 keys, written in the same atomic write as the event), so a recovery repeated
+after a power loss never loses a report and never queues a second one. Recovery never calls
+the pump and never changes the reservoir estimate.
+
+### Storage failures and lost reports (limitation)
+
+- **Dosing disabled for the wake:** any storage failure inside the service (including a
+  `notify` write that fails while reporting a dose error) closes the `DEGRADED` gate until
+  the next boot reloads the state. Neither automatic nor manual doses run.
+- **Never repeated:** a claimed occurrence is never executed again (STARTED, FAILED and
+  INTERRUPTED all block it), and a manual dose is never re-issued by the firmware.
+- **Durable source kept:** if a dose-bound report (pump fault, storage error after the claim)
+  cannot be persisted, the service **keeps** the dose's STARTED record or manual marker
+  instead of finishing or clearing it. The next boot then reports the dose as
+  `INTERRUPTED`, with its durable volume, exactly once. If the RAM copy of the report is
+  flushed by a later `notify` write in the same wake, its key is durable and recovery adds
+  nothing. Either way exactly one report results.
+- **Not recoverable:** a report whose dose left **no** durable source is held only in RAM
+  and is lost at a restart. This covers a claim or manual-marker write that failed before
+  anything restricting was written: no pump run, no estimate change. Recovery does not
+  invent a report in that case. The only remaining signal is the storage condition, once a
+  `notify` write succeeds, plus the missing history entry. A persistent event journal is a
+  later milestone (Q10).
+- **Conservative over-report:** a dose whose final write failed (`hNN` outcome or marker
+  clear), or whose fault report could not be persisted, is reported as `INTERRUPTED` at the
+  next boot even if it completed or never pumped. The `INTERRUPTED` report sets the
+  uncertainty flag.
+
+### Hardware dependencies (not decidable on the host)
+
+Limit values (pump characterization), the hardware cutoff mechanism and its maximum, the gate
+pin and its reset/brownout/deep-sleep behavior, watchdog timeouts relative to the cutoff, and
+the brownout threshold under motor inrush. Until then provisioning keeps every limit at 0, so
+no pump can be activated.
+
+### Design consequence for M1.9b
+
+Two schedules due at the same time run one after another only if `min_interval_s` allows it;
+otherwise the second is refused (LIMIT, **not claimed**) and the Application Service must
+re-evaluate it after the interval, inside its due window. Once the window has passed, the
+coordinator reports it as `MISSED` permanently: never dosed later, never caught up, and the
+same after restarts (tested). M1.9a writes no record for a missed occurrence; MISSED is
+derived from the occurrence time. A durable missed-occurrence event belongs to the event
+journal (Q10).
+
 ## HTTPS notification transport and connectivity session (M1.7)
 
 Pure domain code (`dsp_notify_proto`, `dsp_https_transport`, `dsp_connectivity`, extensions
@@ -1359,12 +1507,13 @@ Current host tests (CTest names):
 | `test_recurrence_vectors_TZ_*` | the same vectors with host `TZ=America/New_York` and `TZ=Asia/Kathmandu` (host timezone has no effect) |
 | `test_recurrence` | day arithmetic vs a naive calendar walk 1999–2101, jump search vs brute force (600 random schedules), buffer paging, argument errors, extreme instants and API range boundaries, identity across edits |
 | `test_exec` | execution coordinator and history: normal run, duplicates, restarts, power loss before and after the durable claim, write/commit/read/read-back failures, edits, same-instant schedules, dates and clock rollback, invalid clock, due window, manual independence, capacity/retention, corruption, invalid input; a randomized 60-day run with injected faults and restarts (no duplicate or late authorization) and a fault-free 200-day run (every occurrence exactly once) |
-| `test_storage` | persistent storage (including the v1→v3 and v2→v3 migrations): first boot and provisioning (incl. power loss after every write), configuration save/reload and validation, schedule create/edit/delete with revision and ID rules, capacity and tombstone ring, power loss before/after commit (NVS-like and staged modes), marker loss, invalid/truncated/oversized/foreign records, unsupported versions, duplicate IDs, M1.2 coordinator on persistent history (missing slot = corruption, never empty), read/write/commit/no-space/read-back failures, golden bytes, maximum record sizes, randomized operation sequences with faults (always old or new set) |
+| `test_storage` | persistent storage (including the v1/v2→v3 and v1/v2/v3→v4 migrations, history and configuration format 2 golden bytes): first boot and provisioning (incl. power loss after every write), configuration save/reload and validation, schedule create/edit/delete with revision and ID rules, capacity and tombstone ring, power loss before/after commit (NVS-like and staged modes), marker loss, invalid/truncated/oversized/foreign records, unsupported versions, duplicate IDs, M1.2 coordinator on persistent history (missing slot = corruption, never empty), read/write/commit/no-space/read-back failures, golden bytes, maximum record sizes, randomized operation sequences with faults (always old or new set) |
 | `test_time` | clock trust (first boot, deep sleep vs power loss, anomalies), sync interval 24/48 h, Wi-Fi and NTP failures with bounded backoff, implausible NTP, long outage (60 days of dosing in holdover), small/large forward/backward corrections, rollback hold (persisted, lifted), jumped-over protection, DST, restarts around a dose, late wake, storage and clock-step failures, Wi-Fi session lifecycle, wake planning; two randomized multi-year runs (realistic RTC; RTC glitches) with end-to-end dosing: never the same occurrence twice, never twice on the same true day under the trust assumption |
 
 | `test_notify` | notification engine (M1.5, extended in M1.7): reservoir threshold, hysteresis, refill, battery, dosing and device errors, deduplication without writes, payload freshness (latest value until the first attempt, frozen afterwards), freeze surviving power loss after the receiver accepted (same ID, same payload, nothing lost) and zero transport calls when the freeze write fails, Wi-Fi failure, ACK, uncertain delivery and retry with the identical ID, durable before sent, restarts, power loss during queue updates and after an ACK, weekly reminders, backward/forward clock corrections, unknown clock, capacity exhaustion and overflow report, priority and no CRITICAL eviction, 120-day outage, manual dose consumption, single-use dose permits, uncertainty set by dosing errors and cleared by refill, golden bytes and strict decoding of `notify`, and a randomized 4000-step run with faults and restarts (one content per ID); M1.7: permanent rejection logged and removed in one write (also with the write failing outright, landing without confirmation, and a power cut at every write position: never lost, never both queued and logged), at most 2 rejections per session, log overflow with `lost_unread` and acknowledgement, diagnostic flags surviving restarts and their clearing conditions, a rejection without a 4xx treated as FAILED, the session budget leaving unstarted entries untouched, `notify` format-2 golden bytes and strict decoding, format-1 records read and upgraded |
 | `test_proto` | protocol v1 (M1.7): golden request bodies (incl. the PROTOCOL.md example, every code name, extreme values, 48-bit device ID), refusal of invalid notes and too-small buffers, every response rule (strict 200/201 acknowledgement with the exact production bodies, R1 rules for 400/401/404/405/409/413/415/3xx/429/5xx, connect/TLS/send/no-response phases), and 20,000 fuzzed bodies (no crash, no ACK/REJECTED without the confirming body) |
 | `test_proto_vectors` | the shared protocol v1 vectors (M1.8, also run by the backend's Vitest): exact request bodies and canonical payloads, notes the encoder must refuse, the firmware classification of every backend response (byte-exact bodies) and of synthetic responses |
+| `test_dosing` | Dosing Service (M1.9a) over the real coordinator, storage and engine with a fake pump that verifies complete durable state at every activation: default SERVICE_REQUIRED and the checked READY transition, every missing/invalid calibration or limit (no actuation, never BLOCKED), overflow-safe runtime, write order and durable claimed volume, same-time schedules and the due window, per-dose/runtime/daily/interval limits, midnight, both DST days, rollback and untrusted time, restart in cooldown, BLOCKED latch (automatic and manual refused until refill), refill with a power cut at every write (dosing disabled until complete), pump faults, storage failures at every write (DEGRADED), a dose report whose `notify` write fails (durable source kept, dosing disabled for the wake, exactly one report whether flushed in the wake or recovered at boot, never repeated) and reports with no durable source (not invented), a refused same-time dose that becomes MISSED without catch-up, **exhaustive power-loss matrices for automatic and manual doses with a second cut inside recovery** (never a pump run in recovery, interruption reported exactly once with the durable volume, estimate unchanged), format-1 history recovery, and a 3000-step randomized run with cuts, restarts, refills and clock steps |
 | `test_https` | HTTPS transport and connectivity session (M1.7) over fakes: exact body and token handed to the port, token wiped after every request, token validation (length, spaces, control characters); **systemic 401/404/405/413/415, ambiguous 400, mismatched 409, redirects, 429 and 5xx never drain the queue** (20 sessions each, then recovery); event-specific 409/400 removed and logged; mismatched acknowledgement UNCERTAIN, then duplicate ACK with an identical payload; timeout after the backend accepted plus power loss; connect/TLS failures; the 60 s budget with a monotonic clock; session gating: dosing/permit/BLE guard, next-dose distance, regular sync vs CRITICAL on an existing wake, the 1-hour limit, the Wi-Fi backoff, untrusted time (nothing sent) vs trusted HOLDOVER, missing token, Wi-Fi always shut down |
 
 Python tool test (no ESP-IDF needed; the real-generator case runs inside an ESP-IDF shell):
@@ -1428,6 +1577,7 @@ alternative to the native setup, not a requirement.
 | ESP-IDF HTTP port, device ID, `nvs_sec` credential providers (M1.7) | n/a (ESP-IDF only) | compiled; linked with the optional diagnostic | **not run** (no TLS on a real network yet) |
 | Developer credential provisioning tool | tested with dummy values (stub and real `nvs_partition_gen`) | n/a | image never flashed |
 | Integration: domain + real TLS + committed Worker + local D1 + fake Gmail (M1.8) | locally integrated (`test/integration`, 1,000 randomized sessions) | n/a | not run |
+| Dosing Service, storage layout v4, formats (M1.9a) | implemented, tested with fake pump and fake KV (power cuts, failures, randomized) | compiled, not called | not run; **no real pump driver** |
 | Battery monitor | not started | — | — |
 | Dosing service, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
@@ -1455,6 +1605,8 @@ alternative to the native setup, not a requirement.
 
 ## Next milestone
 
-After the M1.8 review: next milestone to be agreed. The on-device acceptance
+After the M1.9a review: M1.9b (Application and Power Services: wake cycle, shutdown
+checklist, sleep port, long-run simulation) and M1.9c (platform adapters, simulated pump)
+are designed; not started. The on-device acceptance
 ([`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md)) waits for the board and an approved
 staging backend.

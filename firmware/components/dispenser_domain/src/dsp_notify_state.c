@@ -122,6 +122,20 @@ static bool diagnostics_valid(const dsp_notify_state_t *s)
             return false;
         }
     }
+    /* Format 3: report keys, non-zero and unique while used, zero afterwards. */
+    if (s->report_key_count > DSP_NOTIFY_REPORT_KEYS) {
+        return false;
+    }
+    for (size_t i = 0; i < DSP_NOTIFY_REPORT_KEYS; i++) {
+        if ((i < s->report_key_count) != (s->report_keys[i] != 0)) {
+            return false;
+        }
+        for (size_t j = 0; j < i && i < s->report_key_count; j++) {
+            if (s->report_keys[j] == s->report_keys[i]) {
+                return false;
+            }
+        }
+    }
     return true;
 }
 

@@ -49,6 +49,8 @@ typedef struct {
     uint32_t schedule_revision; /* revision at claim time (diagnostic; not part of identity) */
     dsp_utc_t scheduled_at;     /* scheduled instant of the claimed occurrence */
     dsp_utc_t claimed_at;       /* clock time of the claim */
+    uint32_t volume_ul;         /* requested volume claimed (M1.9a, record format 2); 0 =
+                                   unknown (a format-1 record written before M1.9a) */
 } dsp_history_record_t;
 
 /* True if the id is valid, the date valid, the state known and the instants in range. */

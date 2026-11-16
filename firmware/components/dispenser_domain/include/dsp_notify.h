@@ -162,6 +162,19 @@ dsp_notify_status_t dsp_notify_observe_battery(dsp_notify_t *n, dsp_battery_obs_
 dsp_notify_status_t dsp_notify_report_dosing_error(dsp_notify_t *n, const dsp_dosing_error_t *e,
                                                    dsp_notify_clock_t clock);
 
+/* Dose-bound report (M1.9a): like dsp_notify_report_dosing_error(), but idempotent per
+ * key (non-zero, unique per dose): if the key was already reported, nothing is queued or
+ * written and *duplicate is true. Otherwise the event, the uncertainty flag (for START/
+ * PUMP/INTERRUPTED) and the key are persisted in ONE write, so a recovery repeated after a
+ * power loss never queues a second notification for the same dose and never loses one. */
+dsp_notify_status_t dsp_notify_report_dosing_error_once(dsp_notify_t *n,
+                                                        const dsp_dosing_error_t *e,
+                                                        uint64_t key, dsp_notify_clock_t clock,
+                                                        bool *duplicate);
+
+/* True if key is among the persisted dose-bound report keys. */
+bool dsp_notify_report_key_known(const dsp_notify_t *n, uint64_t key);
+
 /* Device conditions DSP_COND_STORAGE / DSP_COND_TIME_SYNC / DSP_COND_CLOCK. */
 dsp_notify_status_t dsp_notify_set_device_condition(dsp_notify_t *n, dsp_condition_t cond,
                                                     bool active, uint32_t detail,

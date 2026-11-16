@@ -146,7 +146,7 @@ dsp_codec_status_t dsp_codec_decode_layout(const uint8_t *buf, size_t len, dsp_l
 
 /* ---- History slot --------------------------------------------------------------------
  *  0 type | 1 version | 2 state (0 = EMPTY) | 3..67 id | 68..71 local date |
- *  72..75 revision | 76..83 scheduled_at | 84..91 claimed_at                            */
+ *  72..75 revision | 76..83 scheduled_at | 84..91 claimed_at | format 2: 92..95 volume   */
 
 size_t dsp_codec_encode_history(const dsp_history_record_t *rec, uint8_t *buf, size_t cap)
 {
@@ -156,7 +156,7 @@ size_t dsp_codec_encode_history(const dsp_history_record_t *rec, uint8_t *buf, s
     }
     memset(buf, 0, DSP_HISTORY_RECORD_BYTES);
     buf[0] = DSP_REC_TYPE_HISTORY;
-    buf[1] = DSP_CODEC_VERSION;
+    buf[1] = DSP_HISTORY_FORMAT_V2;
     if (rec == NULL) {
         return DSP_HISTORY_RECORD_BYTES; /* EMPTY: state 0, all fields zero */
     }
@@ -166,22 +166,29 @@ size_t dsp_codec_encode_history(const dsp_history_record_t *rec, uint8_t *buf, s
     put_u32(buf + 72, rec->schedule_revision);
     put_i64(buf + 76, rec->scheduled_at);
     put_i64(buf + 84, rec->claimed_at);
+    put_u32(buf + 92, rec->volume_ul);
     return DSP_HISTORY_RECORD_BYTES;
 }
 
 dsp_codec_status_t dsp_codec_decode_history(const uint8_t *buf, size_t len,
                                             dsp_history_record_t *out)
 {
-    dsp_codec_status_t st = check_header(buf, len, DSP_REC_TYPE_HISTORY);
-    if (st != DSP_CODEC_OK) {
-        return st;
+    if (buf == NULL || len < 2) {
+        return DSP_CODEC_ERR_SIZE;
     }
-    if (len != DSP_HISTORY_RECORD_BYTES || out == NULL) {
+    if (buf[0] != DSP_REC_TYPE_HISTORY) {
+        return DSP_CODEC_ERR_TYPE;
+    }
+    if (buf[1] != DSP_CODEC_VERSION && buf[1] != DSP_HISTORY_FORMAT_V2) {
+        return DSP_CODEC_ERR_VERSION;
+    }
+    bool v2 = buf[1] == DSP_HISTORY_FORMAT_V2;
+    size_t expect = v2 ? DSP_HISTORY_RECORD_BYTES : DSP_HISTORY_RECORD_V1_BYTES;
+    if (len != expect || out == NULL) {
         return DSP_CODEC_ERR_SIZE;
     }
     if (buf[2] == 0) {
-        return all_zero(buf + 3, DSP_HISTORY_RECORD_BYTES - 3) ? DSP_CODEC_EMPTY
-                                                                : DSP_CODEC_ERR_FIELD;
+        return all_zero(buf + 3, expect - 3) ? DSP_CODEC_EMPTY : DSP_CODEC_ERR_FIELD;
     }
     dsp_history_record_t rec;
     memset(&rec, 0, sizeof rec);
@@ -193,6 +200,7 @@ dsp_codec_status_t dsp_codec_decode_history(const uint8_t *buf, size_t len,
     rec.schedule_revision = get_u32(buf + 72);
     rec.scheduled_at = get_i64(buf + 76);
     rec.claimed_at = get_i64(buf + 84);
+    rec.volume_ul = v2 ? get_u32(buf + 92) : 0; /* format 1: unknown */
     if (!dsp_history_record_is_valid(&rec)) {
         return DSP_CODEC_ERR_FIELD;
     }
@@ -365,23 +373,35 @@ size_t dsp_codec_encode_config(const dsp_config_t *cfg, uint8_t *buf, size_t cap
         return 0;
     }
     buf[0] = DSP_REC_TYPE_CONFIG;
-    buf[1] = DSP_CODEC_VERSION;
+    buf[1] = DSP_CONFIG_FORMAT_V2;
     put_u32(buf + 2, cfg->revision);
     put_u32(buf + 6, cfg->reservoir_capacity_ul);
     put_u32(buf + 10, cfg->reservoir_remaining_ul);
     buf[14] = cfg->low_stock_percent;
     put_u16(buf + 15, cfg->time_sync_interval_h);
     buf[17] = cfg->notify_mask;
+    put_u32(buf + 18, cfg->pump_flow_ul_per_s);
+    put_i64(buf + 22, cfg->calibrated_at);
+    put_u32(buf + 30, cfg->max_dose_ul);
+    put_u32(buf + 34, cfg->max_daily_ul);
+    put_u32(buf + 38, cfg->max_runtime_ms);
+    put_u32(buf + 42, cfg->min_interval_s);
     return DSP_CONFIG_RECORD_BYTES;
 }
 
 dsp_codec_status_t dsp_codec_decode_config(const uint8_t *buf, size_t len, dsp_config_t *out)
 {
-    dsp_codec_status_t st = check_header(buf, len, DSP_REC_TYPE_CONFIG);
-    if (st != DSP_CODEC_OK) {
-        return st;
+    if (buf == NULL || len < 2) {
+        return DSP_CODEC_ERR_SIZE;
     }
-    if (len != DSP_CONFIG_RECORD_BYTES || out == NULL) {
+    if (buf[0] != DSP_REC_TYPE_CONFIG) {
+        return DSP_CODEC_ERR_TYPE;
+    }
+    if (buf[1] != DSP_CODEC_VERSION && buf[1] != DSP_CONFIG_FORMAT_V2) {
+        return DSP_CODEC_ERR_VERSION;
+    }
+    bool v2 = buf[1] == DSP_CONFIG_FORMAT_V2;
+    if (len != (v2 ? DSP_CONFIG_RECORD_BYTES : DSP_CONFIG_RECORD_V1_BYTES) || out == NULL) {
         return DSP_CODEC_ERR_SIZE;
     }
     dsp_config_t cfg;
@@ -392,6 +412,14 @@ dsp_codec_status_t dsp_codec_decode_config(const uint8_t *buf, size_t len, dsp_c
     cfg.low_stock_percent = buf[14];
     cfg.time_sync_interval_h = get_u16(buf + 15);
     cfg.notify_mask = buf[17];
+    if (v2) {
+        cfg.pump_flow_ul_per_s = get_u32(buf + 18);
+        cfg.calibrated_at = get_i64(buf + 22);
+        cfg.max_dose_ul = get_u32(buf + 30);
+        cfg.max_daily_ul = get_u32(buf + 34);
+        cfg.max_runtime_ms = get_u32(buf + 38);
+        cfg.min_interval_s = get_u32(buf + 42);
+    }
     if (dsp_config_validate(&cfg) != 0) {
         return DSP_CODEC_ERR_FIELD;
     }
@@ -447,7 +475,7 @@ size_t dsp_codec_encode_notify(const dsp_notify_state_t *s, uint8_t *buf, size_t
     }
     memset(buf, 0, DSP_NOTIFY_RECORD_BYTES);
     buf[0] = DSP_REC_TYPE_NOTIFY;
-    buf[1] = DSP_NOTIFY_FORMAT_V2;
+    buf[1] = DSP_NOTIFY_FORMAT_V3;
     put_u32(buf + 2, s->epoch);
     put_u32(buf + 6, s->next_seq);
     put_u16(buf + 10, s->dropped);
@@ -496,6 +524,13 @@ size_t dsp_codec_encode_notify(const dsp_notify_state_t *s, uint8_t *buf, size_t
         p[11] = r->field;
         put_u16(p + 12, r->attempts);
     }
+    /* Format 3: dose-bound report keys. */
+    p[0] = s->report_key_count;
+    p += 4;
+    for (size_t i = 0; i < DSP_NOTIFY_REPORT_KEYS; i++, p += 8) {
+        put_u32(p, (uint32_t)(s->report_keys[i] & 0xFFFFFFFFu));
+        put_u32(p + 4, (uint32_t)(s->report_keys[i] >> 32));
+    }
     return DSP_NOTIFY_RECORD_BYTES;
 }
 
@@ -507,11 +542,15 @@ dsp_codec_status_t dsp_codec_decode_notify(const uint8_t *buf, size_t len, dsp_n
     if (buf[0] != DSP_REC_TYPE_NOTIFY) {
         return DSP_CODEC_ERR_TYPE;
     }
-    if (buf[1] != DSP_NOTIFY_FORMAT_V1 && buf[1] != DSP_NOTIFY_FORMAT_V2) {
+    if (buf[1] != DSP_NOTIFY_FORMAT_V1 && buf[1] != DSP_NOTIFY_FORMAT_V2 &&
+        buf[1] != DSP_NOTIFY_FORMAT_V3) {
         return DSP_CODEC_ERR_VERSION; /* newer format: unsupported, never guessed */
     }
-    bool v2 = buf[1] == DSP_NOTIFY_FORMAT_V2;
-    if (len != (v2 ? DSP_NOTIFY_RECORD_BYTES : DSP_NOTIFY_RECORD_V1_BYTES) || out == NULL) {
+    bool v3 = buf[1] == DSP_NOTIFY_FORMAT_V3;
+    bool v2 = buf[1] == DSP_NOTIFY_FORMAT_V2 || v3;
+    size_t expect = v3 ? DSP_NOTIFY_RECORD_BYTES
+                       : (v2 ? DSP_NOTIFY_RECORD_V2_BYTES : DSP_NOTIFY_RECORD_V1_BYTES);
+    if (len != expect || out == NULL) {
         return DSP_CODEC_ERR_SIZE;
     }
     if (buf[13] != 0) {
@@ -577,9 +616,74 @@ dsp_codec_status_t dsp_codec_decode_notify(const uint8_t *buf, size_t len, dsp_n
             r->attempts = get_u16(p + 12);
         }
     }
+    if (v3) {
+        if (p[1] != 0 || p[2] != 0 || p[3] != 0) {
+            return DSP_CODEC_ERR_FIELD;
+        }
+        s.report_key_count = p[0];
+        p += 4;
+        for (size_t i = 0; i < DSP_NOTIFY_REPORT_KEYS; i++, p += 8) {
+            s.report_keys[i] = (uint64_t)get_u32(p) | ((uint64_t)get_u32(p + 4) << 32);
+        }
+    }
     if (!dsp_notify_state_is_valid(&s)) {
         return DSP_CODEC_ERR_FIELD;
     }
     *out = s;
+    return DSP_CODEC_OK;
+}
+
+/* ---- Dosing state (layout v4, M1.9a) ------------------------------------------------- */
+
+size_t dsp_codec_encode_dosing(const dsp_dosing_state_t *d, uint8_t *buf, size_t cap)
+{
+    if (d == NULL || buf == NULL || cap < DSP_DOSING_RECORD_BYTES || !dsp_dosing_state_is_valid(d)) {
+        return 0;
+    }
+    memset(buf, 0, DSP_DOSING_RECORD_BYTES);
+    buf[0] = DSP_REC_TYPE_DOSING;
+    buf[1] = DSP_CODEC_VERSION;
+    buf[2] = d->readiness;
+    buf[3] = d->flags;
+    put_u32(buf + 4, d->refill_capacity_ul);
+    put_u32(buf + 8, d->refill_remaining_ul);
+    put_u32(buf + 12, d->refill_seq);
+    put_u32(buf + 16, d->manual_volume_ul);
+    put_i64(buf + 20, d->manual_started_at);
+    put_u32(buf + 28, d->manual_seq);
+    put_date(buf + 32, d->ledger_date);
+    put_u32(buf + 36, d->ledger_sum_ul);
+    put_i64(buf + 40, d->last_start_utc);
+    put_u32(buf + 48, d->next_seq);
+    return DSP_DOSING_RECORD_BYTES;
+}
+
+dsp_codec_status_t dsp_codec_decode_dosing(const uint8_t *buf, size_t len, dsp_dosing_state_t *out)
+{
+    dsp_codec_status_t st = check_header(buf, len, DSP_REC_TYPE_DOSING);
+    if (st != DSP_CODEC_OK) {
+        return st;
+    }
+    if (len != DSP_DOSING_RECORD_BYTES || out == NULL) {
+        return DSP_CODEC_ERR_SIZE;
+    }
+    dsp_dosing_state_t d;
+    memset(&d, 0, sizeof d);
+    d.readiness = buf[2];
+    d.flags = buf[3];
+    d.refill_capacity_ul = get_u32(buf + 4);
+    d.refill_remaining_ul = get_u32(buf + 8);
+    d.refill_seq = get_u32(buf + 12);
+    d.manual_volume_ul = get_u32(buf + 16);
+    d.manual_started_at = get_i64(buf + 20);
+    d.manual_seq = get_u32(buf + 28);
+    d.ledger_date = get_date(buf + 32);
+    d.ledger_sum_ul = get_u32(buf + 36);
+    d.last_start_utc = get_i64(buf + 40);
+    d.next_seq = get_u32(buf + 48);
+    if (!dsp_dosing_state_is_valid(&d)) {
+        return DSP_CODEC_ERR_FIELD;
+    }
+    *out = d;
     return DSP_CODEC_OK;
 }

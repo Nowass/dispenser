@@ -11,6 +11,8 @@
  *   "config"        device configuration
  *   "time"          time metadata (layout v2, M1.4)
  *   "notify"        notification state and queue (layout v3, M1.5)
+ *   "dosing"        dosing state: readiness, BLOCKED latch, refill intent, manual marker,
+ *                   daily ledger (layout v4, M1.9a)
  *
  * Explicit presence (approved 2026-11-15): every key exists once provisioned and keys are
  * never deleted. Because ESP-IDF NVS drops items that fail its CRC checks, a missing key
@@ -32,12 +34,13 @@
 #include "dsp_time.h"
 #include "dsp_notify_state.h"
 #include "dsp_time_meta.h"
+#include "dsp_dosing_state.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define DSP_STORAGE_LAYOUT_VERSION 3 /* v1/v2 are migrated: new keys added, marker last */
+#define DSP_STORAGE_LAYOUT_VERSION 4 /* v1/v2/v3 are migrated: new keys added, marker last */
 #define DSP_STORAGE_HISTORY_SLOTS DSP_HISTORY_DEFAULT_SLOTS /* 32, fixed in layout v1 */
 
 typedef enum {
@@ -78,9 +81,11 @@ typedef struct {
 
 /*
  * Opens the layout.
- *  - Marker v1 (M1.3) or v2 (M1.4): migrated to v3 if allow_provision (keys added since are
- *    provisioned, marker rewritten last; resumable), otherwise
- *    DSP_STORAGE_ERR_MIGRATION_REQUIRED.
+ *  - Marker v1 (M1.3), v2 (M1.4) or v3 (M1.5): migrated to v4 if allow_provision (keys added
+ *    since are provisioned, marker rewritten last; resumable), otherwise
+ *    DSP_STORAGE_ERR_MIGRATION_REQUIRED. The new "dosing" record is provisioned
+ *    SERVICE_REQUIRED (never enabling dosing), with the BLOCKED latch set when the existing
+ *    notification state has an active RESERVOIR_BLOCKED condition (conservative).
  *  - Marker present and supported: every key is read and validated (history also through
  *    dsp_history_scan). Any missing or malformed key -> DSP_STORAGE_ERR_CORRUPT; a newer
  *    format -> DSP_STORAGE_ERR_UNSUPPORTED. Nothing is modified.
@@ -113,6 +118,10 @@ dsp_storage_status_t dsp_storage_save_time(dsp_storage_t *st, const dsp_time_met
 /* Notification state (M1.5): one atomic record; save validates and confirms. */
 dsp_storage_status_t dsp_storage_load_notify(dsp_storage_t *st, dsp_notify_state_t *out);
 dsp_storage_status_t dsp_storage_save_notify(dsp_storage_t *st, const dsp_notify_state_t *s);
+
+/* Dosing state (M1.9a, layout v4): one atomic record; save validates and confirms. */
+dsp_storage_status_t dsp_storage_load_dosing(dsp_storage_t *st, dsp_dosing_state_t *out);
+dsp_storage_status_t dsp_storage_save_dosing(dsp_storage_t *st, const dsp_dosing_state_t *s);
 
 /* ---- Internal helpers shared with the schedule repository ------------------------- */
 

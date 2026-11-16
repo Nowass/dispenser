@@ -37,6 +37,15 @@ typedef struct {
     uint8_t low_stock_percent;       /* low-reservoir warning threshold, 1..99 (FR-021) */
     uint16_t time_sync_interval_h;   /* NTP interval, 24..48 hours */
     uint8_t notify_mask;             /* enabled DSP_NOTIFY_* types */
+    /* Format 2 (M1.9a): pump calibration and safety limits. 0 = not configured; the
+     * provisioning value is 0 everywhere (no invented production defaults). Any missing
+     * or invalid value prevents pump activation (dsp_config_pump_problems). */
+    uint32_t pump_flow_ul_per_s; /* calibrated flow (FR-011) */
+    int64_t calibrated_at;       /* trusted UTC of the calibration, 0 = never */
+    uint32_t max_dose_ul;        /* per-dose limit (FR-016) */
+    uint32_t max_daily_ul;       /* per local day (Europe/Prague) */
+    uint32_t max_runtime_ms;     /* per dose, also <= the platform's hardware cutoff */
+    uint32_t min_interval_s;     /* minimum time between two pump starts */
 } dsp_config_t;
 
 /* Validation result: bitwise OR of problems, 0 = valid. */
@@ -45,7 +54,23 @@ enum {
     DSP_CONFIG_E_LOW_STOCK = 1u << 1,     /* threshold outside 1..99 */
     DSP_CONFIG_E_SYNC_INTERVAL = 1u << 2, /* outside 24..48 h */
     DSP_CONFIG_E_NOTIFY_MASK = 1u << 3,   /* unknown bits */
+    DSP_CONFIG_E_CALIBRATED_AT = 1u << 4, /* calibration time neither 0 nor a valid instant */
 };
+
+/* Pump calibration/limit problems (bitmask, 0 = the pump may be used). */
+enum {
+    DSP_PUMPCFG_E_FLOW = 1u << 0,         /* no calibrated flow */
+    DSP_PUMPCFG_E_CALIBRATED_AT = 1u << 1, /* no calibration time */
+    DSP_PUMPCFG_E_MAX_DOSE = 1u << 2,      /* per-dose limit missing */
+    DSP_PUMPCFG_E_MAX_DAILY = 1u << 3,     /* daily limit missing or below the per-dose limit */
+    DSP_PUMPCFG_E_MAX_RUNTIME = 1u << 4,   /* runtime limit missing */
+    DSP_PUMPCFG_E_MIN_INTERVAL = 1u << 5,  /* interval missing (must be >= 1 s) */
+    DSP_PUMPCFG_E_HW_LIMIT = 1u << 6,      /* no hardware cutoff known, or runtime limit above it */
+};
+
+/* Problems that prevent pump activation. hw_max_runtime_ms: the platform's hardware
+ * cutoff (0 = unknown: the pump can never be used). */
+uint32_t dsp_config_pump_problems(const dsp_config_t *cfg, uint32_t hw_max_runtime_ms);
 
 /* Defaults written at provisioning: reservoir not configured (capacity and remaining 0,
  * so no dose can pass a future stock check), 20 %, 24 h, all notifications enabled. */

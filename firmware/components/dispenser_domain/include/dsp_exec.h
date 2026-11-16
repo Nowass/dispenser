@@ -105,6 +105,20 @@ dsp_exec_status_t dsp_exec_init(dsp_exec_t *ex, const dsp_exec_config_t *cfg);
 dsp_exec_status_t dsp_exec_recover(dsp_exec_t *ex, size_t *interrupted);
 
 /*
+ * Step-wise recovery (M1.9a), for callers that must act on each interrupted execution
+ * BEFORE it is rewritten (the Dosing Service reports it first, so that a power loss
+ * between report and rewrite repeats the report instead of losing it):
+ *  - dsp_exec_find_started(): validates the whole history and returns the first STARTED
+ *    record (DSP_EXEC_OK) or DSP_EXEC_NOT_FOUND. Read-only.
+ *  - dsp_exec_mark_interrupted(): rewrites exactly that record (slot and content must
+ *    still match) as INTERRUPTED (still blocking). Never re-executes anything.
+ */
+dsp_exec_status_t dsp_exec_find_started(const dsp_exec_t *ex, size_t *slot,
+                                        dsp_history_record_t *rec);
+dsp_exec_status_t dsp_exec_mark_interrupted(dsp_exec_t *ex, size_t slot,
+                                            const dsp_history_record_t *rec);
+
+/*
  * Read-only eligibility check of an automatic occurrence (from dsp_rec_next() etc.).
  * Order: arguments, schedule validity, clock, enabled, occurrence identity (must be
  * exactly what the CURRENT schedule yields on that local date), timing, busy, history.

@@ -173,6 +173,7 @@ typedef struct {
 } dsp_rejection_t;
 
 #define DSP_REJECTION_LOG_CAPACITY 4 /* approved */
+#define DSP_NOTIFY_REPORT_KEYS 4      /* dose-bound report keys kept (M1.9a) */
 
 /* Rejection log (approved M1.7): the most recent rejections, oldest first.
  *  - Overflow: when full, the oldest entry is dropped. If that entry was still unread,
@@ -199,6 +200,12 @@ typedef struct {
     uint8_t tx_diag;          /* DSP_TXDIAG_* */
     uint16_t tx_diag_status;  /* HTTP status that last set a flag (0 = none / local cause) */
     dsp_rejection_log_t rejections;
+    /* Format 3 (M1.9a): keys of the most recent dose-bound reports (dosing errors of a
+     * specific dose, e.g. an interruption found at recovery). A report whose key is listed
+     * is not queued again: recovery after a power loss repeats a report idempotently. The
+     * key is written in the same atomic write as the report. Format 1/2: all zero. */
+    uint8_t report_key_count; /* 0..DSP_NOTIFY_REPORT_KEYS, oldest first */
+    uint64_t report_keys[DSP_NOTIFY_REPORT_KEYS];
 } dsp_notify_state_t;
 
 /* Structural validity (used by the codec): known types/severities/conditions, empty

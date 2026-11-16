@@ -252,6 +252,18 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - **Wake planning.** `dsp_wake_plan()` picks the earliest of dose, sync, notification and other, as a relative sleep duration. No timing guarantee until RTC drift and wake latency are measured.
 - **Flash budget.** Linking Wi-Fi brought the image to about 824 KiB (20 % of the old 1 MB app partition left); M1.7 introduced the 4 MB table with 1.75 MiB OTA slots before TLS and BLE.
 
+### Dosing Service (firmware M1.9a, implemented and host-tested; no real pump driver)
+
+- **Sole pump owner:** `dsp_dosing` holds the only reference to the pump port; activation requires a single-use permit redeemed immediately before the run, and a permit exists only after the reduced estimate is durable.
+- **Approved write order:** restricting writes (claim with the claimed volume, or manual marker; daily ledger; last start) are durable before the enabling write (consumption → permit). Uncovered due dose: BLOCKED latch before the notification.
+- **Gates:** readiness READY (new and migrated records start `SERVICE_REQUIRED`), BLOCKED latch clear (automatic and manual), no refill pending, no unrecovered manual marker, trusted clock, valid calibration and limits (configuration format 2), configured reservoir, no storage failure earlier in the wake. Missing configuration is a diagnostic, never BLOCKED.
+- **Limits:** per-dose volume, runtime ≤ configured and hardware maximum, daily total per local date with a highest-date ledger (rollback-safe), durable minimum interval. Overflow-safe arithmetic.
+- **Refill:** roll-forward with a durable intent across `dosing` → `notify` → `config` → `dosing`; dosing disabled until the last write.
+- **Recovery:** pending refill completed; interrupted automatic and manual doses reported with the durable claimed volume, keyed per dose (`notify` format 3), before the record is rewritten or the marker cleared: idempotent across power loss, never a pump run, never an estimate change.
+- **Storage failures:** dosing stays disabled for the rest of the wake (`DEGRADED`). If a dose-bound report cannot be persisted, the STARTED record or manual marker is kept, so boot recovery reports the dose exactly once. A report whose dose left no durable source (a failed claim or marker write, so no pump run) is RAM-only and is lost at a restart; that limitation is documented. A refused same-time dose not re-evaluated within its due window becomes MISSED, with no catch-up; no durable record of it exists until the event journal (Q10).
+- **Storage:** layout v4 (`dosing` record), history format 2, configuration format 2, `notify` format 3; all forward-only (rollback limitation for a future OTA).
+- **Hardware-dependent (pending):** limit values, the hardware cutoff, the gate pin and its reset/brownout/deep-sleep behavior, watchdog timeouts, brownout under motor inrush.
+
 ### Notification engine (firmware M1.5, implemented and host-tested; transport since M1.7)
 
 - **Events:** `RESERVOIR_LOW` and `BATTERY_LOW` (WARNING, conditions), `RESERVOIR_BLOCKED` (CRITICAL, condition), `DEVICE_ERROR` (CRITICAL; conditions for storage, sync overdue and clock UNKNOWN after 4 failed syncs (a trusted HOLDOVER clock never raises it and stays usable for dosing), plus a one-shot queue-overflow report), and `DOSING_ERROR` (CRITICAL, one-shot, MANUAL flag for manual doses).
