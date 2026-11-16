@@ -13,7 +13,7 @@ Android companion app.
 - [`cloudflare/dispenser-notify/`](cloudflare/dispenser-notify/README.md) – Cloudflare Worker
   and D1 backend that durably accepts device notifications (M1.6a, deployed; protocol in
   its [`PROTOCOL.md`](cloudflare/dispenser-notify/PROTOCOL.md)) and e-mails them through the
-  Gmail API (M1.6b, implemented and tested locally, not deployed yet).
+  Gmail API (M1.6b, deployed and verified end to end; a 5-minute cron delivers e-mails).
 - [`test-vectors/`](test-vectors/README.md) – shared test cases run by both the Android and
   the firmware tests (scheduling parity).
 - [`docs/`](docs/) – requirements, architecture, [release process](docs/RELEASING.md) and the

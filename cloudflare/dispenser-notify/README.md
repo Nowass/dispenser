@@ -8,9 +8,9 @@ setup in [`GMAIL_SETUP.md`](GMAIL_SETUP.md).
 **Status:**
 
 - **M1.6a (ingestion):** deployed to production.
-- **M1.6b (Gmail delivery):** implemented and tested locally against a fake Gmail API.
-  **Not deployed**; migration 0002 is not applied in production, and no Google credentials
-  exist yet.
+- **M1.6b (Gmail delivery):** implemented, **deployed and verified** in production
+  (Worker version `271fa0d7-7008-4c3b-94b2-616c77da202c`, migrations 0001 and 0002
+  applied, cron `*/5 * * * *` active). See "Production state" below.
 
 ## Architecture
 
@@ -289,15 +289,36 @@ secret.
 
 ## Deployment
 
-Existing resources:
+### Production state (2026-11-16)
 
-| Resource | Name / state                                                                   |
-| -------- | ------------------------------------------------------------------------------ |
-| Worker   | `dispenser-notify`, `https://dispenser-notify.nowassek.workers.dev`            |
-| D1       | `dispenser-notifications` (`245fe0d1-…`), binding `DB`; migration 0001 applied |
-| Secrets  | `DEVICE_API_TOKEN` (production); Gmail secrets: **not yet created**            |
+| Resource     | Name / state                                                                                                                                                |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Worker       | `dispenser-notify`, `https://dispenser-notify.nowassek.workers.dev`; version `271fa0d7-7008-4c3b-94b2-616c77da202c` (commit `2f517fb`) at 100 %             |
+| Cron Trigger | `*/5 * * * *`                                                                                                                                               |
+| D1           | `dispenser-notifications` (`245fe0d1-4f8c-45c3-b21b-89e00c26be75`), binding `DB`; migrations **0001 and 0002 applied**, `delivery_state` row initialized    |
+| Secrets      | all `secret_text`: `DEVICE_API_TOKEN`, `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET`, `GMAIL_REFRESH_TOKEN`, `NOTIFY_SENDER_ADDRESS`, `NOTIFY_RECIPIENT_ADDRESS` |
+| Settings     | Workers Logs on (persisted), `workers.dev` on, preview URLs off                                                                                             |
+| Google       | dedicated sender account; OAuth app published ("In production", unverified, personal use); Desktop-app client; scope `gmail.send` only                      |
 
-### M1.6b deployment (requires approval; after `GMAIL_SETUP.md` is done)
+- **`DEVICE_API_TOKEN` was rotated during the M1.6b deployment** (new 64-hex-character
+  token, kept by the owner in a password manager). The M1.6a token is invalid. No device
+  used it yet: the firmware HTTPS transport is future work and must be configured with the
+  current token.
+- **End-to-end verification (2026-11-16):** one synthetic event ingested through the authenticated API (201) → one `PENDING` row in D1 → sent by the scheduled 07:05 UTC cron run → accepted by Gmail → `SENT` after 1 attempt with the Gmail message ID recorded; the 07:10 UTC run was idle and did not resend it; the synthetic row was then deleted. Production D1 holds no synthetic events.
+
+### Routine redeploy (code changes)
+
+`npx wrangler deploy` (after `npx wrangler login` and the usual checks). Deployments never
+delete secrets, and `wrangler.jsonc` keeps the cron, observability and preview settings.
+New migrations: `npx wrangler d1 migrations list dispenser-notifications --remote`, then
+`… migrations apply … --remote`, with approval.
+
+**Do not roll back to `61c7dba5`** (M1.6a): a version carries its own secrets, so it would
+bring back the superseded device token and drop the Gmail secrets and the cron. Prefer a
+forward fix or the emergency stop below; roll back only to an M1.6b-or-later version after
+reviewing its secrets. Migration 0002 must stay (the M1.6b code needs it; M1.6a ignores it).
+
+### M1.6b deployment procedure (as executed on 2026-11-16)
 
 1. `npx wrangler login`, then `npx wrangler whoami`.
 2. **Read-only checks:**
@@ -308,8 +329,10 @@ Existing resources:
 3. **Migration (additive):** `npx wrangler d1 migrations apply dispenser-notifications --remote`.
    The deployed M1.6a code ignores the new columns, so this is safe before the code deploy.
 4. **Deploy code + secrets in one version:**
-   `npx wrangler deploy --secrets-file ~/.config/dispenser-notify-deploy/gmail-secrets.json`.
-   - Secrets are additive: `DEVICE_API_TOKEN` is kept.
+   `npx wrangler deploy --secrets-file <secrets file outside the repo, mode 0600>`.
+   - Secrets are additive: omitted secrets (for example `DEVICE_API_TOKEN`) are kept.
+     On 2026-11-16 the file also carried a newly generated `DEVICE_API_TOKEN` (approved
+     rotation).
    - This creates the `*/5 * * * *` Cron Trigger.
 5. **Verify:**
    - `npx wrangler secret list` shows the six secrets;
@@ -318,11 +341,9 @@ Existing resources:
      5 minutes (no Google traffic while the queue is empty).
 6. **End-to-end (with approval):** submit one approved test event. Within 5 minutes the
    e-mail arrives and the row is `SENT`. Then delete the test row.
-7. **Clean up:** delete `gmail-secrets.json` and `client_secret.json` after storing what
-   you need in your password manager, then run `npx wrangler logout`.
-8. **Rollback:** `npx wrangler rollback 61c7dba5-cbd0-447c-bd00-ba9505cad33b` (the M1.6a
-   version; it holds the token as a secret and no cron). The 0002 columns can stay;
-   M1.6a ignores them.
+7. **Clean up:** delete temporary combined secrets and token files once their values are
+   in your password manager, then run `npx wrangler logout`. The Gmail OAuth client and
+   secrets files may be kept owner-only (mode 0600, outside the repo) for recovery.
 
 **Emergency stop of e-mail** without a code change: `npx wrangler secret delete
 GMAIL_REFRESH_TOKEN`. Delivery becomes "disabled"; events keep queueing as `PENDING`.
@@ -373,6 +394,8 @@ Limitations (accepted for now):
   requeues or deletes it. No second channel alerts about it.
 - **Gmail 400 classification relies on Google's message text.** If Google rewords a
   message, it falls into "unclear" (PENDING plus warning), never into a wrong FAILED.
+- **Gmail 400 classification untested against real rejections:** the production test
+  covered the success path only.
 - **Alerting needs one setup step:** the `level: "warn"` health lines are written to
   Workers Logs, but an automatic alert (for example a Cloudflare notification on log
   matches) still has to be configured in the dashboard.

@@ -263,7 +263,7 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - **Transport (M1.6a):** HTTPS `POST /api/v1/events` to the Cloudflare backend, protocol v1 in `cloudflare/dispenser-notify/PROTOCOL.md`. 201/200 → ACK, 503 or a network failure → FAILED, timeout after sending → UNCERTAIN. **Approved (integration requirement for the HTTPS transport milestone):** 400/404/405/409/413/415 → `DSP_TX_REJECTED`. The entry leaves the queue only after a persistent local diagnostic (event, reason) is written, exposed through future BLE diagnostics; it never blocks later notifications and is never silently discarded. 401 and retryable server failures keep the event pending.
 - **Reservoir estimate (approved: conservative):** consumption-based, no level sensor. Every authorized dose (automatic or manual) subtracts its full requested volume before the pump runs. This is enforced by a single-use `dsp_dose_permit_t` that only a durable consumption issues, and the future actuator must require it. Start/pump failures and interruptions set the persistent uncertainty flag in the same write as the dosing error; a refill (`dsp_notify_on_refill`) clears it. The estimate stays in the `config` record (revision + 1 per dose).
 
-### Notification backend (Cloudflare: M1.6a ingestion deployed; M1.6b Gmail delivery implemented and tested locally, not deployed)
+### Notification backend (Cloudflare: M1.6a ingestion and M1.6b Gmail delivery deployed and verified)
 
 - **Components:** Worker `dispenser-notify` and D1 database `dispenser-notifications` (binding `DB`, existing `notifications` table, `event_id` primary key). TypeScript, wrangler 4, Vitest in the Workers runtime.
 - **Ingestion:** `POST /api/v1/events` with `Authorization: Bearer <DEVICE_API_TOKEN>` (constant-time check; a missing or short secret fails closed). Strict validation of one v1 event (≤ 4 KiB). The payload is stored in a canonical JSON form with its SHA-256 hash.
@@ -275,7 +275,9 @@ The actual binary/wire format must be versioned; no schema above should be imple
   - **Retries (approved):** temporary failures retry without an attempt limit, with backoff from 1 minute up to 6 hours honoring `Retry-After`. Only rejections that clearly identify a non-recoverable payload become FAILED (HTTP 400 alone is not enough); ambiguous 400s stay PENDING with a warning, and message-level outcomes never block other events. Credential and account errors never count; events wait until the configuration is fixed.
   - **Diagnostics:** a `delivery_state` row and a structured `delivery_health` log line per run (pending, failed, unclear-400 pending, oldest pending age, consecutive failures, last error, authorization attention; any FAILED event keeps it at warn), plus a read-only SQL script; no public endpoint.
   - **Semantics:** at-least-once, with a stable `Message-ID` per event. Gmail is not guaranteed to deduplicate, so a duplicate e-mail is possible after an interruption.
-  - **Schema:** additive migration 0002 (four NULLable columns and a new `delivery_state` table).
+  - **Schema:** additive migration 0002 (four NULLable columns and a new `delivery_state` table), applied in production together with 0001.
+  - **Production (2026-11-16):** Worker version `271fa0d7-7008-4c3b-94b2-616c77da202c`, cron `*/5 * * * *`, six `secret_text` secrets (the device token was rotated during this deployment). Verified end to end: authenticated ingestion → D1 `PENDING` → scheduled delivery → Gmail accepted → `SENT`; the next cron run did not resend.
+  - **Operations:** `delivery_health` in Workers Logs (`level: warn` = needs a look), `npm run diagnostics:remote` for an on-demand read-only summary, `wrangler secret delete GMAIL_REFRESH_TOKEN` as the emergency stop. Alerting on warn lines is not configured yet.
   - **Setup:** `cloudflare/dispenser-notify/GMAIL_SETUP.md`.
 - **Security limits of v1:** one shared token (no per-device binding), no rate limiting, no read API.
 
