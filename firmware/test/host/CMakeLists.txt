@@ -78,6 +78,17 @@ dsp_add_host_test(test_proto test_proto.c)
 dsp_add_host_test(test_https test_https.c support/fake_kv.c)
 dsp_add_host_test(test_dosing test_dosing.c support/fake_kv.c)
 dsp_add_host_test(test_app test_app.c support/fake_kv.c)
+# M1.9c: the pure platform adapter logic (compiled unchanged into the firmware component;
+# no ESP-IDF headers) and a two-thread check of the command-queue boundary.
+set(DSP_PLATFORM_DIR "${CMAKE_CURRENT_LIST_DIR}/../../components/dispenser_platform")
+dsp_add_host_test(test_platform test_platform.c support/fake_kv.c
+                  "${DSP_PLATFORM_DIR}/src/dsp_platform_logic.c")
+target_include_directories(test_platform PRIVATE "${DSP_PLATFORM_DIR}/include")
+find_package(Threads REQUIRED)
+# M1.9c: build-time endpoint guard of the application runtime (pure CMake script).
+add_test(NAME test_endpoint_guard
+         COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/test_endpoint_guard.cmake")
+target_link_libraries(test_platform PRIVATE Threads::Threads)
 
 # The engine never consults the C library timezone: identical results under any host TZ.
 foreach(tz "America/New_York" "Asia/Kathmandu")

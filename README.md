@@ -11,7 +11,8 @@ Android companion app.
   time management with Wi-Fi/SNTP adapters (M1.4), notification engine with a persistent
   queue (M1.5) and its HTTPS transport with a connectivity session (M1.7), verified end to
   end against a local Worker (M1.8), the Dosing Service with storage layout v4 (M1.9a), and
-  the Application and Power Services wake cycle (M1.9b). Nothing drives hardware yet; not yet run on hardware.
+  the Application and Power Services wake cycle (M1.9b), and opt-in ESP-IDF platform adapters
+  with a simulated pump (M1.9c). Nothing drives hardware yet; not yet run on hardware.
 - [`cloudflare/dispenser-notify/`](cloudflare/dispenser-notify/README.md) – Cloudflare Worker
   and D1 backend that durably accepts device notifications (M1.6a, deployed; protocol in
   its [`PROTOCOL.md`](cloudflare/dispenser-notify/PROTOCOL.md)) and e-mails them through the

@@ -76,7 +76,12 @@ the "Result" column, and keep the safety rules below. Nothing here has been run 
 | 6.1 | BLE session followed by a Wi-Fi/TLS session (never concurrent) | both work, heap recovers | |
 | 6.2 | Image with NimBLE + HTTPS fits the 1.75 MiB slot | `idf.py size` | |
 
-## 7. Application cycle and fail-safe (M1.9b domain; needs the M1.9c adapters)
+## 7. Application cycle, adapters and fail-safe (M1.9b domain, M1.9c adapters)
+
+Build with `CONFIG_DSP_APP_RUNTIME=y` (simulated pump, no GPIO). Keep
+`CONFIG_DSP_APP_CONNECTIVITY` off unless an approved staging URL is set in
+`CONFIG_DSP_APP_NOTIFY_URL` (the build refuses an empty endpoint, and the production endpoint
+without `CONFIG_DSP_APP_ALLOW_PRODUCTION`; leave that off during bring-up).
 
 | # | Check | Pass criterion | Result |
 |---|---|---|---|
@@ -85,3 +90,9 @@ the "Result" column, and keep the safety rules below. Nothing here has been run 
 | 7.3 | **Hardware integration risk:** a pump-off confirmation that never succeeds (broken readback) | the fail-safe resets repeatedly with the pump held OFF by hardware: measure the reset period and current draw (battery drain), decide the hardware recovery mechanism only after 7.1/7.2 | |
 | 7.4 | RTC-retained block per reset type (timer, button, software, watchdog, panic, brownout, power-on) | kept / discarded as specified, CRC valid | |
 | 7.5 | BLE suspend before a pump run and resume latency; session lifetime (180 s idle, kept while connected, 15 min maximum) on the monotonic clock | no overlap; deadlines met | |
+| 7.6 | Application task stack high-water mark (logged before deep sleep), without and with a TLS session | margin to `CONFIG_DSP_APP_TASK_STACK` recorded; adjust the stack | |
+| 7.7 | Runtime first boot: provisioning, SERVICE_REQUIRED, no simulated pump run, plan = cap, deep sleep entered | log shows the stages and `deep sleep for 21600 s` | |
+| 7.8 | Deep-sleep timer wake: retained block kept (wake count increments), clock continuity kept | logs over 3 wakes | |
+| 7.9 | Power cycle and brownout: retained block discarded, clock untrusted until a sync | logs | |
+| 7.10 | Deep-sleep current with the runtime image | power analyzer | |
+| 7.11 | Pin map from the board schematic: button on GPIO3–5 (not GPIO2), battery ADC on ADC1, pump gate not on strapping/USB/UART0 pins | hardware review record | |

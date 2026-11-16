@@ -4,10 +4,12 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: M1.1–M1.5, M1.7, M1.8, M1.9a and M1.9b (recurrence, execution history, persistent
+**Status: M1.1–M1.5, M1.7, M1.8 and M1.9a–c (recurrence, execution history, persistent
 storage, time management, notification engine, HTTPS notification transport, integration
-tests, Dosing Service with storage layout v4, Application and Power Services) committed.**
-At run time the firmware still only logs its identification. The domain and platform
+tests, Dosing Service with storage layout v4, Application and Power Services, ESP-IDF platform
+adapters with an opt-in application runtime) committed.**
+In its default configuration the firmware still only logs its identification (the M1.9c
+runtime is opt-in). The domain and platform
 components are compiled into the image's component libraries but not called by
 `app_main` (optional diagnostics exist, off by default), Wi-Fi is never started, and
 nothing is dosed. It
@@ -63,15 +65,19 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   → SHUTDOWN → SLEEP), the sleep plan (dose / sync / 6 h cap, no notification wakes, no dose
   wakes while dosing is impossible), a versioned CRC-checked RTC-retained block, the shutdown
   checklist with an explicit fail-safe, and an injected BLE service-mode port with a bounded
-  command queue. Host-tested only; not called by `app_main` (M1.9c). See
+  command queue. Host-tested. See
   [Application and Power Services](#application-and-power-services-m19b).
+- (M1.9c) **ESP-IDF platform adapters** (compiled only, not run on hardware): power port
+  (reset/wake cause, RTC-retained block, RTC timer and provisional button wake, deep sleep,
+  fail-safe reset), command-queue lock, **simulated pump (no GPIO)**, time-continuity port,
+  and an opt-in `app_main` runtime (`CONFIG_DSP_APP_RUNTIME`, default off). See
+  [Platform adapters and application runtime](#platform-adapters-and-application-runtime-m19c).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
 ### Not implemented
 
-Platform adapters for the application cycle (deep sleep and wake, RTC memory, button,
-BLE/NimBLE, `app_main` wiring: M1.9c and later), the real pump GPIO driver with hardware
+BLE/NimBLE and GATT, the button and its pin, the real pump GPIO driver with hardware
 cutoff, production credential provisioning (authenticated BLE,
 per-device credentials), battery measurement, MONTHLY recurrence, event journal, BLE, GPIO
 and motor control, service mode, OTA (update client and rollback; only the partitions
@@ -201,8 +207,11 @@ firmware/
 │       ├── include/dsp_nvs_kv.h      NVS implementation of dsp_kv_t (M1.3)
 │       ├── include/dsp_esp_time.h    clock port, Wi-Fi driver, SNTP source (M1.4)
 │       ├── include/dsp_esp_notify.h  HTTP port, device ID, monotonic clock, nvs_sec credentials (M1.7)
+│       ├── include/dsp_esp_app.h     power port, queue lock, simulated pump, time port (M1.9c)
+│       ├── include/dsp_platform_logic.h  pure adapter rules, also host-tested (M1.9c)
 │       └── src/                      dsp_nvs_kv.c, dsp_esp_clock.c, dsp_esp_wifi.c, dsp_esp_sntp.c,
-│                                     dsp_esp_http.c, dsp_esp_device.c
+│                                     dsp_esp_http.c, dsp_esp_device.c, dsp_esp_power.c,
+│                                     dsp_esp_sync.c, dsp_esp_pump_sim.c, dsp_platform_logic.c
 ├── test/host/                  host unit tests (CMake + CTest, no ESP-IDF)
 │   ├── CMakeLists.txt
 │   ├── support/dsp_test.h      minimal header-only test harness
@@ -219,7 +228,8 @@ firmware/
 │   ├── test_https.c               HTTPS transport and connectivity session (M1.7)
 │   ├── test_proto_vectors.c       runs ../../test-vectors/notification_protocol_v1.txt (M1.8)
 │   ├── test_dosing.c              Dosing Service (M1.9a)
-│   └── test_app.c                 Application and Power Services (M1.9b)
+│   ├── test_app.c                 Application and Power Services (M1.9b)
+│   └── test_platform.c            platform adapter logic and queue threads (M1.9c)
 ├── test/integration/           local end-to-end harness (M1.8, see its README)
 │   ├── notify_harness.c           real domain code driven over stdin
 │   ├── posix_https_port.[ch]      host HTTP port: real TLS (OpenSSL), test CA, timeouts
@@ -1391,6 +1401,112 @@ command that suspended BLE is delivered after resume, so the phone may have to r
 missed (by design, no catch-up); the real lock and BLE task are M1.9c/BLE work (single-task
 host tests cannot show races); the fail-safe reset loop above is a hardware integration risk.
 
+## Platform adapters and application runtime (M1.9c)
+
+ESP-IDF adapters for the M1.9b ports, plus an opt-in runtime. **Compiled and cross-built
+only; nothing has run on the board** (it has not arrived). No GPIO output is configured
+anywhere, and nothing can energize a pump.
+
+### Adapters
+
+| Port | Adapter | Behavior (hardware-unverified unless noted) |
+|---|---|---|
+| `dsp_power_port_t` | `dsp_esp_power_port()` | reset reason (`esp_reset_reason`) and wake sources (`esp_sleep_get_wakeup_causes`) → `dsp_wake_cause_t`; the 48-byte block in `RTC_NOINIT` memory behind a length/inverted-length header; `esp_sleep_enable_timer_wakeup` (1 s–24 h) and, only if `CONFIG_DSP_BUTTON_WAKE_GPIO` passes the pin check, `esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown`; `esp_deep_sleep_start`. A timer that cannot be armed → fail-safe reset instead of an endless sleep |
+| fail-safe | `dsp_esp_fail_safe()` | pump `force_off`, Wi-Fi driver stop, error log, `esp_restart()`; never deep sleep. The retained block (with the fail-safe count) is saved by the application before |
+| `dsp_app_sync_t` | `dsp_esp_app_sync()` | `portMUX` critical section around the queue only (one command copied; no blocking call, log or allocation inside); task context only, never from an ISR |
+| `dsp_pump_port_t` | `dsp_esp_pump_sim()` | **simulation**: no GPIO; `run()` waits for the runtime and counts, `is_off()` reports the simulated state |
+| `dsp_time_port_t` | `dsp_esp_time_port()` | `dsp_esp_clock_reading()` (M1.4 continuity rule) |
+
+The decision rules (cause mapping, which resets keep RTC memory, sleep clamping, button pin
+check, RTC header) live in `dsp_platform_logic.c`: no ESP-IDF include, compiled unchanged into
+the firmware and **host-tested** (`test_platform`). The retained block and the clock continuity
+use the same reset rule (power-on, brownout, external and unknown resets invalidate both;
+deep sleep, software, panic and watchdog resets keep both). The retained block holds no clock
+trust: trust needs the continuity evidence (reset reason + RTC marker + persisted last sync).
+
+### Application runtime (`CONFIG_DSP_APP_RUNTIME`, default off)
+
+`app_main` → `dsp_dosing_port_safe_off(simulated pump)` (first statement) → NVS, clock, time,
+monotonic, lock and power wiring → identification log → one static task (`dsp_app`, static
+stack `CONFIG_DSP_APP_TASK_STACK`, default 12 KiB) runs `dsp_app_run_wake()` once; the wake ends in
+deep sleep or the fail-safe reset. The main task only logs before the task starts, so the
+application task is the single owner. No automatic dosing can happen:
+
+- the pump is simulated (no GPIO) and `CONFIG_DSP_APP_SIM_HW_MAX_RUNTIME_MS` defaults to 0, which
+  closes every dose in the Dosing Service;
+- first boot provisions `SERVICE_REQUIRED` with all limits at 0, and without BLE readiness cannot
+  change;
+- connectivity is a second opt-in (`CONFIG_DSP_APP_CONNECTIVITY`): it uses the `nvs_sec`
+  credentials and its own endpoint `CONFIG_DSP_APP_NOTIFY_URL`. **Build-time endpoint guard**
+  (`main/dsp_endpoint_guard.cmake`, run at the configure step): the endpoint must be set
+  explicitly (empty → build fails; no fallback to production), must be `https://` with a host,
+  and the production host (any spelling: case, port, userinfo, trailing dot) additionally
+  needs `CONFIG_DSP_APP_ALLOW_PRODUCTION`. The M1.7 `CONFIG_DSP_NOTIFY_URL` (HTTPS diagnostic) is
+  unchanged and never used by the runtime. Regression: `test_endpoint_guard` (the six
+  required cases plus spellings and malformed URLs, and the production host cross-checked
+  against the `DSP_NOTIFY_URL` default). Automated tests never run firmware.
+
+The runtime cannot be combined with the older diagnostics (Kconfig dependency). An NVS open
+failure gives the application a failing KV, so it enters DEGRADED.
+
+### Pinout review (no pin assigned)
+
+From Seeed's published XIAO ESP32-C3 pinout (to be confirmed against the board schematic in the
+hardware review): D0 = GPIO2 (strapping), D1 = GPIO3, D2 = GPIO4, D3 = GPIO5, D4 = GPIO6,
+D5 = GPIO7, D6 = GPIO21 (UART0 TX), D7 = GPIO20 (UART0 RX), D8 = GPIO8 (strapping), D9 = GPIO9
+(strapping, BOOT button), D10 = GPIO10; GPIO18/19 are the USB-Serial-JTAG lines; the flash
+uses GPIO12–17.
+
+- **Button wake:** the ESP32-C3 wakes from deep sleep only on GPIO0–5. On the pads that leaves
+  D1–D3 (GPIO3–5); D0 (GPIO2) is a strapping pin and is rejected; the BOOT button (GPIO9) cannot
+  wake from deep sleep. `CONFIG_DSP_BUTTON_WAKE_GPIO` stays -1 until the review.
+- **Battery measurement:** ADC1 is GPIO0–4 (ADC2 is unreliable with Wi-Fi), so it competes
+  with the button candidates; the review must allocate both together.
+- **Pump gate:** avoid the strapping pins (GPIO2/8/9), USB (GPIO18/19) and the UART0 console
+  (GPIO20/21); the remaining pads (GPIO6, GPIO7, GPIO10, or GPIO3–5 if not used for the button or
+  ADC) need their reset and boot levels measured; an external pull-down is required either way.
+
+### Requirements for the real pump driver (separate hardware review)
+
+1. Gate pin from the review above; never a strapping pin.
+2. Gate polarity and an external pull-down so that unpowered, reset, boot, brownout, panic and
+   deep sleep all mean OFF without software (P1); measured with a scope at every reset type.
+3. A hardware cutoff that ends the drive pulse without the CPU (peripheral one-shot or external
+   timeout), its maximum = the driver's `hw_max_runtime_ms`.
+4. Watchdog timeouts shorter than the cutoff; feeding the watchdog never extends a run.
+5. `force_off()` drives the gate low, `is_off()` confirms it (readback), `run()` leaves it OFF on
+   every return; GPIO hold or isolation in deep sleep as measured.
+6. Brownout behavior under motor inrush; a brownout mid-dose is an interruption (reported, never
+   re-run).
+
+### Fail-safe: hardware integration risk
+
+The platform fail-safe resets the SoC instead of sleeping. If the pump OFF confirmation can never
+succeed (e.g. a broken readback), every wake ends in a reset: a **reset loop** with the pump held
+OFF by hardware, safe but **draining the battery**. After 3 consecutive fail-safes the domain
+inhibits dosing until a shutdown is confirmed. No hardware-specific recovery (backoff sleep,
+power cut) is implemented before the gate and reset behavior are measured.
+
+### Sizes and resources (ESP32-C3, measured on the cross-builds)
+
+| Configuration | Image | Headroom in a 1.75 MiB slot | Static DRAM (`idf.py size`) |
+|---|---|---|---|
+| default | 0x24400 (148,480 B) | 91.9 % | 50,059 B |
+| diagnostics (time + HTTPS) | 0xfe6a0 (1,042,080 B) | 43.2 % | 108,552 B |
+| runtime (simulated pump, no connectivity) | 0x38350 (230,224 B) | 87.5 % | 80,103 B |
+| runtime + connectivity (+ test button GPIO 3, sim maximum 30 s) | 0x10bc50 (1,096,784 B) | 40.2 % | 135,780 B |
+
+- Static RAM of the runtime: application state `s_app` 13,112 B, task stack 12,288 B, retained
+  block 72 B in RTC memory; `s_https` adds 1,336 B with connectivity.
+- **Stack:** worst domain call chain from `dsp_app_run_wake` = **2,992 B** (GCC
+  `-fcallgraph-info=su`, RISC-V `-Os`: run_wake → stage_dose → process_due → run_automatic →
+  claim → history scan). Not included: the platform code behind the ports (NVS; with
+  connectivity the TLS handshake inside `esp_http_client`), which needs measuring: the sleep log
+  prints the task's stack high-water mark for that (hardware acceptance 7.6). The 12 KiB default
+  is a provisional margin, not a measurement.
+- New dependencies: ESP-IDF built-ins only (`esp_system`, `freertos`, `log`, `esp_hw_support` in
+  `dispenser_platform` and `main`); no external component, no partition change.
+
 ## HTTPS notification transport and connectivity session (M1.7)
 
 Pure domain code (`dsp_notify_proto`, `dsp_https_transport`, `dsp_connectivity`, extensions
@@ -1642,6 +1758,8 @@ Current host tests (CTest names):
 | `test_proto_vectors` | the shared protocol v1 vectors (M1.8, also run by the backend's Vitest): exact request bodies and canonical payloads, notes the encoder must refuse, the firmware classification of every backend response (byte-exact bodies) and of synthetic responses |
 | `test_dosing` | Dosing Service (M1.9a) over the real coordinator, storage and engine with a fake pump that verifies complete durable state at every activation: default SERVICE_REQUIRED and the checked READY transition, every missing/invalid calibration or limit (no actuation, never BLOCKED), overflow-safe runtime, write order and durable claimed volume, same-time schedules and the due window, per-dose/runtime/daily/interval limits, midnight, both DST days, rollback and untrusted time, restart in cooldown, BLOCKED latch (automatic and manual refused until refill), refill with a power cut at every write (dosing disabled until complete), pump faults, storage failures at every write (DEGRADED), a dose report whose `notify` write fails (durable source kept, dosing disabled for the wake, exactly one report whether flushed in the wake or recovered at boot, never repeated) and reports with no durable source (not invented), a refused same-time dose that becomes MISSED without catch-up, **exhaustive power-loss matrices for automatic and manual doses with a second cut inside recovery** (never a pump run in recovery, interruption reported exactly once with the durable volume, estimate unchanged), format-1 history recovery, and a 3000-step randomized run with cuts, restarts, refills and clock steps |
 | `test_app` | Application and Power Services (M1.9b): complete wake cycles over the real domain services with fakes for the pump, KV (power cuts that abort the wake via longjmp), clock and RTC continuity, NTP, Wi-Fi, HTTP, BLE service mode and the sleep port with RTC memory. Oracles on every pump start (durable claim/marker, last start and consumption; no radio active; inside the due window; no duplicate) and every sleep (pump OFF, radios off, no HTTPS session). Retained-block codec (every bit flip rejected) and plan rules; first boot and exact stage order; scheduled, same-time (interval retry inside the window, else missed) and missed doses; manual dose and bounded queue in service mode; BLE session lifetime (180 s idle, kept while connected, idle restart after disconnect, 15 min and configurable maximum, wall-clock steps ignored, no resume past the deadline, queue lock balance and no posting outside a session); SERVICE_REQUIRED, READY, BLOCKED and refill (dose wakes suppressed and restored); Wi-Fi unavailable (backoff, dosing unaffected); CRITICAL on an existing wake and the hourly limit; BLE suspended for a due dose and resumed; DEGRADED and storage failures; clock rollback (2 h, > 7 days) and DST; SAFE_OFF/shutdown/BLE confirmation failures and the fail-safe inhibit; **power loss at every stage (2 scenarios × 4 reboot variants)**; **two 365-day simulations** (clean: every expected occurrence exactly once; chaotic: cuts, resets, Wi-Fi faults, clock steps, pump faults, button sessions) |
+| `test_endpoint_guard` | M1.9c build-time endpoint guard (`cmake -P`): runtime disabled, runtime without connectivity, connectivity without an endpoint (fails), explicit staging endpoint, production without approval (fails), production with approval; production-host spellings, non-https and host-less URLs, a look-alike host, and the guard's production host equal to the `DSP_NOTIFY_URL` default |
+| `test_platform` | M1.9c pure adapter rules (`dsp_platform_logic.c`, compiled unchanged into the firmware): reset/wake mapping for every reset kind and wake-source combination, retained block and clock continuity agreeing on every reset, sleep clamping, button pin check (strapping and non-wake pins rejected), RTC header (power-on garbage, torn header, oversize, corrupt data rejected by the domain CRC), backoff and hourly limit preserved through the RTC buffer, no clock trust from retained data; and a **two-thread** queue test (a producer thread posting 400 commands, queue full and session-closed refusals, while the application task runs a service session under a mutex): every accepted command answered exactly once. Also run separately under ThreadSanitizer (0 races; a lock-free mutant reports races) |
 | `test_https` | HTTPS transport and connectivity session (M1.7) over fakes: exact body and token handed to the port, token wiped after every request, token validation (length, spaces, control characters); **systemic 401/404/405/413/415, ambiguous 400, mismatched 409, redirects, 429 and 5xx never drain the queue** (20 sessions each, then recovery); event-specific 409/400 removed and logged; mismatched acknowledgement UNCERTAIN, then duplicate ACK with an identical payload; timeout after the backend accepted plus power loss; connect/TLS failures; the 60 s budget with a monotonic clock; session gating: dosing/permit/BLE guard, next-dose distance, regular sync vs CRITICAL on an existing wake, the 1-hour limit, the Wi-Fi backoff, untrusted time (nothing sent) vs trusted HOLDOVER, missing token, Wi-Fi always shut down |
 
 Python tool test (no ESP-IDF needed; the real-generator case runs inside an ESP-IDF shell):
@@ -1707,10 +1825,11 @@ alternative to the native setup, not a requirement.
 | Integration: domain + real TLS + committed Worker + local D1 + fake Gmail (M1.8) | locally integrated (`test/integration`, 1,000 randomized sessions) | n/a | not run |
 | Dosing Service, storage layout v4, formats (M1.9a) | implemented, tested with fake pump and fake KV (power cuts, failures, randomized) | compiled, not called | not run; **no real pump driver** |
 | Application and Power Services (M1.9b) | implemented, tested with fakes (pump, KV with power cuts, clock, NTP, Wi-Fi, HTTP, BLE, sleep port, RTC memory); 365-day simulations | compiled, not called | not run; **no deep sleep, RTC, button or BLE adapters** |
+| Platform adapters: power/sleep, RTC block, queue lock, simulated pump, runtime (M1.9c) | pure rules host-tested (`test_platform`, incl. a two-thread queue test; TSan-clean separately) | compiled in four configurations; runtime opt-in | **not run**; no real pump driver, no button pin |
 | Battery monitor | not started | — | — |
 | Dosing service, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
-| Deep sleep and wake-up | domain plan and checklist (M1.9b); adapters not started | — | — |
+| Deep sleep and wake-up | domain plan and checklist (M1.9b) | adapter compiled (M1.9c) | **not run** |
 | BLE, production credential provisioning, OTA client, deep sleep | not started | — | — |
 
 ## Hardware verification still pending
@@ -1724,10 +1843,11 @@ alternative to the native setup, not a requirement.
 - Button on a deep-sleep wake-capable GPIO (GPIO0–GPIO5) and indicator LED (the board has
   no user LED).
 - Deep-sleep current and RTC drift; battery measurement hardware.
-- M1.9b (pending adapters): deep-sleep entry only after the checklist, timer and button wake,
-  the RTC-retained block across each reset type, the fail-safe reset and the pump gate level
-  after it, BLE suspend/resume latency around a dose, wake latency versus the 10-minute due
-  window.
+- M1.9b/M1.9c: deep-sleep entry only after the checklist, timer and button wake, the
+  RTC-retained block across each reset type, the fail-safe reset and the pump gate level after
+  it, the application task's stack high-water mark (with and without TLS), BLE suspend/resume
+  latency around a dose, wake latency versus the 10-minute due window (see
+  [`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md) section 7).
 - NVS adapter on real flash: provisioning, power loss during writes, partition sizing and
   the final partition layout (see "Capacity, flash layout and wear").
 - Time: RTC continuity per reset type, deep-sleep drift, Wi-Fi/SNTP on a real network,
@@ -1738,8 +1858,8 @@ alternative to the native setup, not a requirement.
 
 ## Next milestone
 
-M1.9c (platform adapters: deep sleep and wake, RTC memory, pump
-driver with a simulation backend only, `app_main` wiring behind a Kconfig option, default
-off) is designed; not started. The on-device acceptance
+After the M1.9c review: the hardware review (pin map, pump gate and cutoff, button, battery
+measurement) and the BLE milestone (NimBLE, GATT, authenticated provisioning) are not started.
+The on-device acceptance
 ([`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md)) waits for the board and an approved
 staging backend.

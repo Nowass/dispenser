@@ -23,4 +23,23 @@ config DSP_NOTIFY_HEALTH_URL
         verify Wi-Fi, trusted time and certificate validation without sending
         an event or a credential.
 
+config DSP_BUTTON_WAKE_GPIO
+    int "Button deep-sleep wake GPIO (-1 = none; pending hardware review)"
+    range -1 21
+    default -1
+    help
+        GPIO for the service-mode button wake (M1.9c provision only). -1 keeps
+        the button wake disabled, which is the required setting until the
+        hardware review assigns a pin from the board pinout. Only ESP32-C3
+        deep-sleep wake pads GPIO0-GPIO5 are accepted, and the strapping pin
+        GPIO2 is rejected at run time; an invalid value leaves timer-only wake.
+        Configures an input wake only, never an output.
+
+config DSP_BUTTON_WAKE_ACTIVE_HIGH
+    bool "Button wake level is high"
+    default n
+    help
+        Wake on a high level (default: low level with a pull-up). Depends on
+        the button circuit, to be decided by the hardware review.
+
 endmenu

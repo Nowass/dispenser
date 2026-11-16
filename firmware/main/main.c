@@ -7,7 +7,10 @@
  * Optional diagnostics (Kconfig, all default off): read-only storage check, time sync,
  * HTTPS transport (M1.7; never posts an event).
  *
- * Deliberately absent (separate milestones, pending hardware review):
+ * Optional application runtime (M1.9c, CONFIG_DSP_APP_RUNTIME, default off): the M1.9b
+ * application cycle with a SIMULATED pump (no GPIO) and deep sleep; see app_runtime().
+ *
+ * Deliberately absent from the default image (separate milestones, pending hardware review):
  *   - no GPIO configuration of any kind (pump/motor, button, LED),
  *   - no Bluetooth or Wi-Fi start,
  *   - no power-management or deep-sleep changes,
@@ -15,6 +18,8 @@
  */
 
 #include "dsp_identity.h"
+
+#include <string.h>
 
 #include "esp_app_desc.h"
 #include "esp_idf_version.h"
@@ -34,6 +39,17 @@
 #if CONFIG_DSP_NOTIFY_HTTPS_DIAGNOSTIC
 #include "dsp_esp_notify.h"
 #include "dsp_https_transport.h"
+#endif
+
+#if CONFIG_DSP_APP_RUNTIME
+#include "dsp_app.h"
+#include "dsp_esp_app.h"
+#include "dsp_esp_notify.h"
+#include "dsp_esp_time.h"
+#include "dsp_nvs_kv.h"
+#include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #endif
 
 static const char *TAG = "dispenser";
@@ -153,8 +169,137 @@ static void notify_https_diagnostic(void)
 }
 #endif
 
+#if CONFIG_DSP_APP_RUNTIME
+/* ---- Application runtime (opt-in) ---------------------------------------------------
+ * Single owner, run to completion: one static task runs dsp_app_run_wake() once; the wake
+ * ends in deep sleep (or the fail-safe reset), and the next wake starts app_main again.
+ * All state is static (the task stack holds only call frames). */
+
+/* KV that always fails: an NVS open failure then leads the application into DEGRADED. */
+static dsp_kv_status_t failing_get(void *ctx, const char *key, uint8_t *buf, size_t cap, size_t *len)
+{
+    (void)ctx;
+    (void)key;
+    (void)buf;
+    (void)cap;
+    (void)len;
+    return DSP_KV_ERR_READ;
+}
+static dsp_kv_status_t failing_set(void *ctx, const char *key, const uint8_t *data, size_t len)
+{
+    (void)ctx;
+    (void)key;
+    (void)data;
+    (void)len;
+    return DSP_KV_ERR_WRITE;
+}
+static dsp_kv_status_t failing_commit(void *ctx)
+{
+    (void)ctx;
+    return DSP_KV_ERR_WRITE;
+}
+
+static dsp_app_t s_app;
+static dsp_app_config_t s_cfg;
+static dsp_nvs_kv_t s_nvs;
+static dsp_kv_t s_kv;
+static dsp_power_port_t s_power;
+static dsp_clock_port_t s_clock;
+static dsp_time_port_t s_time;
+static dsp_monotonic_t s_mono;
+static dsp_app_sync_t s_sync;
+#if CONFIG_DSP_APP_CONNECTIVITY
+static dsp_wifi_manager_t s_wifi;
+static dsp_https_transport_t s_https;
+#endif
+static StaticTask_t s_task;
+static StackType_t s_stack[CONFIG_DSP_APP_TASK_STACK / sizeof(StackType_t)];
+
+static void app_task(void *arg)
+{
+    (void)arg;
+    dsp_app_report_t rep = dsp_app_run_wake(&s_app, &s_cfg);
+    /* Only reached when the sleep port could not run (invalid wiring) or on host-like
+     * behavior: never stay awake with unknown state. */
+    ESP_LOGE(TAG, "application cycle returned (slept=%d fail_safe=%d): fail-safe",
+             (int)rep.slept, (int)rep.fail_safe);
+    dsp_esp_fail_safe(rep.shutdown_failures);
+}
+
+static void app_runtime(void)
+{
+    /* SAFE_OFF before anything else (the application repeats it as its first stage). */
+    const dsp_pump_port_t *pump = dsp_esp_pump_sim();
+    (void)dsp_dosing_port_safe_off(pump);
+
+    memset(&s_cfg, 0, sizeof s_cfg);
+    dsp_nvs_status_t ns = dsp_nvs_kv_open(&s_nvs, DSP_NVS_DEFAULT_PARTITION, DSP_NVS_NAMESPACE,
+                                          false, &s_kv);
+    if (ns != DSP_NVS_OK) {
+        ESP_LOGW(TAG, "app: NVS unavailable (status %d): DEGRADED", (int)ns);
+        s_kv.ctx = NULL;
+        s_kv.get = failing_get;
+        s_kv.set = failing_set;
+        s_kv.commit = failing_commit;
+    }
+    dsp_esp_clock_port(&s_clock);
+    dsp_esp_time_port(&s_time);
+    dsp_esp_monotonic(&s_mono);
+    dsp_esp_app_sync(&s_sync);
+#if CONFIG_DSP_APP_CONNECTIVITY
+    dsp_esp_power_port(&s_power, pump, dsp_esp_wifi_driver()); /* fail-safe also stops Wi-Fi */
+#else
+    dsp_esp_power_port(&s_power, pump, NULL); /* no radio is ever started */
+#endif
+    s_cfg.kv = &s_kv;
+    s_cfg.tz = &DSP_TZ_EUROPE_PRAGUE;
+    s_cfg.pump = pump;
+    s_cfg.hw_max_runtime_ms = (uint32_t)CONFIG_DSP_APP_SIM_HW_MAX_RUNTIME_MS;
+    s_cfg.power = &s_power;
+    s_cfg.clock = &s_clock;
+    s_cfg.time = &s_time;
+    s_cfg.mono = &s_mono;
+    s_cfg.sync = &s_sync;
+    s_cfg.ble = NULL; /* no BLE stack yet: no service mode */
+    s_cfg.random = esp_random();
+    s_cfg.max_sleep_s = CONFIG_DSP_APP_MAX_SLEEP_S;
+#if CONFIG_DSP_APP_CONNECTIVITY
+    bool secrets = dsp_esp_secrets_init();
+    uint64_t device_id = 0;
+    dsp_wifi_config_t wcfg = {DSP_WIFI_TIMEOUT_DEFAULT_MS, DSP_WIFI_ATTEMPTS_DEFAULT};
+    const dsp_wifi_credentials_provider_t *creds =
+        secrets ? dsp_esp_wifi_credentials() : &DSP_WIFI_NO_CREDENTIALS;
+    /* CONFIG_DSP_APP_NOTIFY_URL is checked at build time (dsp_endpoint_guard.cmake): explicit,
+     * https only, production only with CONFIG_DSP_APP_ALLOW_PRODUCTION. Never DSP_NOTIFY_URL. */
+    if (CONFIG_DSP_APP_NOTIFY_URL[0] != '\0' && dsp_esp_device_id(&device_id) &&
+        dsp_esp_http_configure(CONFIG_DSP_APP_NOTIFY_URL) &&
+        dsp_wifi_init(&s_wifi, dsp_esp_wifi_driver(), creds, &wcfg) == DSP_NET_OK &&
+        dsp_https_init(&s_https, dsp_esp_http_port(), dsp_esp_api_token(), &s_mono, device_id, 0)) {
+        s_cfg.wifi = &s_wifi;
+        s_cfg.ntp = dsp_esp_sntp_source();
+        s_cfg.https = &s_https;
+    } else {
+        ESP_LOGW(TAG, "app: connectivity unavailable (credentials=%d)", (int)secrets);
+    }
+#endif
+}
+
+/* Last action of app_main: from here on the application task is the single owner. */
+static void app_runtime_start(void)
+{
+    TaskHandle_t t = xTaskCreateStatic(app_task, "dsp_app", CONFIG_DSP_APP_TASK_STACK / sizeof(StackType_t),
+                                       NULL, tskIDLE_PRIORITY + 2, s_stack, &s_task);
+    if (t == NULL) {
+        dsp_esp_fail_safe(0);
+    }
+}
+#endif
+
 void app_main(void)
 {
+#if CONFIG_DSP_APP_RUNTIME
+    app_runtime(); /* SAFE_OFF is its first statement; the task starts at the end */
+#endif
     const esp_app_desc_t *app = esp_app_get_description();
 
     const dsp_identity_t id = {
@@ -171,7 +316,11 @@ void app_main(void)
         ESP_LOGW(TAG, "firmware identification unavailable (rc=%d)", (int)rc);
     }
     ESP_LOGI(TAG, "project=%s build=%s %s", app->project_name, app->date, app->time);
+#if CONFIG_DSP_APP_RUNTIME
+    ESP_LOGI(TAG, "M1.9c application runtime: SIMULATED pump (no GPIO), deep sleep");
+#else
     ESP_LOGI(TAG, "M0.2 skeleton: no GPIO, radio, sleep or dosing activity");
+#endif
 #if CONFIG_DSP_STORAGE_SMOKE_TEST
     storage_smoke_test();
 #endif
@@ -182,6 +331,9 @@ void app_main(void)
     notify_https_diagnostic();
 #endif
 
+#if CONFIG_DSP_APP_RUNTIME
+    app_runtime_start();
+#endif
     /* Returning from app_main is fine: the main task is deleted, the scheduler keeps
-     * running idle. Deep sleep and wake-up handling come in a later milestone. */
+     * running (in the runtime build the application task then owns everything). */
 }

@@ -39,4 +39,73 @@ config DSP_NOTIFY_HTTPS_DIAGNOSTIC
         the dispenser NVS namespace, never doses. Without provisioned
         credentials the radio is never started. Off by default.
 
+config DSP_APP_RUNTIME
+    bool "Application cycle with SIMULATED pump and deep sleep (M1.9c, opt-in)"
+    default n
+    depends on !DSP_STORAGE_SMOKE_TEST && !DSP_TIME_SYNC_DIAGNOSTIC && !DSP_NOTIFY_HTTPS_DIAGNOSTIC
+    help
+        Runs the M1.9b application cycle (dsp_app_run_wake) in a dedicated
+        static task: SAFE_OFF first, storage in the "nvs" partition
+        (provisions on first boot: SERVICE_REQUIRED, no limits), recovery,
+        dosing through the Dosing Service, planning, shutdown checklist and
+        deep sleep. The pump is a SIMULATION (no GPIO, nothing actuated) and
+        the simulated hardware runtime maximum defaults to 0, so no dose can
+        start. No BLE (service mode unavailable). Not verified on hardware.
+        Off by default: the default image keeps the M0.2 behavior.
+
+config DSP_APP_CONNECTIVITY
+    bool "Enable Wi-Fi time sync and notification delivery in the application cycle"
+    default n
+    depends on DSP_APP_RUNTIME
+    help
+        Uses the developer-provisioned "nvs_sec" credentials and the endpoint
+        DSP_APP_NOTIFY_URL, which must be set explicitly (the build fails
+        otherwise; there is no fallback to the production endpoint). Without
+        credentials the radio is never started. Automated tests never run
+        firmware. Off by default.
+
+config DSP_APP_NOTIFY_URL
+    string "Application runtime notification endpoint (required, https://)"
+    default ""
+    depends on DSP_APP_CONNECTIVITY
+    help
+        Protocol-v1 ingestion endpoint used by the application runtime, e.g. an
+        approved staging Worker. Must be set explicitly; the build fails when
+        it is empty or not an https:// URL. The production endpoint is refused
+        at build time unless DSP_APP_ALLOW_PRODUCTION is also set. Independent
+        of DSP_NOTIFY_URL (M1.7 diagnostic).
+
+config DSP_APP_ALLOW_PRODUCTION
+    bool "Allow the application runtime to use the PRODUCTION endpoint"
+    default n
+    depends on DSP_APP_CONNECTIVITY
+    help
+        Separate explicit approval for DSP_APP_NOTIFY_URL pointing to the
+        production Worker. Leave off during hardware bring-up.
+
+config DSP_APP_SIM_HW_MAX_RUNTIME_MS
+    int "Simulated pump hardware runtime maximum (ms, 0 = never actuate)"
+    range 0 60000
+    default 0
+    depends on DSP_APP_RUNTIME
+    help
+        Stands in for the hardware cutoff of the future pump driver. 0 (the
+        default) closes every dose in the Dosing Service. Even a non-zero
+        value only drives the simulated pump, never a GPIO.
+
+config DSP_APP_MAX_SLEEP_S
+    int "Maximum sleep / re-evaluation interval (s)"
+    range 60 86400
+    default 21600
+    depends on DSP_APP_RUNTIME
+
+config DSP_APP_TASK_STACK
+    int "Application task stack (bytes)"
+    range 6144 32768
+    default 12288
+    depends on DSP_APP_RUNTIME
+    help
+        Static stack of the single application task (measured worst-case
+        call-chain frame sum plus margin; see firmware/README.md).
+
 endmenu
