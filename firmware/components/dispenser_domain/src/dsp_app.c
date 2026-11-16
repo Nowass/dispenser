@@ -188,15 +188,8 @@ static void ble_suspend(dsp_app_t *app)
     }
 }
 
-/* Service-session lifetime on the monotonic clock (milliseconds). */
-typedef struct {
-    uint64_t start_ms;
-    uint64_t max_ms;           /* absolute end of the maximum total duration */
-    uint64_t idle_deadline_ms; /* absolute end of the idle timeout (no client) */
-    uint64_t idle_ms;
-    bool was_connected;
-    uint8_t end;               /* dsp_app_ble_end_t */
-} session_t;
+/* Service-session lifetime on the monotonic clock (milliseconds): app->ss (dsp_app_session_t),
+ * shared by the session loop and the operations that suspend BLE for the pump. */
 
 static uint64_t mono_ms(const dsp_app_t *app)
 {
@@ -211,7 +204,7 @@ static bool ble_connected(const dsp_app_t *app)
 
 /* Resumes after a pump run only while the deadline permits. A connection that the suspension
  * closed restarts the idle timeout (the client has to reconnect). */
-static bool ble_resume(dsp_app_t *app, session_t *ss, bool was_connected)
+static bool ble_resume(dsp_app_t *app, dsp_app_session_t *ss, bool was_connected)
 {
     uint64_t now = mono_ms(app);
     if (now < ss->start_ms) {
@@ -312,7 +305,7 @@ static dsp_app_resp_status_t from_dosing(dsp_dosing_status_t st)
 }
 
 /* Returns false when the session must end. */
-static bool handle_command(dsp_app_t *app, const dsp_app_cmd_t *cmd, session_t *ss)
+static bool handle_command(dsp_app_t *app, const dsp_app_cmd_t *cmd, dsp_app_session_t *ss)
 {
     dsp_app_response_t r;
     memset(&r, 0, sizeof r);
@@ -327,34 +320,6 @@ static bool handle_command(dsp_app_t *app, const dsp_app_cmd_t *cmd, session_t *
         r.status = DSP_RESP_OK;
     } else if (!app->loaded) {
         r.status = DSP_RESP_DEGRADED; /* read-only session (Q12) */
-    } else if (cmd->kind == DSP_CMD_MANUAL_DOSE) {
-        if (!dosing_usable(app)) {
-            r.status = DSP_RESP_DEGRADED;
-        } else {
-            /* P9: BLE off before the pump; a due scheduled dose goes first (Q8). */
-            bool was_connected = ble_connected(app);
-            ble_suspend(app);
-            if (dose_due_now(app)) {
-                stage_dose(app);
-            }
-            if (!dosing_usable(app)) {
-                r.status = DSP_RESP_DEGRADED;
-            } else {
-                dsp_dosing_result_t d = dsp_dosing_manual(&app->dosing, cmd->volume_ul, dose_clock(app));
-                r.dosing = d.status;
-                r.status = from_dosing(d.status);
-                r.limits = d.limits;
-                if (d.status == DSP_DOSING_OK) {
-                    app->rep.manual_doses++;
-                }
-                if (d.status == DSP_DOSING_PUMP_FAILED) {
-                    app->pump_fault = true;
-                    app->rep.pump_fault = true;
-                }
-                app->rep.dosing_degraded = dsp_dosing_degraded(&app->dosing);
-            }
-            keep = ble_resume(app, ss, was_connected);
-        }
     } else if (cmd->kind == DSP_CMD_REFILL) {
         r.dosing = dsp_dosing_refill(&app->dosing, cmd->capacity_ul, cmd->remaining_ul,
                                      notify_clock(app));
@@ -383,8 +348,8 @@ static void stage_ble(dsp_app_t *app)
     trace(app, DSP_STAGE_BLE);
     const dsp_app_config_t *cfg = app->cfg;
     const dsp_ble_port_t *ble = cfg->ble;
-    session_t ss;
-    memset(&ss, 0, sizeof ss);
+    dsp_app_session_t *ss = &app->ss;
+    memset(ss, 0, sizeof *ss);
     uint32_t idle_s = cfg->service_idle_s != 0 ? cfg->service_idle_s : DSP_APP_SERVICE_IDLE_DEFAULT_S;
     uint32_t max_s = cfg->service_max_s != 0 ? cfg->service_max_s : DSP_APP_SERVICE_MAX_DEFAULT_S;
     if (max_s < idle_s) {
@@ -398,30 +363,30 @@ static void stage_ble(dsp_app_t *app)
     }
     app->ble_active = true;
     app->rep.ble_session = true;
-    ss.start_ms = mono_ms(app);
-    ss.idle_ms = (uint64_t)idle_s * 1000u;
-    ss.max_ms = ss.start_ms + (uint64_t)max_s * 1000u;
-    ss.idle_deadline_ms = ss.start_ms + ss.idle_ms;
+    ss->start_ms = mono_ms(app);
+    ss->idle_ms = (uint64_t)idle_s * 1000u;
+    ss->max_ms = ss->start_ms + (uint64_t)max_s * 1000u;
+    ss->idle_deadline_ms = ss->start_ms + ss->idle_ms;
     bool stalled = false; /* a due dose made no progress: wait before re-checking */
-    for (uint32_t it = 0; it < DSP_APP_BLE_MAX_ITERATIONS && ss.end == DSP_BLE_END_NONE; it++) {
+    for (uint32_t it = 0; it < DSP_APP_BLE_MAX_ITERATIONS && ss->end == DSP_BLE_END_NONE; it++) {
         uint64_t now = mono_ms(app);
-        if (now < ss.start_ms) {
-            ss.end = DSP_BLE_END_CLOCK; /* a monotonic clock never goes back: end conservatively */
+        if (now < ss->start_ms) {
+            ss->end = DSP_BLE_END_CLOCK; /* a monotonic clock never goes back: end conservatively */
             break;
         }
-        if (now >= ss.max_ms) {
-            ss.end = DSP_BLE_END_MAX;
+        if (now >= ss->max_ms) {
+            ss->end = DSP_BLE_END_MAX;
             break;
         }
         bool conn = ble_connected(app);
         if (conn) {
-            ss.was_connected = true;
-        } else if (ss.was_connected) {
-            ss.was_connected = false; /* disconnected: the idle timeout restarts */
-            ss.idle_deadline_ms = now + ss.idle_ms;
+            ss->was_connected = true;
+        } else if (ss->was_connected) {
+            ss->was_connected = false; /* disconnected: the idle timeout restarts */
+            ss->idle_deadline_ms = now + ss->idle_ms;
         }
-        if (!conn && now >= ss.idle_deadline_ms) {
-            ss.end = DSP_BLE_END_IDLE;
+        if (!conn && now >= ss->idle_deadline_ms) {
+            ss->end = DSP_BLE_END_IDLE;
             break;
         }
         if (!stalled && dose_due_now(app)) {
@@ -430,19 +395,20 @@ static void stage_ble(dsp_app_t *app)
             ble_suspend(app);
             stage_dose(app);
             stalled = app->rep.dosed + app->rep.pump_failures == before;
-            if (!ble_resume(app, &ss, conn)) {
+            if (!ble_resume(app, ss, conn)) {
                 break;
             }
             continue;
         }
         dsp_app_cmd_t cmd;
         if (q_pop(app, &cmd)) {
-            if (!handle_command(app, &cmd, &ss)) {
+            if (!handle_command(app, &cmd, ss)) {
                 break;
             }
             continue;
         }
-        uint64_t deadline = conn || ss.idle_deadline_ms > ss.max_ms ? ss.max_ms : ss.idle_deadline_ms;
+        uint64_t deadline =
+            conn || ss->idle_deadline_ms > ss->max_ms ? ss->max_ms : ss->idle_deadline_ms;
         uint64_t wait_ms = deadline - now;
         dsp_utc_t at = 0;
         dsp_utc_t wall = raw_now(app);
@@ -461,10 +427,10 @@ static void stage_ble(dsp_app_t *app)
         }
         ble->wait(ble->ctx, (uint32_t)wait_ms);
     }
-    if (ss.end == DSP_BLE_END_NONE) {
-        ss.end = DSP_BLE_END_MAX; /* iteration bound */
+    if (ss->end == DSP_BLE_END_NONE) {
+        ss->end = DSP_BLE_END_MAX; /* iteration bound */
     }
-    app->rep.ble_end = ss.end;
+    app->rep.ble_end = ss->end;
     /* Unprocessed commands are dropped (the session is over); BLE stopped. */
     q_open(app, false);
     ble->stop(ble->ctx);
@@ -1007,6 +973,140 @@ dsp_app_op_result_t dsp_app_set_phone_time(dsp_app_t *app, const dsp_app_auth_t 
     return done(app, op(DSP_OP_OK, 0, 0));
 }
 
+/* ---- M1.10b.2: manual dose with durable anti-replay ---------------------------------------- */
+
+static void fill_manual(const dsp_app_t *app, uint8_t slot, dsp_app_manual_result_t *out,
+                        uint8_t state, uint32_t detail)
+{
+    out->state = state;
+    out->detail = detail;
+    out->floor = dsp_dosing_manual_floor(&app->dosing, slot);
+}
+
+dsp_app_op_result_t dsp_app_manual_dose(dsp_app_t *app, const dsp_app_auth_t *auth, uint64_t seq,
+                                        uint32_t volume_ul, dsp_app_manual_result_t *out)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    memset(out, 0, sizeof *out);
+    const uint8_t slot = auth->slot; /* the verified session's slot, never the request's */
+    if (seq == 0 || seq > DSP_MANUAL_SEQ_MAX || volume_ul == 0) {
+        fill_manual(app, slot, out, DSP_MRES_NOT_DECIDED, 0);
+        return op(DSP_OP_INVALID, 0, 0); /* not consumed */
+    }
+    /* Rule 1: already decided -> never executed, no side effect (BLE untouched). */
+    dsp_manual_outcome_t lk = dsp_dosing_manual_lookup(&app->dosing, slot, seq);
+    if (lk.kind == DSP_MANUAL_DECIDED) {
+        fill_manual(app, slot, out, lk.state, lk.detail);
+        return done(app, op(DSP_OP_DUPLICATE, lk.state, lk.detail));
+    }
+    if (app->storage_fault || dsp_dosing_degraded(&app->dosing)) {
+        fill_manual(app, slot, out, DSP_MRES_NOT_DECIDED, 0);
+        return op(DSP_OP_DEGRADED, 0, 0); /* nothing can be made durable in this wake */
+    }
+    /* Rule 2: BLE off before the pump; a due scheduled dose goes first (Q8). */
+    bool was_connected = ble_connected(app);
+    ble_suspend(app);
+    if (dose_due_now(app)) {
+        stage_dose(app);
+    }
+    dsp_manual_outcome_t o;
+    if (app->storage_fault || dsp_dosing_degraded(&app->dosing)) {
+        memset(&o, 0, sizeof o);
+        o.kind = DSP_MANUAL_NOT_DURABLE;
+        o.dose.gates = DSP_DOSING_G_DEGRADED;
+    } else {
+        uint32_t refusal = app->inhibited || app->pump_fault ? DSP_MREFUSE_DEGRADED : 0;
+        o = dsp_dosing_manual_request(&app->dosing, slot, seq, volume_ul, dose_clock(app), refusal);
+    }
+    if (o.kind == DSP_MANUAL_EXECUTED && o.dose.status == DSP_DOSING_OK) {
+        app->rep.manual_doses++;
+    }
+    if (o.dose.status == DSP_DOSING_PUMP_FAILED) {
+        app->pump_fault = true; /* no further activation in this wake */
+        app->rep.pump_fault = true;
+    }
+    app->rep.dosing_degraded = dsp_dosing_degraded(&app->dosing);
+    (void)ble_resume(app, &app->ss, was_connected); /* false: the session ends (ss.end set) */
+    fill_manual(app, slot, out, o.state, o.detail);
+    out->volume_ul = o.dose.volume_ul;
+    out->runtime_ms = o.dose.runtime_ms;
+    dsp_app_op_result_t r;
+    switch (o.kind) {
+    case DSP_MANUAL_EXECUTED:
+        if (o.dose.status == DSP_DOSING_OK || o.dose.status == DSP_DOSING_PUMP_FAILED) {
+            out->outcome = o.dose.status == DSP_DOSING_OK ? 0 : 1;
+            r = op(DSP_OP_OK, 0, 0);
+        } else {
+            storage_failed(app); /* decided (PENDING) but not completed: recovery finishes it */
+            r = op(DSP_OP_STORAGE, 0, 0);
+        }
+        break;
+    case DSP_MANUAL_REFUSED:
+        if (o.dose.status == DSP_DOSING_LIMIT) {
+            r = op(DSP_OP_LIMIT, o.dose.limits, 0);
+        } else if (o.dose.status == DSP_DOSING_NOT_COVERED) {
+            r = op(DSP_OP_NOT_COVERED, 0, 0);
+        } else {
+            r = op(DSP_OP_REFUSED, o.dose.gates, o.detail); /* aux: refusal code */
+        }
+        break;
+    case DSP_MANUAL_DECIDED:
+        r = op(DSP_OP_DUPLICATE, o.state, o.detail);
+        break;
+    case DSP_MANUAL_INVALID:
+        r = op(DSP_OP_INVALID, 0, 0);
+        break;
+    default: /* NOT_DURABLE */
+        if (o.dose.gates & (DSP_DOSING_G_NOT_LOADED | DSP_DOSING_G_DEGRADED)) {
+            r = op(DSP_OP_DEGRADED, 0, 0);
+        } else {
+            storage_failed(app);
+            r = op(DSP_OP_STORAGE, 0, 0);
+        }
+        break;
+    }
+    return done(app, r);
+}
+
+dsp_app_op_result_t dsp_app_get_result(dsp_app_t *app, const dsp_app_auth_t *auth, uint64_t seq,
+                                       uint8_t *state, uint32_t *detail)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (state == NULL || detail == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    dsp_manual_outcome_t lk = dsp_dosing_manual_lookup(&app->dosing, auth->slot, seq);
+    if (lk.kind == DSP_MANUAL_INVALID) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    *state = lk.state; /* NOT_DECIDED above the high-water mark */
+    *detail = lk.detail;
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_manual_floor(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                         uint64_t *floor)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (floor == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    *floor = dsp_dosing_manual_floor(&app->dosing, auth->slot);
+    return *floor != 0 ? done(app, op(DSP_OP_OK, 0, 0)) : op(DSP_OP_DEGRADED, 0, 0);
+}
+
 /* ---- Public API ------------------------------------------------------------------------ */
 
 static bool config_valid(const dsp_app_config_t *cfg)
@@ -1070,7 +1170,7 @@ dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg)
         }
         if (app->rep.cause == DSP_CAUSE_BUTTON && cfg->ble != NULL) {
             stage_ble(app);
-            if (app->loaded && app->rep.commands > 0) {
+            if (app->loaded && (app->rep.commands > 0 || app->rep.ops > 0)) {
                 stage_connect(app); /* e.g. a CRITICAL event from a manual dose */
             }
         }
@@ -1084,7 +1184,7 @@ dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg)
 bool dsp_app_post(dsp_app_t *app, const dsp_app_cmd_t *cmd)
 {
     if (app == NULL || app->cfg == NULL || cmd == NULL || cmd->kind < DSP_CMD_STATUS ||
-        cmd->kind > DSP_CMD_END_SESSION) {
+        cmd->kind > DSP_CMD_END_SESSION || cmd->kind == DSP_CMD_RETIRED_MANUAL_DOSE) {
         return false;
     }
     q_lock(app);

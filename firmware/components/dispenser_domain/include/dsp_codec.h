@@ -62,8 +62,12 @@ enum {
 #define DSP_CONFIG_RECORD_V1_BYTES 18
 #define DSP_CONFIG_RECORD_BYTES 46
 #define DSP_CONFIG_FORMAT_V2 2
-/* Dosing state (layout v4, M1.9a). */
-#define DSP_DOSING_RECORD_BYTES 52
+/* Dosing state (layout v4, M1.9a): format 2 (M1.10b.2, 206 B) = format 1 (52 B) + anti-replay
+ * state. Format 1 is still read (counters 0, empty ring) and upgraded by the next write. */
+#define DSP_DOSING_RECORD_V1_BYTES 52
+#define DSP_DOSING_RECORD_BYTES 206
+#define DSP_DOSING_FORMAT_V2 2
+#define DSP_DOSING_RING_ENTRY_BYTES 14
 #define DSP_TIME_RECORD_BYTES 42
 #define DSP_NOTIFY_HEADER_BYTES 14
 #define DSP_NOTIFY_COND_BYTES 26
@@ -149,7 +153,10 @@ dsp_codec_status_t dsp_codec_decode_time(const uint8_t *buf, size_t len, dsp_tim
  * format 3 only, at 758: report keys 0 count | 1..3 zero | 4.. 4 x u64 key (unused: zero).
  * The decoder accepts formats 1, 2 (missing parts zero) and 3; the encoder writes 3.
  * Forward-only: older firmware reports a newer format as unsupported. */
-/* dosing (52 B, layout v4, M1.9a): 0 type | 1 version | 2 readiness | 3 flags |
+/* dosing, format 2 (206 B, M1.10b.2) = format 1 | 52..83 manual_hw[4] (u64) | 84 marker_slot |
+ * 85 ring_next | 86..93 marker_req (u64) | 94..205 8 x ring entry (0 slot | 1 state | 2..9 seq u64
+ * | 10..13 detail); unused ring entries all zero. The decoder accepts formats 1 and 2.
+ * dosing format 1 (52 B, layout v4, M1.9a): 0 type | 1 version | 2 readiness | 3 flags |
  * 4..7 refill_capacity | 8..11 refill_remaining | 12..15 refill_seq | 16..19 manual_volume |
  * 20..27 manual_started_at (i64) | 28..31 manual_seq | 32..35 ledger_date (year u16, month,
  * day) | 36..39 ledger_sum | 40..47 last_start (i64) | 48..51 next_seq. */

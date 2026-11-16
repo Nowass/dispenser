@@ -508,9 +508,11 @@ static void test_unsupported_versions(void)
         size_t len = e->len;
         memcpy(v, e->value, len);
         /* Format version from a newer firmware ("notify" is at format 3 since M1.9a, "h12"
-         * and "config" at format 2, "sched" at format 2 since M1.10b.1). */
+         * and "config" at format 2, "sched" at format 2 since M1.10b.1, "dosing" at format 2
+         * since M1.10b.2). */
         bool at2 = strcmp(keys[k], "h12") == 0 || strcmp(keys[k], "config") == 0 ||
-                   strcmp(keys[k], "sched") == 0;
+                   strcmp(keys[k], "sched") == 0 ||
+                   strcmp(keys[k], "dosing") == 0; /* dosing format 2 since M1.10b.2 */
         v[1] = strcmp(keys[k], "notify") == 0 ? 4 : (at2 ? 3 : 2);
         fake_kv_put_raw(&kv, keys[k], v, len);
         expect_open(DSP_STORAGE_ERR_UNSUPPORTED);

@@ -107,7 +107,8 @@ object BleProtocol {
         f("clock_reason", Kind.U8), f("device_utc", Kind.I64), f("next_due_known", Kind.Bool),
         f("next_due_at", Kind.I64), f("pending_notes", Kind.U8), f("highest_severity", range(0, 2)),
         f("storage_ok", Kind.Bool), f("session_seconds_left", Kind.U16),
-        f("battery_percent", Kind.Enum8((0..100).toSet() + 255)), f("", Kind.Reserved(5)),
+        f("battery_percent", Kind.Enum8((0..100).toSet() + 255)), f("manual_floor", Kind.U64),
+        f("", Kind.Reserved(5)),
     )
     val DIAGNOSTICS = listOf(
         f("notify_storage_ok", Kind.Bool), f("tx_diag", Kind.U8), f("tx_diag_status", Kind.U16),

@@ -45,7 +45,8 @@ static const dsp_ble_field_t STATUS_F[] = {
     F_I64(dsp_ble_status_rec_t, next_due_at), F_U8(dsp_ble_status_rec_t, pending_notes),
     F_ENUM(dsp_ble_status_rec_t, highest_severity, 0, 2), F_BOOL(dsp_ble_status_rec_t, storage_ok),
     F_U16(dsp_ble_status_rec_t, session_seconds_left),
-    F_ENUMX(dsp_ble_status_rec_t, battery_percent, 0, 100, 255), F_RESERVED(5),
+    F_ENUMX(dsp_ble_status_rec_t, battery_percent, 0, 100, 255),
+    F_U64(dsp_ble_status_rec_t, manual_floor), F_RESERVED(5),
 };
 LAYOUT(STATUS_L, STATUS_F);
 

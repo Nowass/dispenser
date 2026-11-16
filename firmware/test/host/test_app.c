@@ -504,9 +504,65 @@ static struct {
     int nresp;
 } ble;
 
+/* M1.10b.2: the manual dose is no queue command any more but the authenticated operation
+ * dsp_app_manual_dose(), executed in the application task (here: from inside the BLE fake's
+ * wait(), like the future dispatcher). TEST_MANUAL marks such a script entry (volume in
+ * capacity_ul); every one gets the next request ID of owner slot 0, and its result is recorded
+ * as a response of kind TEST_MANUAL (status mapped to the former queue response codes). */
+#define TEST_MANUAL 200
+static const dsp_app_auth_t OWNER = {DSP_APP_ROLE_OWNER, 0};
+static uint64_t manual_seq;
+static void ble_respond(void *ctx, const dsp_app_response_t *r);
+static dsp_config_t peek_cfg(void);
+
+static void run_manual(const dsp_app_cmd_t *c)
+{
+    dsp_app_manual_result_t mr;
+    dsp_app_op_result_t res = dsp_app_manual_dose(&app, &OWNER, ++manual_seq, c->capacity_ul, &mr);
+    dsp_app_response_t r;
+    memset(&r, 0, sizeof r);
+    r.id = c->id;
+    r.kind = TEST_MANUAL;
+    switch (res.status) {
+    case DSP_OP_OK:
+        r.status = mr.outcome == 0 ? DSP_RESP_OK : DSP_RESP_FAILED;
+        r.dosing = mr.outcome == 0 ? DSP_DOSING_OK : DSP_DOSING_PUMP_FAILED;
+        break;
+    case DSP_OP_REFUSED:
+        r.status = DSP_RESP_REFUSED;
+        r.dosing = DSP_DOSING_REFUSED;
+        r.gates = res.detail;
+        break;
+    case DSP_OP_LIMIT:
+        r.status = DSP_RESP_REFUSED;
+        r.dosing = DSP_DOSING_LIMIT;
+        r.limits = res.detail;
+        break;
+    case DSP_OP_NOT_COVERED:
+        r.status = DSP_RESP_REFUSED;
+        r.dosing = DSP_DOSING_NOT_COVERED;
+        break;
+    case DSP_OP_STORAGE:
+        r.status = DSP_RESP_STORAGE;
+        break;
+    default:
+        r.status = DSP_RESP_DEGRADED;
+        break;
+    }
+    dsp_config_t cfg = peek_cfg();
+    r.capacity_ul = cfg.reservoir_capacity_ul;
+    r.remaining_ul = cfg.reservoir_remaining_ul;
+    ble_respond(NULL, &r);
+}
+
 static void ble_post_due(void)
 {
     while (ble.next < ble.len && ble.at[ble.next] <= g_true) {
+        if (ble.cmd[ble.next].kind == TEST_MANUAL) {
+            dsp_app_cmd_t c = ble.cmd[ble.next++];
+            run_manual(&c);
+            continue;
+        }
         if (!dsp_app_post(&app, &ble.cmd[ble.next])) {
             ble.rejected_posts++;
         }
@@ -654,8 +710,8 @@ static dsp_app_cmd_t cmd_of(uint8_t kind, uint32_t a, uint32_t b)
     memset(&c, 0, sizeof c);
     c.kind = kind;
     c.id = (uint32_t)ble.len + 1;
-    if (kind == DSP_CMD_MANUAL_DOSE) {
-        c.volume_ul = a;
+    if (kind == TEST_MANUAL) {
+        c.capacity_ul = a; /* volume */
     } else if (kind == DSP_CMD_REFILL) {
         c.capacity_ul = a;
         c.remaining_ul = b;
@@ -672,6 +728,17 @@ static const dsp_app_response_t *resp_of(uint8_t kind)
         }
     }
     return NULL;
+}
+
+static dsp_config_t peek_cfg(void)
+{
+    dsp_config_t c;
+    memset(&c, 0, sizeof c);
+    const fake_kv_entry_t *e = fake_kv_find(&kv, "config");
+    if (e != NULL) {
+        (void)dsp_codec_decode_config(e->value, e->len, &c);
+    }
+    return c;
 }
 
 /* ---- World ------------------------------------------------------------------------------ */
@@ -1198,14 +1265,14 @@ static void test_manual_dose_service_mode(void)
     boot_and_provision(CAP, 60, true);
     evlog_len = 0;
     ble_script(g_true + 5, cmd_of(DSP_CMD_STATUS, 0, 0));
-    ble_script(g_true + 10, cmd_of(DSP_CMD_MANUAL_DOSE, 4000, 0));
+    ble_script(g_true + 10, cmd_of(TEST_MANUAL, 4000, 0));
     ble_script(g_true + 30, cmd_of(DSP_CMD_END_SESSION, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK(rep.ble_session);
     DSP_CHECK_EQ_INT(1, rep.manual_doses);
     DSP_CHECK_EQ_INT(1, pump.calls);
     DSP_CHECK(pump.manual[0]);
-    const dsp_app_response_t *r = resp_of(DSP_CMD_MANUAL_DOSE);
+    const dsp_app_response_t *r = resp_of(TEST_MANUAL);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_OK && r->remaining_ul == CAP - 4000);
     r = resp_of(DSP_CMD_STATUS);
     DSP_CHECK(r != NULL && r->storage_available && r->readiness == DSP_READINESS_READY);
@@ -1216,11 +1283,11 @@ static void test_manual_dose_service_mode(void)
     /* Limits apply: over max_dose is refused (no pump). */
     ble.len = ble.next = 0;
     ble.nresp = 0;
-    ble_script(g_true + 70, cmd_of(DSP_CMD_MANUAL_DOSE, 30000, 0));
+    ble_script(g_true + 70, cmd_of(TEST_MANUAL, 30000, 0));
     ble_script(g_true + 80, cmd_of(DSP_CMD_END_SESSION, 0, 0));
     g_true += 60;
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
-    r = resp_of(DSP_CMD_MANUAL_DOSE);
+    r = resp_of(TEST_MANUAL);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_REFUSED && (r->limits & DSP_DOSING_L_DOSE));
     DSP_CHECK_EQ_INT(1, pump.calls);
     /* No button: no service mode on a timer wake even with commands pending. */
@@ -1272,11 +1339,11 @@ static void test_refill_readiness_blocked(void)
     /* Manual dose refused while BLOCKED (Q7). */
     ble.len = ble.next = 0;
     ble.nresp = 0;
-    ble_script(g_true + 1, cmd_of(DSP_CMD_MANUAL_DOSE, 1000, 0));
+    ble_script(g_true + 1, cmd_of(TEST_MANUAL, 1000, 0));
     ble_script(g_true + 2, cmd_of(DSP_CMD_REFILL, CAP, CAP));
     ble_script(g_true + 3, cmd_of(DSP_CMD_END_SESSION, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
-    r = resp_of(DSP_CMD_MANUAL_DOSE);
+    r = resp_of(TEST_MANUAL);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_REFUSED && r->dosing == DSP_DOSING_REFUSED);
     r = resp_of(DSP_CMD_REFILL);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_OK && r->remaining_ul == CAP);
@@ -1377,9 +1444,9 @@ static void test_ble_interrupted_by_due_dose(void)
     evlog_len = 0;
     ble.len = ble.next = 0;
     ble.nresp = 0;
-    ble_script(T0 + 20, cmd_of(DSP_CMD_MANUAL_DOSE, 2000, 0)); /* inside the interval */
+    ble_script(T0 + 20, cmd_of(TEST_MANUAL, 2000, 0)); /* inside the interval */
     ble_script(T0 + 30, cmd_of(DSP_CMD_STATUS, 0, 0));
-    ble_script(T0 + 100, cmd_of(DSP_CMD_MANUAL_DOSE, 2000, 0));
+    ble_script(T0 + 100, cmd_of(TEST_MANUAL, 2000, 0));
     ble_script(T0 + 150, cmd_of(DSP_CMD_END_SESSION, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK(rep.ble_session);
@@ -1393,10 +1460,10 @@ static void test_ble_interrupted_by_due_dose(void)
     DSP_CHECK(strchr(evlog, 'W') == NULL || strchr(evlog, 'W') > strchr(evlog, 'b'));
     DSP_CHECK_EQ_INT(3, ble.nresp); /* the 180 s window ends before the scripted END */
     const dsp_app_response_t *r = &ble.resp[0];
-    DSP_CHECK(r->kind == DSP_CMD_MANUAL_DOSE && r->status == DSP_RESP_REFUSED &&
+    DSP_CHECK(r->kind == TEST_MANUAL && r->status == DSP_RESP_REFUSED &&
               (r->limits & DSP_DOSING_L_INTERVAL)); /* refused: right after the scheduled dose */
     r = &ble.resp[2];
-    DSP_CHECK(r->kind == DSP_CMD_MANUAL_DOSE && r->status == DSP_RESP_OK);
+    DSP_CHECK(r->kind == TEST_MANUAL && r->status == DSP_RESP_OK);
     common_invariants();
 
     /* Resume refused (window over): the session ends cleanly, BLE stopped before sleep. */
@@ -1542,7 +1609,7 @@ static void test_storage_failures(void)
     ble.len = ble.next = 0;
     ble.nresp = 0;
     ble_script(g_true + 1, cmd_of(DSP_CMD_STATUS, 0, 0));
-    ble_script(g_true + 2, cmd_of(DSP_CMD_MANUAL_DOSE, 1000, 0));
+    ble_script(g_true + 2, cmd_of(TEST_MANUAL, 1000, 0));
     ble_script(g_true + 3, cmd_of(DSP_CMD_END_SESSION, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK(rep.degraded);
@@ -1553,7 +1620,7 @@ static void test_storage_failures(void)
     DSP_CHECK_EQ_INT(6 * HOUR, rep.plan.sleep_s);
     const dsp_app_response_t *r = resp_of(DSP_CMD_STATUS);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_OK && !r->storage_available);
-    r = resp_of(DSP_CMD_MANUAL_DOSE);
+    r = resp_of(TEST_MANUAL);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_DEGRADED);
     DSP_CHECK(rep.slept && rep.retained_saved);
     /* Time retry state preserved through the degraded wake (only the counters change). */
@@ -1792,7 +1859,7 @@ static dsp_wake_cause_t scenario_prepare(void)
     ble.nresp = 0;
     if (scenario == 1) {
         g_true = T0 - 120;
-        ble_script(T0 - 100, cmd_of(DSP_CMD_MANUAL_DOSE, 2000, 0));
+        ble_script(T0 - 100, cmd_of(TEST_MANUAL, 2000, 0));
         ble_script(T0 + 150, cmd_of(DSP_CMD_END_SESSION, 0, 0));
         return DSP_CAUSE_BUTTON;
     }
@@ -1996,7 +2063,7 @@ static void test_long_run_chaotic(void)
                 ble_script(g_true + 2, cmd_of(DSP_CMD_REFILL, CAP, CAP));
             }
             if (rnd(2) == 0) {
-                ble_script(g_true + 5, cmd_of(DSP_CMD_MANUAL_DOSE, 1000 + rnd(3000), 0));
+                ble_script(g_true + 5, cmd_of(TEST_MANUAL, 1000 + rnd(3000), 0));
             }
             ble_script(g_true + 6, cmd_of(DSP_CMD_STATUS, 0, 0));
             if (rnd(2) == 0) {

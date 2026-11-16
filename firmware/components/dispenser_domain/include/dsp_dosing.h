@@ -171,9 +171,60 @@ typedef struct {
 dsp_dosing_due_report_t dsp_dosing_process_due(dsp_dosing_t *d, const dsp_schedule_t *schedules,
                                                size_t n, const dsp_dosing_clock_t *clock);
 
-/* Manual dose (future BLE command): same gates and limits; refused while BLOCKED (Q7);
- * never touches automatic history; durable in-flight marker. */
-dsp_dosing_result_t dsp_dosing_manual(dsp_dosing_t *d, uint32_t volume_ul, dsp_clock_t clock);
+/* ---- Manual dose with durable anti-replay (M1.10b.2) ------------------------------------
+ *
+ * The ONLY manual-dose entry. `slot` must come from the authenticated session (never from a
+ * request); `seq` is the phone's request ID for that slot. Same gates and limits as automatic
+ * doses; refused while BLOCKED (Q7); never touches automatic history.
+ *  - INVALID (slot >= 4, seq 0, seq > DSP_MANUAL_SEQ_MAX, volume 0): nothing changes, the request
+ *    ID is not consumed.
+ *  - DECIDED (seq <= manual_hw[slot]): never executes; the retained result (ring) or
+ *    DSP_MRES_UNAVAILABLE. No side effect. A slot at DSP_MANUAL_SEQ_MAX accepts nothing more.
+ *  - REFUSED (gates, limits, coverage, or app_refusal != 0 for refusals decided by the
+ *    Application Service): manual_hw[slot] = seq and the ring entry are made durable in ONE
+ *    dosing write before the answer, so the request can never execute later.
+ *  - EXECUTED: write 1 = marker + ledger + last start + manual_hw[slot] = seq + ring PENDING
+ *    (restricting), write 2 = consumption -> permit, pump, write 3 = marker cleared + ring
+ *    DONE/FAILED; boot recovery turns PENDING into INTERRUPTED in the write that clears the
+ *    marker. A failure after write 1 leaves the marker for recovery (never a second run).
+ *  - NOT_DURABLE: the decision could not be made durable (state not loaded, DEGRADED earlier in
+ *    this wake, or the decision write failed): nothing executed; a retry is evaluated again (the
+ *    durable state decides: if the write landed, the retry is DECIDED).
+ */
+typedef enum {
+    DSP_MANUAL_INVALID = 1,
+    DSP_MANUAL_DECIDED,
+    DSP_MANUAL_REFUSED,
+    DSP_MANUAL_EXECUTED,
+    DSP_MANUAL_NOT_DURABLE,
+} dsp_manual_kind_t;
+
+/* Refusal codes stored as the REFUSED result detail (values = BLE protocol error codes). */
+enum {
+    DSP_MREFUSE_GATES = 7,       /* REFUSED: a gate is closed */
+    DSP_MREFUSE_LIMIT = 8,       /* LIMIT */
+    DSP_MREFUSE_NOT_COVERED = 9, /* NOT_COVERED */
+    DSP_MREFUSE_DEGRADED = 14,   /* DEGRADED: refused by the Application Service in this wake */
+};
+
+typedef struct {
+    dsp_manual_kind_t kind;
+    uint8_t state;       /* DSP_MRES_*: the request's result after this call */
+    uint32_t detail;     /* result detail (volume or refusal code) */
+    dsp_dosing_result_t dose; /* gates / limits / pump detail (REFUSED, EXECUTED, NOT_DURABLE) */
+} dsp_manual_outcome_t;
+
+dsp_manual_outcome_t dsp_dosing_manual_request(dsp_dosing_t *d, uint8_t slot, uint64_t seq,
+                                               uint32_t volume_ul, dsp_clock_t clock,
+                                               uint32_t app_refusal);
+
+/* Read-only result query (GET_RESULT): INVALID, DECIDED (state/detail as above) or
+ * NOT_DURABLE with state NOT_DECIDED (seq above the high-water mark, or state not loaded). */
+dsp_manual_outcome_t dsp_dosing_manual_lookup(const dsp_dosing_t *d, uint8_t slot, uint64_t seq);
+
+/* The slot's next acceptable request ID (manual_hw[slot] + 1; 2^63 when exhausted); 0 when the
+ * state is not loaded or the slot is invalid. */
+uint64_t dsp_dosing_manual_floor(const dsp_dosing_t *d, uint8_t slot);
 
 /* User-confirmed refill (FR-023): restart-safe roll-forward over dosing -> notify ->
  * config -> dosing; dosing stays disabled until the last write. */

@@ -75,6 +75,12 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   [Platform adapters and application runtime](#platform-adapters-and-application-runtime-m19c).
 - (M1.10a) **BLE protocol v1 codec** and the Noise feasibility gate (see
   [BLE protocol codec and Noise gate](#ble-protocol-codec-and-noise-gate-m110a)).
+- (M1.10b.2) **Manual dose with durable anti-replay**: per-phone-slot request high-water marks
+  and a ring of the last 8 results in the `dosing` record (format 2, layout v4); a request is
+  decided exactly once (executed or durably refused) and never activates the pump again; the
+  authenticated `dsp_app_manual_dose()` is the only manual path (the unauthenticated queue
+  command is retired); the slot's counter floor travels in the protocol Status record. See
+  [Manual dose with durable anti-replay](#manual-dose-with-durable-anti-replay-m110b2).
 - (M1.10b.1) **Configuration, schedules and phone time** behind the Application Service, for the
   future BLE dispatcher: revisioned configuration read/update (calibration and limits only in
   SERVICE_REQUIRED), schedule list/get/create/update/delete with on-device names (≤ 32 bytes
@@ -676,7 +682,7 @@ dosing service (future) ──► dsp_exec ──► dsp_history_store_t ─┐
 | `config` | device configuration (format 2 since M1.9a: + pump calibration and safety limits) | 46 B (format 1: 18 B) |
 | `time` | time metadata (M1.4): last sync, high-water time, rollback hold, last correction, dosing floor | 42 B |
 | `notify` | notification state (M1.5): ID epoch and sequence, condition latches, 16-entry queue; since M1.7 (format 2) also the transport diagnostics and the 4-entry rejection log; since M1.9a (format 3) the dose-bound report keys | 794 B (format 2: 758 B, format 1: 682 B) |
-| `dosing` | dosing state (M1.9a, layout v4): readiness, BLOCKED latch, refill intent, manual in-flight marker, daily ledger, last pump start | 52 B |
+| `dosing` | dosing state (M1.9a, layout v4): readiness, BLOCKED latch, refill intent, manual in-flight marker, daily ledger, last pump start; format 2 since M1.10b.2: per-slot manual-dose high-water marks, the marker's request binding, ring of the last 8 request results | 206 B (format 1: 52 B) |
 
 **Explicit presence (approved):** on first boot every key is written with its
 provisioning value (EMPTY slots, empty set, default configuration), then the marker.
@@ -753,6 +759,11 @@ dosing (52 B):        0 type (7) | 1 ver | 2 readiness (1 READY, 2 SERVICE_REQUI
                       8..11 refill remaining | 12..15 refill seq | 16..19 manual volume |
                       20..27 manual started_at (i64) | 28..31 manual seq | 32..35 ledger date |
                       36..39 ledger sum µl | 40..47 last pump start (i64) | 48..51 next seq
+                      (format 1 = these 52 B with version byte 1)
+  format 2 (206 B, M1.10b.2): 52..83 manual_hw[4] (u64 each, <= 2^63 - 1) | 84 marker_slot |
+                      85 ring_next (0..7) | 86..93 marker_req (u64; 0 = none) |
+                      94..205 8 x result (0 slot | 1 state 1 PENDING..5 REFUSED | 2..9 seq u64 |
+                      10..13 detail: volume or refusal code; an unused entry is all zero)
 ```
 
 Golden byte vectors for history, configuration and schedule set (computed independently
@@ -852,8 +863,9 @@ firmware, see M1.7), never in `config`, this namespace or logs.
 
 NVS entries are 32 B and blobs cost 2 entries plus 1 per 32 data bytes. History
 32 × 5 = 160 entries, schedule set ≤ 101 (format 2, 3,160 B; format 1: 81), config 4 (46 B),
-time 4 (M1.4, 42 B), notify 27 (M1.9a, 794 B), dosing 4, marker 3, namespace 1: **≤ about
-304 entries (10 KB)**, plus up to 101 free entries while the largest record is rewritten.
+time 4 (M1.4, 42 B), notify 27 (M1.9a, 794 B), dosing 9 (M1.10b.2, 206 B), marker 3,
+namespace 1: **≤ about 309 entries (10 KB)**, plus up to 101 free entries while the largest
+record is rewritten.
 The M1.7 partition table gives `nvs` 80 KiB (20 pages, about 2,500 usable entries): the
 live data uses about 11 %, which leaves room for ESP-IDF's own Wi-Fi/PHY/BLE data and
 spreads wear. Wear: about 10 entries per automatic dose (plus 3 for the reservoir estimate
@@ -1527,10 +1539,10 @@ power cut) is implemented before the gate and reset behavior are measured.
 |---|---|---|---|
 | default | 0x24400 (148,480 B) | 91.9 % | 50,059 B |
 | diagnostics (time + HTTPS) | 0xfe6a0 (1,042,080 B) | 43.2 % | 108,552 B |
-| runtime (simulated pump, no connectivity) | 0x38350 (230,224 B) | 87.5 % | 80,103 B |
+| runtime (simulated pump, no connectivity) | 0x389c0 (231,872 B) | 87.4 % | 83,103 B |
 | runtime + connectivity (+ test button GPIO 3, sim maximum 30 s) | 0x10bc50 (1,096,784 B) | 40.2 % | 135,780 B |
 
-- Static RAM of the runtime: application state `s_app` 13,112 B, task stack 12,288 B, retained
+- Static RAM of the runtime: application state `s_app` 16,112 B, task stack 12,288 B, retained
   block 72 B in RTC memory; `s_https` adds 1,336 B with connectivity.
 - **Stack:** worst domain call chain from `dsp_app_run_wake` = **2,992 B** (GCC
   `-fcallgraph-info=su`, RISC-V `-Os`: run_wake → stage_dose → process_due → run_automatic →
@@ -1648,6 +1660,52 @@ Sizes (ESP32-C3, `-Os`): the operations add about 4.4 KB of code once the dispat
 0.2 KB, the BLE codec −0.2 KB because it now uses the shared validator); static RAM +2,744 B
 (`dsp_app_t` 15,856 B: the larger schedule set in the repository and the storage buffers);
 at most 208 B of stack per operation.
+
+## Manual dose with durable anti-replay (M1.10b.2)
+
+**Implemented and host-tested in the domain; not reachable over BLE yet** (dispatcher and
+security layer: M1.10c/d). Design: `docs/BLE_PROTOCOL_DESIGN.md` 7.4 (D8); wire semantics:
+`docs/BLE_PROTOCOL.md` 10.4.
+
+- **Entry point:** `dsp_app_manual_dose(app, auth, seq, volume)` is the only manual-dose path
+  (application task, inside a service session, owner authorization, fail closed). The slot is
+  `auth->slot`, the security layer's verified context; nothing in the request selects it. The
+  former unauthenticated queue command `DSP_CMD_MANUAL_DOSE` is retired (`dsp_app_post()` refuses
+  value 2). `dsp_app_get_result()` and `dsp_app_manual_floor()` serve GET_RESULT and the Status
+  record's `manual_floor`. REFILL and SET_READINESS remain legacy queue commands and must not
+  become externally reachable before the security layer authorizes them (M1.10c).
+- **Rule:** `seq <= manual_hw[slot]` is already decided and never executes (the retained result,
+  or UNAVAILABLE). A larger `seq` is decided exactly once: accepted - `manual_hw[slot] = seq`, the
+  marker bound to `(slot, seq)` and a PENDING result in **write 1**, the restricting write, before
+  the consumption/permit (write 2) and the pump; write 3 clears the marker and records DONE/FAILED;
+  boot recovery records INTERRUPTED in the write that clears an interrupted marker - or refused
+  (gates, limits, coverage, or Application Service refusals: a pump fault earlier in the wake, the
+  fail-safe inhibit) with `manual_hw[slot] = seq` and the REFUSED result in **one write** before the
+  answer. Invalid requests (`seq` 0, `seq` > 2^63 − 1, volume 0) consume nothing. If no decision can
+  be made durable (storage unavailable or degraded, or the decision write fails) nothing executes:
+  no consumption, no pump, and the request stays undecided unless the durable state says otherwise.
+- **Counters:** four independent slots; `manual_hw` only grows (until a factory reset re-provisions
+  the record; ownership recovery keeps it); a slot at 2^63 − 1 accepts nothing more (floor 2^63),
+  never wraps. The ring of 8 results is a convenience: eviction never weakens the rule.
+- **BLE:** a fresh request suspends BLE, runs a due scheduled dose first, decides, runs the pump,
+  then resumes only while the session deadline permits (the session state lives in `dsp_app_t`).
+  Already decided and invalid requests touch neither BLE nor the pump.
+- **Storage:** `dosing` format 2 (206 B), decoded strictly (no high-water mark above 2^63 − 1, the
+  marker request at or below its slot's mark and only with an active marker, a PENDING result only
+  for the active marker, one result per request, zero padding). Format 1 decodes with zeros and is
+  upgraded by its next write (one atomic key): **layout v4 is kept**; a corrupt or newer record is
+  reported (CORRUPT / UNSUPPORTED, fail closed), never treated as fresh.
+- **Sizes** (ESP32-C3, `-Os`, against the previous commit): default image unchanged; runtime
+  +496 B image, +256 B static DRAM (`dsp_app_t` 16,112 B); worst stack of a manual request
+  784 B (automatic dose 672 B, recovery 416 B).
+- **Flash wear** (measured with the patched NVS on the real layout; the daily rates are
+  assumptions): a dose now costs about 0.0125 erases of the most-erased page (52 B record:
+  0.0095), a durable refusal 0.0048. At 4 automatic doses, about 2 notifications, 1 time write,
+  1 refusal a day and 1 manual dose a week the most-erased page sees about 320 erase cycles in 10
+  years (about 260 with format 1). A phone that keeps sending valid but refused requests adds
+  about 4.8 cycles on that page per 1,000 refusals (1,000 a day: about 17,700 cycles in 10
+  years): compare with the flash's rated endurance before release; no endurance figure is
+  assumed here.
 
 ## HTTPS notification transport and connectivity session (M1.7)
 
@@ -1901,6 +1959,7 @@ Current host tests (CTest names):
 | `test_dosing` | Dosing Service (M1.9a) over the real coordinator, storage and engine with a fake pump that verifies complete durable state at every activation: default SERVICE_REQUIRED and the checked READY transition, every missing/invalid calibration or limit (no actuation, never BLOCKED), overflow-safe runtime, write order and durable claimed volume, same-time schedules and the due window, per-dose/runtime/daily/interval limits, midnight, both DST days, rollback and untrusted time, restart in cooldown, BLOCKED latch (automatic and manual refused until refill), refill with a power cut at every write (dosing disabled until complete), pump faults, storage failures at every write (DEGRADED), a dose report whose `notify` write fails (durable source kept, dosing disabled for the wake, exactly one report whether flushed in the wake or recovered at boot, never repeated) and reports with no durable source (not invented), a refused same-time dose that becomes MISSED without catch-up, **exhaustive power-loss matrices for automatic and manual doses with a second cut inside recovery** (never a pump run in recovery, interruption reported exactly once with the durable volume, estimate unchanged), format-1 history recovery, and a 3000-step randomized run with cuts, restarts, refills and clock steps |
 | `test_app` | Application and Power Services (M1.9b): complete wake cycles over the real domain services with fakes for the pump, KV (power cuts that abort the wake via longjmp), clock and RTC continuity, NTP, Wi-Fi, HTTP, BLE service mode and the sleep port with RTC memory. Oracles on every pump start (durable claim/marker, last start and consumption; no radio active; inside the due window; no duplicate) and every sleep (pump OFF, radios off, no HTTPS session). Retained-block codec (every bit flip rejected) and plan rules; first boot and exact stage order; scheduled, same-time (interval retry inside the window, else missed) and missed doses; manual dose and bounded queue in service mode; BLE session lifetime (180 s idle, kept while connected, idle restart after disconnect, 15 min and configurable maximum, wall-clock steps ignored, no resume past the deadline, queue lock balance and no posting outside a session); SERVICE_REQUIRED, READY, BLOCKED and refill (dose wakes suppressed and restored); Wi-Fi unavailable (backoff, dosing unaffected); CRITICAL on an existing wake and the hourly limit; BLE suspended for a due dose and resumed; DEGRADED and storage failures; clock rollback (2 h, > 7 days) and DST; SAFE_OFF/shutdown/BLE confirmation failures and the fail-safe inhibit; **power loss at every stage (2 scenarios × 4 reboot variants)**; **two 365-day simulations** (clean: every expected occurrence exactly once; chaotic: cuts, resets, Wi-Fi faults, clock steps, pump faults, button sessions) |
 | `test_app_ops` | M1.10b.1 operations through complete wakes (operations run from the BLE fake's `wait()`, i.e. the application task, like the future dispatcher), oracles on every pump start (no BLE, no operation in progress, inside the due window, never before the edit floor, no duplicate). Authorization fails closed (NULL, non-owner, bad slot: FORBIDDEN, no write; BUSY outside a session; DEGRADED storage); phone time: initial sync without catch-up, plan follows, SYNCED ignored, uncertainty and range boundaries (incl. INT64 extremes), HOLDOVER acceptance and a 2 h step back without re-running a claimed occurrence, > 7 days back and recorded holds refused, forward step skips jumped-over doses, write and clock-set failures, power cut at every write; configuration: field mask, read-only fields, stale revision, every calibration/limit field refused while READY, capacity rules, 25 field boundaries, SERVICE_REQUIRED never enables dosing, refill pending, write failure ends dosing for the wake, power cuts; schedules: CRUD across restarts with names, 30 validation and name cases, revisions, duplicate and reused IDs, capacity and paging, no resurrection after edits, edits near the due window, delete + recreate, Prague DST (fall back and spring forward), plan follows changes, write failure and power cuts in create/update/delete (old or new set, floor durable), format-1 upgrade |
+| `test_manual` | M1.10b.2 anti-replay through complete wakes (harness of `test_app_ops`; oracle on every manual pump start: durable decision bound to the request, high-water mark raised, PENDING result, no request ever twice): accept / duplicate / invalid / floor, duplicates before, during (re-entrant from the pump) and after a dose, lost response and reboot, ring eviction (UNAVAILABLE, never executed), counter gaps, independent slots, exhaustion at 2^63 - 1, fail-closed authorization and the retired queue command, refusals followed by changed conditions (readiness, refill, pump fault in the wake), storage failures at the refusal, decision and consumption writes, power loss at every write of an accepted request (landed or not) and during the pump, power loss at the refusal write, format 1 -> 2 upgrade with a cut at the upgrade write (readiness, BLOCKED, refill and ledger preserved), a format-1 in-flight marker, corrupt and unsupported records (never treated as fresh), format-2 golden bytes, BLE suspend/resume and no resume after the 15-minute deadline |
 | `test_endpoint_guard` | M1.9c build-time endpoint guard (`cmake -P`): runtime disabled, runtime without connectivity, connectivity without an endpoint (fails), explicit staging endpoint, production without approval (fails), production with approval; production-host spellings, non-https and host-less URLs, a look-alike host, and the guard's production host equal to the `DSP_NOTIFY_URL` default |
 | `test_bleproto` | M1.10a BLE protocol v1 codec: every record of `test-vectors/ble_protocol_v1.txt` (59 messages decoded field by field and re-encoded byte for byte, 63 rejections with their reason, encrypted headers, forward compatibility, negotiation, fragmentation for MTU 23–517, reassembly errors and timeout, Info and advertising records), canonical re-encoding of every accepted bit-flipped frame (12,968 mutations), rejection of every body truncation, 200,000 random frames and 200,000 random fragments, encoder refusals |
 | `test_platform` | M1.9c pure adapter rules (`dsp_platform_logic.c`, compiled unchanged into the firmware): reset/wake mapping for every reset kind and wake-source combination, retained block and clock continuity agreeing on every reset, sleep clamping, button pin check (strapping and non-wake pins rejected), RTC header (power-on garbage, torn header, oversize, corrupt data rejected by the domain CRC), backoff and hourly limit preserved through the RTC buffer, no clock trust from retained data; and a **two-thread** queue test (a producer thread posting 400 commands, queue full and session-closed refusals, while the application task runs a service session under a mutex): every accepted command answered exactly once. Also run separately under ThreadSanitizer (0 races; a lock-free mutant reports races) |
@@ -1969,6 +2028,7 @@ alternative to the native setup, not a requirement.
 | Integration: domain + real TLS + committed Worker + local D1 + fake Gmail (M1.8) | locally integrated (`test/integration`, 1,000 randomized sessions) | n/a | not run |
 | Dosing Service, storage layout v4, formats (M1.9a) | implemented, tested with fake pump and fake KV (power cuts, failures, randomized) | compiled, not called | not run; **no real pump driver** |
 | Application and Power Services (M1.9b) | implemented, tested with fakes (pump, KV with power cuts, clock, NTP, Wi-Fi, HTTP, BLE, sleep port, RTC memory); 365-day simulations | compiled, not called | not run; **no deep sleep, RTC, button or BLE adapters** |
+| Manual dose with durable anti-replay (M1.10b.2) | implemented, tested through complete wakes with power cuts (`test_manual`) and service-level tests (`test_dosing`) | compiled, not linked (no caller until the dispatcher) | not run |
 | Configuration, schedules, phone time operations (M1.10b.1) | implemented, tested through complete wakes with power cuts (`test_app_ops`) and unit tests | compiled, not linked (no caller until the dispatcher) | not run |
 | BLE protocol v1 codec (`dsp_bleproto`, M1.10a) | implemented, shared vectors + property/fuzz tests; Kotlin codec runs the same vectors | compiled, not linked (not called) | not run |
 | Platform adapters: power/sleep, RTC block, queue lock, simulated pump, runtime (M1.9c) | pure rules host-tested (`test_platform`, incl. a two-thread queue test; TSan-clean separately) | compiled in four configurations; runtime opt-in | **not run**; no real pump driver, no button pin |
@@ -2007,8 +2067,8 @@ alternative to the native setup, not a requirement.
 **Release blocker (open):** the ESP-IDF v6.1 NVS power-loss defect (`test/nvs_linux`,
 `HARDWARE_ACCEPTANCE.md` section 9); fixed in software (`third_party/nvs_flash`), bench
 verification (9.4) pending.
-After that: M1.10b.2–b.4 (manual-dose anti-replay and the credential record with
-storage layout v5, Wi-Fi provisioning store, reset service), only after explicit authorization;
+After the M1.10b.2 review: M1.10b.3–b.4 (credential record with storage layout v5, Wi-Fi
+provisioning store, reset service), only after explicit authorization;
 then M1.10c–f (session security, NimBLE adapter, Android integration, on-device acceptance); the
 hardware review (pin map, pump gate and cutoff, button, battery measurement) is not started.
 The on-device acceptance

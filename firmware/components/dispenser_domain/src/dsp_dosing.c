@@ -404,33 +404,62 @@ dsp_dosing_result_t dsp_dosing_run_automatic(dsp_dosing_t *d, const dsp_schedule
     return r;
 }
 
-dsp_dosing_result_t dsp_dosing_manual(dsp_dosing_t *d, uint32_t volume_ul, dsp_clock_t clock)
+/* Writes the result of request (slot, req) into the ring: updates its entry, or takes the next
+ * entry that is not the active marker's PENDING one (the oldest is evicted). */
+static void ring_set(dsp_dosing_state_t *s, uint8_t slot, uint64_t req, uint8_t state,
+                     uint32_t detail)
 {
-    dsp_dosing_result_t r;
-    memset(&r, 0, sizeof r);
-    if (d == NULL) {
-        r.status = DSP_DOSING_ERR_ARG;
-        return r;
+    for (size_t i = 0; i < DSP_MANUAL_RING; i++) {
+        if (s->ring[i].seq == req && s->ring[i].slot == slot) {
+            s->ring[i].state = state;
+            s->ring[i].detail = detail;
+            return;
+        }
     }
+    for (size_t k = 0; k < DSP_MANUAL_RING; k++) {
+        size_t i = (s->ring_next + k) % DSP_MANUAL_RING;
+        if (s->ring[i].seq != 0 && s->ring[i].state == DSP_MRES_PENDING) {
+            continue; /* never evict the in-flight request */
+        }
+        s->ring[i].slot = slot;
+        s->ring[i].state = state;
+        s->ring[i].seq = req;
+        s->ring[i].detail = detail;
+        s->ring_next = (uint8_t)((i + 1) % DSP_MANUAL_RING);
+        return;
+    }
+}
+
+/* Clears the manual marker in *next and records the request's final state (same write). */
+static void clear_marker(dsp_dosing_state_t *next, uint8_t final_state)
+{
+    if (next->marker_req != 0) {
+        ring_set(next, next->marker_slot, next->marker_req, final_state, next->manual_volume_ul);
+    }
+    next->flags &= (uint8_t)~DSP_DOSING_F_MANUAL_ACTIVE;
+    next->manual_volume_ul = 0;
+    next->manual_started_at = 0;
+    next->manual_seq = 0;
+    next->marker_slot = 0;
+    next->marker_req = 0;
+}
+
+/* Executes an accepted request (gates, limits and coverage already checked; *cfg, ledger
+ * values from that check). Write 1 makes the decision durable before anything else. */
+static dsp_dosing_result_t manual_execute(dsp_dosing_t *d, uint8_t slot, uint64_t req,
+                                          uint32_t volume_ul, dsp_clock_t clock,
+                                          dsp_dosing_result_t r, dsp_date_t ledger_date,
+                                          uint32_t ledger_sum, bool *decided)
+{
+    *decided = false;
     dsp_notify_clock_t nc = nclock_of(clock);
-    dsp_config_t cfg;
-    dsp_date_t ledger_date;
-    uint32_t ledger_sum = 0;
-    if (!prepare_gates(d, clock, volume_ul, &cfg, &r) ||
-        !prepare_limits(d, clock, volume_ul, &cfg, &r, &ledger_date, &ledger_sum)) {
-        return r;
-    }
-    if (!dsp_reservoir_covers(&cfg, volume_ul)) {
-        r.status = DSP_DOSING_NOT_COVERED; /* refused; the latch is for automatic doses */
-        return r;
-    }
     dsp_exec_token_t token;
     r.exec = dsp_exec_manual_begin(d->ex, &token);
     if (r.exec != DSP_EXEC_OK) {
-        r.status = DSP_DOSING_NOT_ELIGIBLE; /* BUSY */
+        r.status = DSP_DOSING_NOT_ELIGIBLE; /* BUSY: nothing decided */
         return r;
     }
-    /* 1. Marker + ledger + last start in one write (restricts). */
+    /* 1. Decision + marker + ledger + last start in one write (restricts). */
     uint32_t seq = d->s.next_seq != 0 ? d->s.next_seq : 1;
     dsp_dosing_state_t next = d->s;
     next.flags |= DSP_DOSING_F_MANUAL_ACTIVE;
@@ -441,11 +470,16 @@ dsp_dosing_result_t dsp_dosing_manual(dsp_dosing_t *d, uint32_t volume_ul, dsp_c
     next.ledger_date = ledger_date;
     next.ledger_sum_ul = ledger_sum;
     next.last_start_utc = clock.now;
+    next.manual_hw[slot] = req;
+    next.marker_slot = slot;
+    next.marker_req = req;
+    ring_set(&next, slot, req, DSP_MRES_PENDING, volume_ul);
     if (!save_state(d, &next)) {
         (void)dsp_exec_finish(d->ex, &token, DSP_HISTORY_FAILED);
-        r.status = DSP_DOSING_ERR_STORAGE;
+        r.status = DSP_DOSING_ERR_STORAGE; /* not durable (or unknown): not executed */
         return r;
     }
+    *decided = true;
     uint64_t key = dsp_dosing_key_manual(seq, clock.now, volume_ul);
     /* 2. Durable consumption -> permit. */
     dsp_dose_permit_t permit;
@@ -472,20 +506,140 @@ dsp_dosing_result_t dsp_dosing_manual(dsp_dosing_t *d, uint32_t volume_ul, dsp_c
                                                              : DSP_DOSEERR_PUMP_FAILED,
                           true, volume_ul, key, nc);
     }
-    /* 3. Clear the marker (a failure leaves it for recovery: reported once, keyed). */
-    dsp_dosing_state_t done = d->s;
-    done.flags &= (uint8_t)~DSP_DOSING_F_MANUAL_ACTIVE;
-    done.manual_volume_ul = 0;
-    done.manual_started_at = 0;
-    done.manual_seq = 0;
+    /* 3. Clear the marker + final result (a failure leaves it for recovery: reported once,
+     *    keyed; the request stays decided through manual_hw). */
+    next = d->s; /* reused for write 3 (one state copy on the stack) */
+    clear_marker(&next, r.pump == DSP_PUMP_OK ? DSP_MRES_DONE : DSP_MRES_FAILED);
     if (reported) {
-        (void)save_state(d, &done);
+        (void)save_state(d, &next);
     } /* else: the fault report is not durable; the marker stays for recovery */
     (void)dsp_exec_finish(d->ex, &token,
                           r.pump == DSP_PUMP_OK ? DSP_HISTORY_COMPLETED : DSP_HISTORY_FAILED);
     (void)dsp_dosing_observe_reservoir(d, nc);
     r.status = r.pump == DSP_PUMP_OK ? DSP_DOSING_OK : DSP_DOSING_PUMP_FAILED;
     return r;
+}
+
+static bool request_valid(uint8_t slot, uint64_t seq, uint32_t volume_ul)
+{
+    return slot < DSP_MANUAL_SLOTS && seq != 0 && seq <= DSP_MANUAL_SEQ_MAX && volume_ul != 0;
+}
+
+static dsp_manual_outcome_t outcome(dsp_manual_kind_t kind, uint8_t state, uint32_t detail)
+{
+    dsp_manual_outcome_t o;
+    memset(&o, 0, sizeof o);
+    o.kind = kind;
+    o.state = state;
+    o.detail = detail;
+    return o;
+}
+
+dsp_manual_outcome_t dsp_dosing_manual_lookup(const dsp_dosing_t *d, uint8_t slot, uint64_t seq)
+{
+    if (slot >= DSP_MANUAL_SLOTS || seq == 0 || seq > DSP_MANUAL_SEQ_MAX) {
+        return outcome(DSP_MANUAL_INVALID, DSP_MRES_NOT_DECIDED, 0);
+    }
+    if (d == NULL || !d->loaded) {
+        return outcome(DSP_MANUAL_NOT_DURABLE, DSP_MRES_NOT_DECIDED, 0);
+    }
+    if (seq > d->s.manual_hw[slot]) {
+        return outcome(DSP_MANUAL_NOT_DURABLE, DSP_MRES_NOT_DECIDED, 0);
+    }
+    const dsp_manual_result_t *e = dsp_dosing_state_find_result(&d->s, slot, seq);
+    return e != NULL ? outcome(DSP_MANUAL_DECIDED, e->state, e->detail)
+                     : outcome(DSP_MANUAL_DECIDED, DSP_MRES_UNAVAILABLE, 0);
+}
+
+uint64_t dsp_dosing_manual_floor(const dsp_dosing_t *d, uint8_t slot)
+{
+    if (d == NULL || !d->loaded || slot >= DSP_MANUAL_SLOTS) {
+        return 0;
+    }
+    return d->s.manual_hw[slot] + 1u; /* <= 2^63: no overflow */
+}
+
+/* Durable refusal: manual_hw[slot] = seq and the ring entry in one write. */
+/* always inline: its state copy then shares stack slots with the disjoint execution path */
+__attribute__((always_inline)) static inline dsp_manual_outcome_t
+refuse(dsp_dosing_t *d, uint8_t slot, uint64_t seq, uint32_t code, dsp_dosing_result_t dose)
+{
+    dsp_dosing_state_t next = d->s;
+    next.manual_hw[slot] = seq;
+    ring_set(&next, slot, seq, DSP_MRES_REFUSED, code);
+    dsp_manual_outcome_t o;
+    if (save_state(d, &next)) {
+        o = outcome(DSP_MANUAL_REFUSED, DSP_MRES_REFUSED, code);
+    } else {
+        o = outcome(DSP_MANUAL_NOT_DURABLE, DSP_MRES_NOT_DECIDED, 0); /* nothing promised */
+        dose.status = DSP_DOSING_ERR_STORAGE;
+    }
+    o.dose = dose;
+    return o;
+}
+
+dsp_manual_outcome_t dsp_dosing_manual_request(dsp_dosing_t *d, uint8_t slot, uint64_t seq,
+                                               uint32_t volume_ul, dsp_clock_t clock,
+                                               uint32_t app_refusal)
+{
+    if (!request_valid(slot, seq, volume_ul)) {
+        return outcome(DSP_MANUAL_INVALID, DSP_MRES_NOT_DECIDED, 0);
+    }
+    if (d == NULL || !d->loaded) {
+        dsp_manual_outcome_t o = outcome(DSP_MANUAL_NOT_DURABLE, DSP_MRES_NOT_DECIDED, 0);
+        o.dose.status = DSP_DOSING_ERR_STORAGE;
+        o.dose.gates = DSP_DOSING_G_NOT_LOADED;
+        return o;
+    }
+    /* Rule 1: already decided -> never executed (result if retained). */
+    if (seq <= d->s.manual_hw[slot]) {
+        return dsp_dosing_manual_lookup(d, slot, seq);
+    }
+    dsp_dosing_result_t r;
+    memset(&r, 0, sizeof r);
+    if (d->degraded) { /* no write is attempted after a storage failure in this wake */
+        dsp_manual_outcome_t o = outcome(DSP_MANUAL_NOT_DURABLE, DSP_MRES_NOT_DECIDED, 0);
+        o.dose.status = DSP_DOSING_ERR_STORAGE;
+        o.dose.gates = DSP_DOSING_G_DEGRADED;
+        return o;
+    }
+    /* Rule 2: evaluated exactly once. */
+    if (app_refusal != 0) {
+        r.status = DSP_DOSING_REFUSED;
+        return refuse(d, slot, seq, app_refusal, r);
+    }
+    dsp_config_t cfg;
+    dsp_date_t ledger_date;
+    uint32_t ledger_sum = 0;
+    if (!prepare_gates(d, clock, volume_ul, &cfg, &r)) {
+        if (r.status == DSP_DOSING_ERR_STORAGE) { /* configuration unreadable */
+            dsp_manual_outcome_t o = outcome(DSP_MANUAL_NOT_DURABLE, DSP_MRES_NOT_DECIDED, 0);
+            o.dose = r;
+            return o;
+        }
+        return refuse(d, slot, seq, DSP_MREFUSE_GATES, r);
+    }
+    if (!prepare_limits(d, clock, volume_ul, &cfg, &r, &ledger_date, &ledger_sum)) {
+        uint32_t code = r.status == DSP_DOSING_LIMIT ? DSP_MREFUSE_LIMIT : DSP_MREFUSE_GATES;
+        return refuse(d, slot, seq, code, r);
+    }
+    if (!dsp_reservoir_covers(&cfg, volume_ul)) {
+        r.status = DSP_DOSING_NOT_COVERED; /* refused; the latch is for automatic doses */
+        return refuse(d, slot, seq, DSP_MREFUSE_NOT_COVERED, r);
+    }
+    bool decided = false;
+    r = manual_execute(d, slot, seq, volume_ul, clock, r, ledger_date, ledger_sum, &decided);
+    if (!decided) {
+        dsp_manual_outcome_t o = outcome(DSP_MANUAL_NOT_DURABLE, DSP_MRES_NOT_DECIDED, 0);
+        o.dose = r;
+        return o;
+    }
+    const dsp_manual_result_t *e = dsp_dosing_state_find_result(&d->s, slot, seq);
+    dsp_manual_outcome_t o = outcome(DSP_MANUAL_EXECUTED,
+                                     e != NULL ? e->state : DSP_MRES_UNAVAILABLE,
+                                     e != NULL ? e->detail : 0);
+    o.dose = r;
+    return o;
 }
 
 /* R2..R4 of the refill (idempotent; dosing stays disabled until R4). */
@@ -608,10 +762,7 @@ dsp_dosing_status_t dsp_dosing_recover(dsp_dosing_t *d, dsp_notify_clock_t clock
             goto done;
         }
         dsp_dosing_state_t next = d->s;
-        next.flags &= (uint8_t)~DSP_DOSING_F_MANUAL_ACTIVE;
-        next.manual_volume_ul = 0;
-        next.manual_started_at = 0;
-        next.manual_seq = 0;
+        clear_marker(&next, DSP_MRES_INTERRUPTED); /* same write: ring entry INTERRUPTED */
         if (!save_state(d, &next)) {
             st = DSP_DOSING_ERR_STORAGE;
             goto done;

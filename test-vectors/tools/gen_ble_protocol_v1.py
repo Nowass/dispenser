@@ -24,7 +24,7 @@ STATUS = [("readiness", "u8", None), ("dosing_flags", "u8", None), ("gates", "u3
           ("next_due_known", "bool", None), ("next_due_at", "i64", None), ("pending_notes", "u8", None),
           ("highest_severity", "enum", (0, 1, 2)), ("storage_ok", "bool", None),
           ("session_seconds_left", "u16", None), ("battery_percent", "enum", tuple(range(101)) + (255,)),
-          ("reserved", "reserved", 5)]
+          ("manual_floor", "u64", None), ("reserved", "reserved", 5)]
 DIAGNOSTICS = [("notify_storage_ok", "bool", None), ("tx_diag", "u8", None), ("tx_diag_status", "u16", None),
                ("rejections_unread", "u8", None), ("rejections_total", "u16", None),
                ("clock_trust", "enum", (0, 1, 2)), ("clock_reason", "u8", None), ("last_sync_utc", "i64", None),
@@ -177,11 +177,13 @@ def b(s):
 STATUS_V = dict(readiness=1, dosing_flags=0, gates=0, pump_problems=0, capacity_ul=100000,
                 remaining_ul=73500, low_percent=20, estimate_uncertain=0, clock_trust=1, clock_reason=0,
                 device_utc=1795158000, next_due_known=1, next_due_at=1795161600, pending_notes=2,
-                highest_severity=1, storage_ok=1, session_seconds_left=171, battery_percent=255)
+                highest_severity=1, storage_ok=1, session_seconds_left=171, battery_percent=255,
+                manual_floor=43)
 STATUS_EXTREME = dict(readiness=2, dosing_flags=7, gates=0x1FF, pump_problems=0x7F, capacity_ul=4294967295,
                       remaining_ul=0, low_percent=99, estimate_uncertain=1, clock_trust=0, clock_reason=4,
                       device_utc=-1, next_due_known=0, next_due_at=0, pending_notes=16, highest_severity=2,
-                      storage_ok=0, session_seconds_left=65535, battery_percent=100)
+                      storage_ok=0, session_seconds_left=65535, battery_percent=100,
+                      manual_floor=0xFFFFFFFFFFFFFFFF)
 CONFIG_V = dict(revision=7, reservoir_capacity_ul=100000, reservoir_remaining_ul=73500, low_stock_percent=20,
                 time_sync_interval_h=24, notify_mask=0x1F, pump_flow_ul_per_s=1200, calibrated_at=1795071600,
                 max_dose_ul=20000, max_daily_ul=60000, max_runtime_ms=30000, min_interval_s=60,

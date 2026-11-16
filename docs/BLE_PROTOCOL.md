@@ -156,13 +156,20 @@ reserved(14)`.
 Advertising Service Data payload (4 bytes): `proto_major u8 | flags u8 (bit 0 CLAIMED, bit 1
 RECOVERY_ARMED) | device_tag u16`.
 
-### 7.2 Status (50 bytes)
+### 7.2 Status (58 bytes)
 
 `readiness u8 | dosing_flags u8 | gates u32 | pump_problems u32 | capacity_ul u32 |
 remaining_ul u32 | low_percent u8 | estimate_uncertain bool | clock_trust u8 (0 UNKNOWN, 1
 SYNCED, 2 HOLDOVER) | clock_reason u8 | device_utc i64 | next_due_known bool | next_due_at i64 |
 pending_notes u8 | highest_severity u8 (0 none, 1 WARNING, 2 CRITICAL) | storage_ok bool |
-session_seconds_left u16 | battery_percent u8 (0–100, 255 unknown) | reserved(5)`.
+session_seconds_left u16 | battery_percent u8 (0–100, 255 unknown) | manual_floor u64 |
+reserved(5)`.
+
+`manual_floor` is the next acceptable MANUAL_DOSE `seq` of the **authenticated** phone slot
+(its durable high-water mark + 1; 2^63 when the slot is exhausted). It is specific to the
+session's slot, travels only in encrypted responses (GET_STATUS, MANUAL_DOSE, REFILL,
+SET_READINESS) and never in HELLO, the Info characteristic or advertising. A phone reads it at
+session start and uses `seq = max(local + 1, manual_floor)`.
 
 ### 7.3 Diagnostics (24 bytes)
 
@@ -285,7 +292,27 @@ interval outside 24–48 h, 3 unknown notification bits, 4 calibration time neit
   executed on a date is never executed again on that date, whatever the edit (identity
   `<id>@<date>`). Name and volume edits do not affect pending occurrences.
 
-### 10.4 Time
+### 10.4 Manual dose (M1.10b.2)
+
+- The phone slot is the authenticated session's; nothing in the request selects it. `seq` is
+  1..2^63 − 1, per slot, strictly increasing from the phone's side.
+- `seq` ≥ the slot's floor is decided **exactly once**: executed (response: `outcome` 0 DONE or
+  1 PUMP_FAILED) or refused (`REFUSED` detail = gates, `LIMIT` detail = limits, `NOT_COVERED`).
+  Refusals are durable: the same `seq` never executes later, also after the conditions change.
+- `seq` below the floor never executes: error `DUPLICATE`, `detail` = its result state
+  (GET_RESULT values: 1 PENDING … 5 REFUSED, or 6 ALREADY_DECIDED_RESULT_UNAVAILABLE when the
+  result is no longer retained), `aux` = the result detail (volume, or the refusal code 7/8/9/14).
+- `seq` 0, `seq` ≥ 2^63 or `volume_ul` 0: `INVALID`, not consumed.
+- `STORAGE`: the decision could not be made durable; nothing was executed and the request is
+  still undecided unless a later GET_RESULT says otherwise. `DEGRADED`: the device cannot record
+  decisions in this wake (storage failure, read-only session); nothing executed or consumed.
+- `GET_RESULT {seq}` (no side effect): `state` 0 NOT_DECIDED (above the floor), 1 PENDING (in
+  progress, or interrupted until the next boot reports it), 2 DONE, 3 FAILED, 4 INTERRUPTED,
+  5 REFUSED, 6 ALREADY_DECIDED_RESULT_UNAVAILABLE; `detail` as above. The device retains the
+  last 8 results; older decided requests report 6 and still never execute. The app must never
+  re-issue a dose with a new `seq` automatically after a lost response.
+
+### 10.5 Time
 
 `SET_TIME`: `phone_utc_ms` is truncated to seconds. `decision`:
 

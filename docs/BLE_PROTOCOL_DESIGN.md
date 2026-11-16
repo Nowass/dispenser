@@ -634,10 +634,15 @@ cleared, counters stay monotonic). Factory reset re-provisions the `dosing` reco
 empty) together with all slots and the device identity key; requests from before the reset
 cannot authenticate afterwards.
 
-**Format and migration.** `dosing` format 2 = format 1 + `manual_hw[4]` (32 B) + `marker_slot u8`
-+ `marker_seq u64` + ring of 8 × 14 B (≈ 152 B in total, record ≈ 205 B). Format 1 decodes with
-zeros and an empty ring; there are no phones before layout v5, so no request can predate the
-counters. Written lazily at the first format-2 write (part of the v5 migration, section 7.1).
+**Format and migration (implemented in M1.10b.2).** `dosing` format 2 (206 B) = format 1 (52 B) +
+`manual_hw[4]` (32 B) + `marker_slot u8` + `ring_next u8` + `marker_req u64` + ring of 8 × 14 B
+(`slot u8, state u8, seq u64, detail u32`). Format 1 decodes with zeros and an empty ring (no phone
+could have sent a request before); the record is upgraded by its next write (one atomic key), so
+**layout v4 is kept**; layout v5 stays tied to the `auth` record (M1.10c). The floor travels in the
+Status record (`manual_floor`, protocol v1.0 amended before release). The former unauthenticated
+queue command `MANUAL_DOSE` is retired: `dsp_app_manual_dose(app, auth, seq, volume)` is the only
+manual path. Refusals decided by the Application Service (a pump fault earlier in the wake, the
+fail-safe inhibit) are durable too (refusal code 14). D8 implemented as proposed.
 
 ### 7.5 Credential record `auth`
 
@@ -768,7 +773,7 @@ Largest payloads: schedule with name ≈ 125 B, config ≈ 60 B, Wi-Fi set ≤ 9
 - Info (public, 32 B): `"DSP2" | proto_min | proto_max | claim_state | flags | caps u32 |
   fw_major | fw_minor | fw_patch u16 | device_tag u16 | reserved[14]` (no configuration, no
   schedule data, no keys).
-- Status (50 B), schedule (with `name`), config: as in revision 1, schedule extended by
+- Status (58 B since M1.10b.2: + `manual_floor u64` of the authenticated slot), schedule (with `name`), config: as in revision 1, schedule extended by
   `name (0..32 B)`.
 
 ### 9.5 Examples
@@ -864,7 +869,7 @@ quality with RF on; suspend/resume latency around a dose; advertising power; but
 | D5 | Phones and roles | independent per-phone keys, 4 slots, all OWNER; add = setup code + button + owner invite | **approved** |
 | D6 | Recovery and reset | boot-time arm (10 s) + later session + setup code + 3-press confirmation; forces SERVICE_REQUIRED; optional delay (none vs. N hours); factory reset only from an owner session | **approved**; delay value open |
 | D7 | Wi-Fi provisioning | `dsp_wifi` namespace in `nvs`; `nvs_sec` read-only; API token not over BLE in v1 | **approved** (separate storage) |
-| D8 | Manual-dose anti-replay | per-slot monotonic `seq` with a durable high-water mark in the same write as the manual marker; refusals decided durably; result ring of 8 for convenience only (7.4) | **needs approval** (revision 3) |
+| D8 | Manual-dose anti-replay | per-slot monotonic `seq` with a durable high-water mark in the same write as the manual marker; refusals decided durably; result ring of 8 for convenience only (7.4) | **implemented (M1.10b.2)**: dosing format 2 in layout v4, floor in Status, legacy queue command retired |
 | D9 | Schedule names | on the device, ≤ 32 bytes UTF-8 | **approved** |
 | D10 | Phone time | owner session, through the M1.4 rules, source BLE, uncertainty ≤ 2 s, NTP preferred, never lifts a rollback hold | **implemented (M1.10b.1)**: accepted only while UNKNOWN or HOLDOVER (SYNCED = NTP preferred), NTP retry schedule unchanged; also never *creates* a hold (> 7 days back is refused, not applied); a recorded hold refuses phone time entirely |
 | D11 | Wire format | fixed-layout little-endian binary | **approved** |
@@ -894,7 +899,8 @@ quality with RF on; suspend/resume latency around a dose; advertising power; but
 |---|---|---|---|
 | **M1.10a** (done: gate 34/34, codecs + shared vectors, reproduced from a clean worktree) | **Gate first:** fetch the pinned noise-c/libsodium sources, run their unit and official vector tests on the host (ChaChaPoly/25519/SHA-256 incl. XXpsk3 and IK), cross-build them for the ESP32-C3 with the name table enabled and measure flash/heap/stack, and build them with the Android NDK (no app integration yet). Then: normative `docs/BLE_PROTOCOL.md` and the normative security specification; shared codec vectors with an independent Python generator; C codec `dsp_bleproto` and Kotlin codec; fuzz harness. No security code of our own. | no | gate results reported and accepted; codec vectors pass on both sides; security spec approved |
 | **M1.10b.1** (implemented, in review) | M1 configuration, M2 schedules (names, edit floor), M3 phone time behind `dsp_app`; `sched` format 2 inside layout v4; authorization as an explicit, fail-closed input | no | host suites incl. power cuts (`test_app_ops`) |
-| **M1.10b.2–b.4** | M4 per-slot manual-dose anti-replay (7.4) and the credential record with storage layout v5 and migration; M6 Wi-Fi store; M7 reset service | no | host suites incl. migrations and power cuts |
+| **M1.10b.2** (implemented, in review) | M4 per-slot manual-dose anti-replay (7.4): `dosing` format 2 (layout v4), `dsp_app_manual_dose`/`get_result`/`manual_floor`, Status `manual_floor` | no | host suites incl. power cuts (`test_manual`) |
+| **M1.10b.3–b.4** | credential record with storage layout v5 and migration; M6 Wi-Fi store; M7 reset service | no | host suites incl. migrations and power cuts |
 | **M1.10c** | `dsp_blesec`: integration of the pinned noise-c (RNG hook, key handling, framing); credential record (M5); enrollment, sessions, invites, removal, recovery state machine; authorization tests; cross-check through the real application; JNI binding with the same vectors on Android | no | official and cross vectors pass on host, target and Android; authorization tests pass |
 | **M1.10d** | NimBLE adapter (GATT, advertising with service data, fragmentation, flow control, suspend/resume, `connected()`), button events (M10) behind the reviewed pin, off by default; size/heap gate | compile only | builds pass the budget gate |
 | **M1.10e** | Android: Companion Device Manager, native Noise (JNI) with Keystore wrapping, claim via QR, sessions, schedules (`DEVICE_APPLIED`), refill, manual dose with confirmation and per-slot `seq`, phones/invites/recovery UI, Wi-Fi provisioning | no (fake transport) | JVM + instrumented tests |

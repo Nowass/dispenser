@@ -83,6 +83,9 @@ dsp_add_host_test(test_dosing test_dosing.c support/fake_kv.c)
 dsp_add_host_test(test_app test_app.c support/fake_kv.c)
 # M1.10b.1: configuration, schedules and phone time through the Application Service.
 dsp_add_host_test(test_app_ops test_app_ops.c support/fake_kv.c)
+# M1.10b.2: manual dose with durable anti-replay (reuses the test_app_ops harness).
+dsp_add_host_test(test_manual test_manual.c support/fake_kv.c)
+target_compile_options(test_manual PRIVATE -Wno-unused-function)
 # M1.9c: the pure platform adapter logic (compiled unchanged into the firmware component;
 # no ESP-IDF headers) and a two-thread check of the command-queue boundary.
 set(DSP_PLATFORM_DIR "${CMAKE_CURRENT_LIST_DIR}/../../components/dispenser_platform")

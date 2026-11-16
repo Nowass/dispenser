@@ -14,7 +14,8 @@ Android companion app.
   the Application and Power Services wake cycle (M1.9b), and opt-in ESP-IDF platform adapters
   with a simulated pump (M1.9c), the BLE protocol v1 codec with its Noise feasibility gate
   (M1.10a), and the configuration, schedule and phone-time operations for the future BLE
-  dispatcher (M1.10b.1). Nothing drives hardware yet; not yet run on hardware. **Open firmware
+  dispatcher (M1.10b.1), and the manual dose with durable per-phone anti-replay (M1.10b.2).
+  Nothing drives hardware yet; not yet run on hardware. **Open firmware
   release and hardware-acceptance blocker:** an ESP-IDF v6.1 NVS power-loss defect
   ([`firmware/test/nvs_linux`](firmware/test/nvs_linux/README.md)); fix implemented, bench verification pending
   ([`firmware/third_party/nvs_flash`](firmware/third_party/nvs_flash/README.md)).

@@ -25,6 +25,22 @@ static void put_i64(uint8_t *p, int64_t v)
     }
 }
 
+static void put_u64(uint8_t *p, uint64_t v)
+{
+    for (int i = 0; i < 8; i++) {
+        p[i] = (uint8_t)((v >> (8 * i)) & 0xFFu);
+    }
+}
+
+static uint64_t get_u64(const uint8_t *p)
+{
+    uint64_t u = 0;
+    for (int i = 0; i < 8; i++) {
+        u |= (uint64_t)p[i] << (8 * i);
+    }
+    return u;
+}
+
 static uint16_t get_u16(const uint8_t *p)
 {
     return (uint16_t)(p[0] | (uint16_t)(p[1] << 8));
@@ -667,7 +683,7 @@ size_t dsp_codec_encode_dosing(const dsp_dosing_state_t *d, uint8_t *buf, size_t
     }
     memset(buf, 0, DSP_DOSING_RECORD_BYTES);
     buf[0] = DSP_REC_TYPE_DOSING;
-    buf[1] = DSP_CODEC_VERSION;
+    buf[1] = DSP_DOSING_FORMAT_V2;
     buf[2] = d->readiness;
     buf[3] = d->flags;
     put_u32(buf + 4, d->refill_capacity_ul);
@@ -680,16 +696,35 @@ size_t dsp_codec_encode_dosing(const dsp_dosing_state_t *d, uint8_t *buf, size_t
     put_u32(buf + 36, d->ledger_sum_ul);
     put_i64(buf + 40, d->last_start_utc);
     put_u32(buf + 48, d->next_seq);
+    for (int i = 0; i < DSP_MANUAL_SLOTS; i++) {
+        put_u64(buf + 52 + 8 * i, d->manual_hw[i]);
+    }
+    buf[84] = d->marker_slot;
+    buf[85] = d->ring_next;
+    put_u64(buf + 86, d->marker_req);
+    for (int i = 0; i < DSP_MANUAL_RING; i++) {
+        uint8_t *e = buf + 94 + DSP_DOSING_RING_ENTRY_BYTES * i;
+        e[0] = d->ring[i].slot;
+        e[1] = d->ring[i].state;
+        put_u64(e + 2, d->ring[i].seq);
+        put_u32(e + 10, d->ring[i].detail);
+    }
     return DSP_DOSING_RECORD_BYTES;
 }
 
 dsp_codec_status_t dsp_codec_decode_dosing(const uint8_t *buf, size_t len, dsp_dosing_state_t *out)
 {
-    dsp_codec_status_t st = check_header(buf, len, DSP_REC_TYPE_DOSING);
-    if (st != DSP_CODEC_OK) {
-        return st;
+    if (buf == NULL || len < 2) {
+        return DSP_CODEC_ERR_SIZE;
     }
-    if (len != DSP_DOSING_RECORD_BYTES || out == NULL) {
+    if (buf[0] != DSP_REC_TYPE_DOSING) {
+        return DSP_CODEC_ERR_TYPE;
+    }
+    if (buf[1] != DSP_CODEC_VERSION && buf[1] != DSP_DOSING_FORMAT_V2) {
+        return DSP_CODEC_ERR_VERSION; /* newer format: unsupported (fail closed) */
+    }
+    bool v2 = buf[1] == DSP_DOSING_FORMAT_V2;
+    if (len != (v2 ? DSP_DOSING_RECORD_BYTES : DSP_DOSING_RECORD_V1_BYTES) || out == NULL) {
         return DSP_CODEC_ERR_SIZE;
     }
     dsp_dosing_state_t d;
@@ -706,6 +741,21 @@ dsp_codec_status_t dsp_codec_decode_dosing(const uint8_t *buf, size_t len, dsp_d
     d.ledger_sum_ul = get_u32(buf + 36);
     d.last_start_utc = get_i64(buf + 40);
     d.next_seq = get_u32(buf + 48);
+    if (v2) { /* format 1: anti-replay state zero (no phone could have sent a request) */
+        for (int i = 0; i < DSP_MANUAL_SLOTS; i++) {
+            d.manual_hw[i] = get_u64(buf + 52 + 8 * i);
+        }
+        d.marker_slot = buf[84];
+        d.ring_next = buf[85];
+        d.marker_req = get_u64(buf + 86);
+        for (int i = 0; i < DSP_MANUAL_RING; i++) {
+            const uint8_t *e = buf + 94 + DSP_DOSING_RING_ENTRY_BYTES * i;
+            d.ring[i].slot = e[0];
+            d.ring[i].state = e[1];
+            d.ring[i].seq = get_u64(e + 2);
+            d.ring[i].detail = get_u32(e + 10);
+        }
+    }
     if (!dsp_dosing_state_is_valid(&d)) {
         return DSP_CODEC_ERR_FIELD;
     }

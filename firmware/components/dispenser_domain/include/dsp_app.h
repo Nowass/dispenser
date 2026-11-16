@@ -69,18 +69,25 @@ typedef enum {
 
 /* ---- Service-mode commands (bounded queue) --------------------------------------------- */
 
+/* Queue commands. The manual dose is NOT a queue command (M1.10b.2): it exists only as the
+ * authenticated operation dsp_app_manual_dose() with durable anti-replay; value 2 is retired
+ * and refused by dsp_app_post().
+ *
+ * REFILL and SET_READINESS still carry no authorization: they get it with the security layer
+ * (M1.10c). Until then these legacy queue paths MUST NOT become externally reachable: no
+ * platform BLE task may post them (none exists), and the M1.10c/d dispatcher must route them
+ * through an owner authorization like the other dsp_app operations. */
 typedef enum {
     DSP_CMD_STATUS = 1,
-    DSP_CMD_MANUAL_DOSE,   /* volume_ul */
-    DSP_CMD_REFILL,        /* capacity_ul, remaining_ul */
-    DSP_CMD_SET_READINESS, /* readiness */
-    DSP_CMD_END_SESSION,
+    DSP_CMD_REFILL = 3,        /* capacity_ul, remaining_ul */
+    DSP_CMD_SET_READINESS = 4, /* readiness */
+    DSP_CMD_END_SESSION = 5,
 } dsp_app_cmd_kind_t;
+#define DSP_CMD_RETIRED_MANUAL_DOSE 2
 
 typedef struct {
     uint8_t kind; /* dsp_app_cmd_kind_t */
     uint32_t id;  /* echoed in the response */
-    uint32_t volume_ul;
     uint32_t capacity_ul;
     uint32_t remaining_ul;
     uint8_t readiness; /* dsp_readiness_t */
@@ -99,7 +106,7 @@ typedef struct {
     uint32_t id;
     uint8_t kind;
     dsp_app_resp_status_t status;
-    dsp_dosing_status_t dosing; /* detail of MANUAL_DOSE / REFILL / SET_READINESS */
+    dsp_dosing_status_t dosing; /* detail of REFILL / SET_READINESS */
     uint32_t gates;
     uint32_t limits;
     uint32_t pump_problems;
@@ -273,8 +280,11 @@ typedef enum {
     DSP_OP_STORAGE,   /* a write failed; durable state is the old or the new value
                                                                               wire STORAGE */
     DSP_OP_DEGRADED,  /* storage not loaded or unreadable                      wire DEGRADED */
-    DSP_OP_DUPLICATE, /* schedule ID active (aux 0) or deleted/executed before (aux 1)
+    DSP_OP_DUPLICATE, /* schedule ID active (aux 0) or deleted/executed before (aux 1);
+                         manual dose: already decided (detail state, aux detail)
                                                                               wire DUPLICATE */
+    DSP_OP_NOT_COVERED, /* manual dose: the reservoir estimate does not cover it
+                                                                              wire NOT_COVERED */
 } dsp_app_op_status_t;
 
 enum {
@@ -373,6 +383,65 @@ dsp_app_op_result_t dsp_app_set_phone_time(dsp_app_t *app, const dsp_app_auth_t 
                                            int64_t phone_utc_ms, uint32_t uncertainty_ms,
                                            dsp_app_time_result_t *out);
 
+/* ---- M1.10b.2: manual dose with durable anti-replay -------------------------------------
+ *
+ * The SOLE manual-dose entry point. Application task only, inside a service session, with an
+ * owner authorization (fail closed otherwise, exactly like the M1.10b.1 operations). The
+ * phone slot is auth->slot (the security layer's verified context); nothing in the request
+ * selects it. seq is the phone's request ID for its slot (BLE MANUAL_DOSE `seq`).
+ *
+ * Results:
+ *  - OK: executed; out->outcome 0 DONE / 1 PUMP_FAILED (protocol MANUAL_DOSE response),
+ *    volume and runtime.
+ *  - DUPLICATE: already decided (seq <= the slot's high-water mark) - never executed again;
+ *    detail = result state (DSP_MRES_*: PENDING..REFUSED, or UNAVAILABLE when no longer
+ *    retained), aux = result detail.
+ *  - REFUSED / LIMIT / NOT_COVERED: refused now, durably (the ID can never execute later);
+ *    detail = gates / limits.
+ *  - INVALID: seq 0, seq > 2^63 - 1 or volume 0 - not consumed.
+ *  - STORAGE: the decision could not be made durable: nothing executed (pump never started);
+ *    a retry is decided by the durable state.
+ *  - DEGRADED: the dosing state is unavailable (storage not loaded or failed earlier in this
+ *    wake): nothing executed, nothing consumed.
+ * Refusals decided by the Application Service itself (a pump fault earlier in this wake, the
+ * fail-safe inhibit) are durable too (refusal code DEGRADED).
+ * A fresh request suspends BLE first, runs a due scheduled dose first (Q8), decides, runs the
+ * pump if accepted, then resumes BLE if the session deadline still permits (else the session
+ * ends). Already-decided and invalid requests never touch BLE or the pump. out->floor is the
+ * slot's next acceptable request ID afterwards. */
+typedef struct {
+    uint8_t outcome;     /* 0 DONE, 1 PUMP_FAILED (status OK only) */
+    uint32_t volume_ul;
+    uint32_t runtime_ms;
+    uint8_t state;       /* DSP_MRES_* of this request after the call */
+    uint32_t detail;
+    uint64_t floor;      /* the slot's next acceptable seq (protocol Status manual_floor) */
+} dsp_app_manual_result_t;
+
+dsp_app_op_result_t dsp_app_manual_dose(dsp_app_t *app, const dsp_app_auth_t *auth, uint64_t seq,
+                                        uint32_t volume_ul, dsp_app_manual_result_t *out);
+
+/* GET_RESULT: OK with the state and detail (DSP_MRES_NOT_DECIDED for an ID above the high-water
+ * mark, DSP_MRES_UNAVAILABLE for a decided ID no longer retained); no side effect. */
+dsp_app_op_result_t dsp_app_get_result(dsp_app_t *app, const dsp_app_auth_t *auth, uint64_t seq,
+                                       uint8_t *state, uint32_t *detail);
+
+/* The authenticated slot's counter floor (manual_hw + 1, 2^63 when exhausted), reported in the
+ * Status record at session start so a phone that lost its counter resynchronizes. Only for an
+ * owner authorization (never through HELLO, Info or advertising). */
+dsp_app_op_result_t dsp_app_manual_floor(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                         uint64_t *floor);
+
+/* Service-session lifetime state (monotonic milliseconds). Internal. */
+typedef struct {
+    uint64_t start_ms;
+    uint64_t max_ms;           /* absolute end of the maximum total duration */
+    uint64_t idle_deadline_ms; /* absolute end of the idle timeout (no client) */
+    uint64_t idle_ms;
+    bool was_connected;
+    uint8_t end;               /* dsp_app_ble_end_t */
+} dsp_app_session_t;
+
 /* Caller-owned, statically allocated application state. Treat as opaque. */
 struct dsp_app {
     const dsp_app_config_t *cfg;
@@ -395,6 +464,7 @@ struct dsp_app {
     size_t q_head;
     size_t q_count;
     bool storage_fault; /* M1.10b.1: an operation's write failed: no dosing in this wake */
+    dsp_app_session_t ss; /* current service session (valid while accepting) */
     dsp_app_report_t rep;
 };
 

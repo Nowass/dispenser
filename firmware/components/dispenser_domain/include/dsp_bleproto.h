@@ -171,6 +171,7 @@ typedef struct {
     bool storage_ok;
     uint16_t session_seconds_left;
     uint8_t battery_percent;
+    uint64_t manual_floor; /* the authenticated slot's next acceptable MANUAL_DOSE seq */
 } dsp_ble_status_rec_t;
 
 typedef struct {

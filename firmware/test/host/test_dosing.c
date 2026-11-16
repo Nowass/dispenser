@@ -82,6 +82,15 @@ static dsp_clock_t clk(void)
     return c;
 }
 
+/* M1.10b.2: every manual dose goes through the anti-replay request API (slot 0, a fresh
+ * request ID each time, so every call is evaluated exactly once). */
+static uint64_t g_mseq;
+static dsp_dosing_result_t manual_dose(dsp_dosing_t *dd, uint32_t volume, dsp_clock_t c)
+{
+    return dsp_dosing_manual_request(dd, 0, ++g_mseq, volume, c, 0).dose;
+}
+
+
 static dsp_notify_clock_t nclk(void)
 {
     dsp_notify_clock_t c = {g_now, g_trusted};
@@ -355,7 +364,7 @@ static void test_defaults_and_readiness(void)
     const dsp_dosing_state_t *s = dsp_dosing_state(&d);
     DSP_CHECK(s != NULL);
     DSP_CHECK_EQ_INT(DSP_READINESS_SERVICE_REQUIRED, s->readiness); /* approved default */
-    dsp_dosing_result_t r = dsp_dosing_manual(&d, 1000, clk());
+    dsp_dosing_result_t r = manual_dose(&d, 1000, clk());
     DSP_CHECK_EQ_INT(DSP_DOSING_REFUSED, r.status);
     DSP_CHECK(r.gates & DSP_DOSING_G_NOT_READY);
     DSP_CHECK_EQ_INT(0, pump.calls);
@@ -380,7 +389,7 @@ static void test_defaults_and_readiness(void)
     DSP_CHECK_EQ_INT(DSP_READINESS_READY, dsp_dosing_state(&d)->readiness); /* durable */
     DSP_CHECK_EQ_INT(DSP_DOSING_OK,
                      dsp_dosing_set_readiness(&d, DSP_READINESS_SERVICE_REQUIRED, NULL, NULL));
-    r = dsp_dosing_manual(&d, 1000, clk());
+    r = manual_dose(&d, 1000, clk());
     DSP_CHECK(r.status == DSP_DOSING_REFUSED && (r.gates & DSP_DOSING_G_NOT_READY));
     DSP_CHECK_EQ_INT(0, pump.calls);
     /* No hardware cutoff known: never READY, never actuates. */
@@ -430,7 +439,7 @@ static void test_pump_config_required(void)
         DSP_CHECK_EQ_INT(DSP_DOSING_REFUSED, r.status);
         DSP_CHECK(r.gates & DSP_DOSING_G_PUMP_CONFIG);
         DSP_CHECK(r.pump_problems & cases[i].problem);
-        r = dsp_dosing_manual(&d, 1000, clk());
+        r = manual_dose(&d, 1000, clk());
         DSP_CHECK_EQ_INT(DSP_DOSING_REFUSED, r.status);
         DSP_CHECK_EQ_INT(0, pump.calls);
         DSP_CHECK(!(dsp_dosing_state(&d)->flags & DSP_DOSING_F_BLOCKED)); /* never a false BLOCKED */
@@ -612,36 +621,41 @@ static void test_limits(void)
     fresh(true);
     make_ready();
     /* Per-dose volume and runtime. */
-    dsp_dosing_result_t r = dsp_dosing_manual(&d, 20001, clk());
+    dsp_dosing_result_t r = manual_dose(&d, 20001, clk());
     DSP_CHECK_EQ_INT(DSP_DOSING_LIMIT, r.status);
     DSP_CHECK(r.limits & DSP_DOSING_L_DOSE);
     dsp_config_t c = load_cfg();
     c.max_runtime_ms = 4000; /* 5000 ul at 1200 ul/s needs 4167 ms */
     save_cfg(c);
     keylog_len = 0;
-    r = dsp_dosing_manual(&d, 5000, clk());
+    r = manual_dose(&d, 5000, clk());
     DSP_CHECK_EQ_INT(DSP_DOSING_LIMIT, r.status);
     DSP_CHECK_EQ_INT(DSP_DOSING_L_RUNTIME, r.limits);
-    DSP_CHECK_EQ_INT(0, keylog_len); /* refused before any write */
+    /* M1.10b.2: the refusal is durable (anti-replay): exactly one write, the dosing record;
+     * no consumption, no history, no pump. */
+    DSP_CHECK_EQ_INT(1, keylog_len);
+    DSP_CHECK_EQ_STR("dosing", keylog[0]);
+    DSP_CHECK_EQ_INT(DSP_MRES_REFUSED,
+                     dsp_dosing_state_find_result(dsp_dosing_state(&d), 0, g_mseq)->state);
     c.max_runtime_ms = 30000;
     save_cfg(c);
     /* Interval: a second start within 60 s is refused, also after a restart. */
-    DSP_CHECK_EQ_INT(DSP_DOSING_OK, dsp_dosing_manual(&d, 5000, clk()).status);
+    DSP_CHECK_EQ_INT(DSP_DOSING_OK, manual_dose(&d, 5000, clk()).status);
     g_now += 30;
-    r = dsp_dosing_manual(&d, 5000, clk());
+    r = manual_dose(&d, 5000, clk());
     DSP_CHECK(r.status == DSP_DOSING_LIMIT && r.limits == DSP_DOSING_L_INTERVAL);
     boot();
-    r = dsp_dosing_manual(&d, 5000, clk());
+    r = manual_dose(&d, 5000, clk());
     DSP_CHECK(r.status == DSP_DOSING_LIMIT && r.limits == DSP_DOSING_L_INTERVAL);
     g_now = dsp_dosing_state(&d)->last_start_utc + 60;
-    DSP_CHECK_EQ_INT(DSP_DOSING_OK, dsp_dosing_manual(&d, 5000, clk()).status);
+    DSP_CHECK_EQ_INT(DSP_DOSING_OK, manual_dose(&d, 5000, clk()).status);
     /* Daily: 60000 per local day. 10000 so far; 50000 more fit, then nothing. */
     for (int i = 0; i < 5; i++) {
         g_now += 120;
-        DSP_CHECK_EQ_INT(DSP_DOSING_OK, dsp_dosing_manual(&d, 10000, clk()).status);
+        DSP_CHECK_EQ_INT(DSP_DOSING_OK, manual_dose(&d, 10000, clk()).status);
     }
     g_now += 120;
-    r = dsp_dosing_manual(&d, 1, clk());
+    r = manual_dose(&d, 1, clk());
     DSP_CHECK(r.status == DSP_DOSING_LIMIT && r.limits == DSP_DOSING_L_DAILY);
     DSP_CHECK_EQ_INT(60000, dsp_dosing_state(&d)->ledger_sum_ul);
     DSP_CHECK_EQ_INT(7, pump.calls);
@@ -658,28 +672,34 @@ static void test_daily_ledger_and_clock_changes(void)
     save_cfg(c);
     /* 23:59 local (22:59Z), then 00:01 local next day: a new local date, a new budget. */
     g_now = 1795215540; /* 2026-11-20T22:59:00Z = 23:59 CET */
-    DSP_CHECK_EQ_INT(DSP_DOSING_OK, dsp_dosing_manual(&d, 20000, clk()).status);
+    DSP_CHECK_EQ_INT(DSP_DOSING_OK, manual_dose(&d, 20000, clk()).status);
     g_now = 1795215540 + 120 + 17; /* 2026-11-21 00:01 CET */
-    DSP_CHECK_EQ_INT(DSP_DOSING_OK, dsp_dosing_manual(&d, 20000, clk()).status);
+    DSP_CHECK_EQ_INT(DSP_DOSING_OK, manual_dose(&d, 20000, clk()).status);
     dsp_date_t dd = dsp_dosing_state(&d)->ledger_date;
     DSP_CHECK(dd.year == 2026 && dd.month == 11 && dd.day == 21);
     /* Rollback to the previous local date: counted against the highest date (full), and the
      * interval waits for the clock to pass the last start. */
     g_now = 1795215540 - 3600; /* back to 2026-11-20 22:59 CET */
-    dsp_dosing_result_t r = dsp_dosing_manual(&d, 1, clk());
+    dsp_dosing_result_t r = manual_dose(&d, 1, clk());
     DSP_CHECK_EQ_INT(DSP_DOSING_LIMIT, r.status);
     DSP_CHECK(r.limits & DSP_DOSING_L_DAILY);
     DSP_CHECK(r.limits & DSP_DOSING_L_INTERVAL);
     /* Forward again to the next local date and beyond the interval: allowed. */
     g_now = 1795215540 + DAY + 600; /* 2026-11-22 00:09 CET */
-    DSP_CHECK_EQ_INT(DSP_DOSING_OK, dsp_dosing_manual(&d, 20000, clk()).status);
+    DSP_CHECK_EQ_INT(DSP_DOSING_OK, manual_dose(&d, 20000, clk()).status);
     /* Untrusted clock: refused, ledger untouched. */
     dsp_dosing_state_t before = *dsp_dosing_state(&d);
     g_trusted = false;
     g_now += 3 * DAY;
-    r = dsp_dosing_manual(&d, 1000, clk());
+    r = manual_dose(&d, 1000, clk());
     DSP_CHECK(r.status == DSP_DOSING_REFUSED && (r.gates & DSP_DOSING_G_CLOCK));
-    DSP_CHECK(dsp_dosing_state_equal(&before, dsp_dosing_state(&d)));
+    /* ledger and everything else untouched; only the durable refusal (hw + ring) changed */
+    dsp_dosing_state_t after = *dsp_dosing_state(&d);
+    DSP_CHECK_EQ_INT(g_mseq, after.manual_hw[0]);
+    memcpy(before.manual_hw, after.manual_hw, sizeof before.manual_hw);
+    memcpy(before.ring, after.ring, sizeof before.ring);
+    before.ring_next = after.ring_next;
+    DSP_CHECK(dsp_dosing_state_equal(&before, &after));
     g_trusted = true;
     /* DST days are single local dates: 2027-03-28 (23 h) and 2026-10-25 (25 h). */
     struct {
@@ -694,12 +714,12 @@ static void test_daily_ledger_and_clock_changes(void)
         c.max_dose_ul = 20000;
         save_cfg(c);
         g_now = dst[i].first + 60;
-        DSP_CHECK_EQ_INT(DSP_DOSING_OK, dsp_dosing_manual(&d, 20000, clk()).status);
+        DSP_CHECK_EQ_INT(DSP_DOSING_OK, manual_dose(&d, 20000, clk()).status);
         g_now = dst[i].second - 60; /* the same local date, 23 or 25 hours later */
-        r = dsp_dosing_manual(&d, 1, clk());
+        r = manual_dose(&d, 1, clk());
         DSP_CHECK(r.status == DSP_DOSING_LIMIT && r.limits == DSP_DOSING_L_DAILY);
         g_now = dst[i].second + 60; /* the next local date */
-        DSP_CHECK_EQ_INT(DSP_DOSING_OK, dsp_dosing_manual(&d, 20000, clk()).status);
+        DSP_CHECK_EQ_INT(DSP_DOSING_OK, manual_dose(&d, 20000, clk()).status);
     }
     DSP_CHECK_EQ_INT(0, pump.violations);
 }
@@ -723,7 +743,7 @@ static void test_blocked_latch(void)
     boot();
     DSP_CHECK(dsp_dosing_state(&d)->flags & DSP_DOSING_F_BLOCKED); /* durable */
     /* Manual dosing is refused too (Q7), even for a covered volume. */
-    r = dsp_dosing_manual(&d, 1000, clk());
+    r = manual_dose(&d, 1000, clk());
     DSP_CHECK(r.status == DSP_DOSING_REFUSED && (r.gates & DSP_DOSING_G_BLOCKED));
     /* Every automatic dose stops until the refill, whatever its volume. */
     dsp_schedule_t small = sched("blk-small", 8, 100);
@@ -790,7 +810,7 @@ static void test_refill_power_cut_every_write(void)
                 DSP_CHECK(!(n.s.flags & DSP_NOTIFY_F_ESTIMATE_UNCERTAIN));
                 DSP_CHECK(!blocked_condition());
             } else {
-                dsp_dosing_result_t r = dsp_dosing_manual(&d, 1000, clk());
+                dsp_dosing_result_t r = manual_dose(&d, 1000, clk());
                 DSP_CHECK_EQ_INT(DSP_DOSING_REFUSED, r.status);
             }
             if (rs == DSP_DOSING_OK) {
@@ -908,7 +928,7 @@ static void test_unpersisted_report_keeps_durable_source(void)
             dsp_schedule_t s2 = sched("up-b", 8, 1000);
             dsp_occurrence_t o = occ_at(&s, T0);
             fail_notify_sets = true;
-            dsp_dosing_result_t r = manual ? dsp_dosing_manual(&d, 5000, clk())
+            dsp_dosing_result_t r = manual ? manual_dose(&d, 5000, clk())
                                            : dsp_dosing_run_automatic(&d, &s, &o, clk());
             DSP_CHECK_EQ_INT(DSP_DOSING_PUMP_FAILED, r.status);
             DSP_CHECK_EQ_INT(1, pump.calls);
@@ -919,8 +939,13 @@ static void test_unpersisted_report_keeps_durable_source(void)
             dsp_dosing_result_t r2 = dsp_dosing_run_automatic(&d, &s2, &o2, clk());
             DSP_CHECK(r2.status == DSP_DOSING_REFUSED && !r2.pumped);
             DSP_CHECK(r2.gates & DSP_DOSING_G_DEGRADED);
-            r2 = dsp_dosing_manual(&d, 1000, clk());
-            DSP_CHECK(r2.status == DSP_DOSING_REFUSED && !r2.pumped);
+            uint64_t hw = dsp_dosing_state(&d)->manual_hw[0];
+            r2 = manual_dose(&d, 1000, clk());
+            /* M1.10b.2: nothing can be made durable after the storage failure: not executed,
+             * not consumed (the request ID stays undecided) */
+            DSP_CHECK(r2.status == DSP_DOSING_ERR_STORAGE && !r2.pumped);
+            DSP_CHECK(r2.gates & DSP_DOSING_G_DEGRADED);
+            DSP_CHECK_EQ_INT(hw, dsp_dosing_state(&d)->manual_hw[0]);
             DSP_CHECK_EQ_INT(1, pump.calls);
             /* The durable source is kept (the report is only in RAM). */
             dsp_dosing_state_t ds;
@@ -985,7 +1010,7 @@ static void test_unpersisted_report_without_durable_source(void)
     DSP_CHECK_EQ_INT(DSP_DOSING_ERR_STORAGE, r.status);
     DSP_CHECK(!r.pumped && d.degraded);
     /* Manual: the marker write fails, so there is no marker and no pump run. */
-    r = dsp_dosing_manual(&d, 5000, clk());
+    r = manual_dose(&d, 5000, clk());
     DSP_CHECK(!r.pumped);
     boot();
     dsp_dosing_recovery_t rv;
@@ -1026,7 +1051,7 @@ static void power_loss_matrix(bool manual)
                 /* 1. The dose, cut after cut1 writes; then a restart. */
                 kv.power_cut_after_sets = cut1;
                 if (manual) {
-                    (void)dsp_dosing_manual(&d, 5000, clk());
+                    (void)manual_dose(&d, 5000, clk());
                 } else {
                     (void)dsp_dosing_run_automatic(&d, &s, &o, clk());
                 }
@@ -1166,7 +1191,7 @@ static void test_randomized(void)
         if (op < 15) {
             (void)dsp_dosing_process_due(&d, set, 2, &CLOCK);
         } else if (op < 18) {
-            (void)dsp_dosing_manual(&d, 1000 + rnd(9000), clk());
+            (void)manual_dose(&d, 1000 + rnd(9000), clk());
         } else if (op < 19) {
             /* The user physically refills when commanding it, whatever the storage outcome
              * (a cut refill is completed by the next recovery). */
@@ -1220,6 +1245,86 @@ static void test_randomized(void)
     printf("randomized: %d pump runs\n", pump.calls);
 }
 
+/* ---- M1.10b.2: anti-replay at the Dosing Service level (independent of the app layer) ---- */
+
+static void test_manual_anti_replay_service_level(void)
+{
+    fresh(true);
+    make_ready();
+    /* Duplicates: decided requests never execute, without any write. */
+    dsp_manual_outcome_t a = dsp_dosing_manual_request(&d, 1, 5, 1000, clk(), 0);
+    DSP_CHECK_EQ_INT(DSP_MANUAL_EXECUTED, a.kind);
+    DSP_CHECK_EQ_INT(DSP_MRES_DONE, a.state);
+    int w = keylog_len;
+    g_now += 120;
+    dsp_manual_outcome_t b = dsp_dosing_manual_request(&d, 1, 5, 1000, clk(), 0);
+    DSP_CHECK_EQ_INT(DSP_MANUAL_DECIDED, b.kind);
+    DSP_CHECK_EQ_INT(DSP_MRES_DONE, b.state);
+    b = dsp_dosing_manual_request(&d, 1, 4, 1000, clk(), 0); /* below the floor, never seen */
+    DSP_CHECK_EQ_INT(DSP_MANUAL_DECIDED, b.kind);
+    DSP_CHECK_EQ_INT(DSP_MRES_UNAVAILABLE, b.state);
+    DSP_CHECK_EQ_INT(w, keylog_len);
+    DSP_CHECK_EQ_INT(1, pump.calls);
+    /* Invalid: not consumed, no write. */
+    DSP_CHECK_EQ_INT(DSP_MANUAL_INVALID, dsp_dosing_manual_request(&d, 1, DSP_MANUAL_SEQ_MAX + 1u, 1000, clk(), 0).kind);
+    DSP_CHECK_EQ_INT(DSP_MANUAL_INVALID, dsp_dosing_manual_request(&d, 1, 0, 1000, clk(), 0).kind);
+    DSP_CHECK_EQ_INT(DSP_MANUAL_INVALID, dsp_dosing_manual_request(&d, 1, 6, 0, clk(), 0).kind);
+    DSP_CHECK_EQ_INT(DSP_MANUAL_INVALID, dsp_dosing_manual_request(&d, DSP_MANUAL_SLOTS, 6, 1000, clk(), 0).kind);
+    DSP_CHECK_EQ_INT(w, keylog_len);
+    DSP_CHECK_EQ_INT(5, dsp_dosing_state(&d)->manual_hw[1]);
+    DSP_CHECK_EQ_INT(6, dsp_dosing_manual_floor(&d, 1));
+    DSP_CHECK_EQ_INT(1, dsp_dosing_manual_floor(&d, 0));
+    /* The decision survives a restart (RAM lost). */
+    DSP_CHECK(open_world());
+    b = dsp_dosing_manual_request(&d, 1, 5, 1000, clk(), 0);
+    DSP_CHECK_EQ_INT(DSP_MANUAL_DECIDED, b.kind);
+    DSP_CHECK_EQ_INT(1, pump.calls);
+}
+
+/* While a marker is in flight (recovery not run yet), refusals are recorded durably but never
+ * evict the marker's PENDING result; recovery then turns it into INTERRUPTED. */
+static void test_manual_ring_keeps_in_flight_result(void)
+{
+    fresh(true);
+    make_ready();
+    dsp_dosing_state_t s = *dsp_dosing_state(&d);
+    s.flags |= DSP_DOSING_F_MANUAL_ACTIVE;
+    s.manual_volume_ul = 1000;
+    s.manual_started_at = g_now;
+    s.next_seq = s.next_seq != 0 ? s.next_seq : 1;
+    s.manual_seq = s.next_seq++;
+    s.manual_hw[0] = 3;
+    s.marker_slot = 0;
+    s.marker_req = 3;
+    s.ring[0] = (dsp_manual_result_t){0, DSP_MRES_PENDING, 3, 1000};
+    s.ring_next = 1;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_dosing(&st, &s));
+    DSP_CHECK(open_world()); /* no recovery yet */
+    for (uint64_t q = 10; q < 10 + 2 * DSP_MANUAL_RING; q++) {
+        dsp_manual_outcome_t o = dsp_dosing_manual_request(&d, 0, q, 1000, clk(), 0);
+        DSP_CHECK_EQ_INT(DSP_MANUAL_REFUSED, o.kind); /* the in-flight marker is a gate */
+    }
+    const dsp_manual_result_t *e = dsp_dosing_state_find_result(dsp_dosing_state(&d), 0, 3);
+    DSP_CHECK(e != NULL && e->state == DSP_MRES_PENDING);
+    dsp_notify_clock_t nc = {g_now, true};
+    dsp_dosing_recovery_t rec;
+    DSP_CHECK_EQ_INT(DSP_DOSING_OK, dsp_dosing_recover(&d, nc, &rec));
+    DSP_CHECK_EQ_INT(1, rec.manual);
+    e = dsp_dosing_state_find_result(dsp_dosing_state(&d), 0, 3);
+    DSP_CHECK(e != NULL && e->state == DSP_MRES_INTERRUPTED);
+    DSP_CHECK_EQ_INT(0, pump.calls);
+    /* A marker request above its slot's high-water mark is an invalid record. */
+    s = *dsp_dosing_state(&d);
+    s.flags |= DSP_DOSING_F_MANUAL_ACTIVE;
+    s.manual_volume_ul = 1000;
+    s.manual_started_at = g_now;
+    s.next_seq = s.next_seq != 0 ? s.next_seq : 1;
+    s.manual_seq = s.next_seq++;
+    s.marker_slot = 1;
+    s.marker_req = s.manual_hw[1] + 1u;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_ERR_INVALID, dsp_storage_save_dosing(&st, &s));
+}
+
 int main(void)
 {
     DSP_RUN(test_defaults_and_readiness);
@@ -1228,6 +1333,8 @@ int main(void)
     DSP_RUN(test_automatic_dose_order_and_volume);
     DSP_RUN(test_process_due_order_and_window);
     DSP_RUN(test_limits);
+    DSP_RUN(test_manual_anti_replay_service_level);
+    DSP_RUN(test_manual_ring_keeps_in_flight_result);
     DSP_RUN(test_daily_ledger_and_clock_changes);
     DSP_RUN(test_blocked_latch);
     DSP_RUN(test_missing_configuration_never_blocks);

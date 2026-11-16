@@ -145,6 +145,8 @@ static dsp_kv_status_t px_commit(void *ctx)
 #define MAX_RUNS 256
 static bool ble_on;
 static bool op_running;
+static bool op_allows_pump; /* the running operation is a manual dose (M1.10b.2) */
+static bool pump_cut;       /* armed operation: the power goes during the pump run */
 static struct {
     int calls;
     int violations;
@@ -153,18 +155,36 @@ static struct {
 } pump;
 
 static dsp_schedule_set_t durable_set(void);
+static bool pump_fail_next;
+static void (*pump_hook)(void); /* called while the pump runs (test-specific probes) */
 
 static dsp_pump_result_t pump_run(void *ctx, uint32_t runtime_ms)
 {
     (void)ctx;
     int i = pump.calls++;
-    if (ble_on || op_running) {
+    if (ble_on || (op_running && !op_allows_pump)) {
         pump.violations++;
         fprintf(stderr, "pump started while BLE is on (%d) or an operation runs (%d)\n", ble_on,
                 op_running);
     }
     dsp_utc_t now = raw();
     char id[96] = "manual";
+    /* M1.10b.2 oracle: a manual run is bound to a request whose decision is durable BEFORE the
+     * pump: marker with (slot, req), manual_hw[slot] >= req, ring entry PENDING. */
+    {
+        const fake_kv_entry_t *de = fake_kv_find(&kv, "dosing");
+        dsp_dosing_state_t ds;
+        if (de != NULL && dsp_codec_decode_dosing(de->value, de->len, &ds) == DSP_CODEC_OK &&
+            (ds.flags & DSP_DOSING_F_MANUAL_ACTIVE)) {
+            const dsp_manual_result_t *e = dsp_dosing_state_find_result(&ds, ds.marker_slot, ds.marker_req);
+            if (ds.marker_req == 0 || ds.manual_hw[ds.marker_slot] < ds.marker_req || e == NULL ||
+                e->state != DSP_MRES_PENDING || !op_allows_pump) {
+                pump.violations++;
+                fprintf(stderr, "manual pump run without a durable decision\n");
+            }
+            snprintf(id, sizeof id, "m%u:%llu", ds.marker_slot, (unsigned long long)ds.marker_req);
+        }
+    }
     for (size_t s = 0; s < DSP_STORAGE_HISTORY_SLOTS; s++) {
         char key[8];
         dsp_storage_history_key(s, key, sizeof key);
@@ -191,14 +211,26 @@ static dsp_pump_result_t pump_run(void *ctx, uint32_t runtime_ms)
     for (int k = 0; k < i && k < MAX_RUNS; k++) {
         if (strcmp(id, "manual") != 0 && strcmp(pump.ids[k], id) == 0) {
             pump.violations++;
-            fprintf(stderr, "automatic DUPLICATE: %s\n", id);
+            fprintf(stderr, "DUPLICATE pump run: %s\n", id); /* automatic or manual request */
         }
     }
     if (i < MAX_RUNS) {
         snprintf(pump.ids[i], sizeof pump.ids[i], "%s", id);
         pump.at[i] = g_true;
     }
+    if (pump_hook != NULL) {
+        void (*h)(void) = pump_hook;
+        pump_hook = NULL;
+        h();
+    }
     advance(g_true + (dsp_utc_t)((runtime_ms + 999u) / 1000u));
+    if (in_wake && armed && pump_cut) {
+        power_lost(); /* power lost during the pump run */
+    }
+    if (pump_fail_next) {
+        pump_fail_next = false;
+        return DSP_PUMP_FAILED;
+    }
     return DSP_PUMP_OK;
 }
 static void pump_off(void *ctx)
@@ -282,6 +314,9 @@ enum {
     OP_DELETE_CUR,
     OP_POST,
     OP_END,
+    OP_MANUAL,     /* M1.10b.2 */
+    OP_GET_RESULT,
+    OP_FLOOR,
 };
 
 typedef struct {
@@ -297,6 +332,8 @@ typedef struct {
     uint32_t unc;
     char id[DSP_SCHEDULE_ID_MAX_LEN + 1];
     dsp_app_cmd_t cmd;
+    uint64_t seq;
+    uint32_t volume;
 } op_t;
 
 typedef struct {
@@ -307,10 +344,15 @@ typedef struct {
     dsp_config_t cfg;
     dsp_schedule_t s;
     dsp_app_schedule_page_t page;
+    dsp_app_manual_result_t manual;
+    uint8_t state;
+    uint32_t detail;
+    uint64_t floor;
+    int pumps;   /* pump runs during the operation */
     long writes; /* KV sets during the operation */
 } res_t;
 
-#define MAX_STEPS 40
+#define MAX_STEPS 64
 static struct {
     dsp_utc_t at[MAX_STEPS];
     op_t op[MAX_STEPS];
@@ -330,7 +372,9 @@ static void exec_op(int i)
     const dsp_app_auth_t *auth = o->no_auth ? NULL : o->auth;
     r->ran = true;
     long before = kv.sets;
+    int pumps_before = pump.calls;
     op_running = true;
+    op_allows_pump = o->kind == OP_MANUAL;
     armed = sc.arm[i];
     switch (o->kind) {
     case OP_TIME:
@@ -390,12 +434,23 @@ static void exec_op(int i)
         r->r.status = dsp_app_post(&app, &c) ? DSP_OP_OK : DSP_OP_BUSY;
         break;
     }
+    case OP_MANUAL:
+        r->r = dsp_app_manual_dose(&app, auth, o->seq, o->volume, &r->manual);
+        break;
+    case OP_GET_RESULT:
+        r->r = dsp_app_get_result(&app, auth, o->seq, &r->state, &r->detail);
+        break;
+    case OP_FLOOR:
+        r->r = dsp_app_manual_floor(&app, auth, &r->floor);
+        break;
     default:
         break;
     }
     armed = false;
     op_running = false;
+    op_allows_pump = false;
     r->writes = kv.sets - before;
+    r->pumps = pump.calls - pumps_before;
 }
 
 static void run_due_steps(void)
@@ -509,6 +564,23 @@ static op_t op_ready(void)
     o.cmd.readiness = DSP_READINESS_READY;
     return o;
 }
+static op_t op_manual(uint64_t seq, uint32_t volume)
+{
+    op_t o = mk(OP_MANUAL);
+    o.seq = seq;
+    o.volume = volume;
+    return o;
+}
+static op_t op_result(uint64_t seq)
+{
+    op_t o = mk(OP_GET_RESULT);
+    o.seq = seq;
+    return o;
+}
+static op_t op_floor(void)
+{
+    return mk(OP_FLOOR);
+}
 static op_t as(op_t o, const dsp_app_auth_t *auth)
 {
     o.auth = auth;
@@ -590,6 +662,8 @@ static void world(void)
     proxy.set = px_set;
     proxy.commit = px_commit;
     in_wake = armed = cut_after = cut_happened = false;
+    pump_cut = pump_fail_next = op_allows_pump = false;
+    pump_hook = NULL;
     op_writes = cut_at = 0;
     fail_set_key[0] = '\0';
     g_true = T0 - HOUR; /* 07:00 local */
@@ -869,6 +943,9 @@ static void test_authorization_fails_closed(void)
         step(g_true, as(op_create(s), bad[k]));
         step(g_true, as(op_update(1, s), bad[k]));
         step(g_true, as(op_delete("auth-a", 1), bad[k]));
+        step(g_true, as(op_manual(1, 1000), bad[k])); /* M1.10b.2 */
+        step(g_true, as(op_result(1), bad[k]));
+        step(g_true, as(op_floor(), bad[k]));
     }
     int last = sc.len;
     int ok = step(g_true, as(op_create(s), &OWNER3)); /* slot 3 is a valid owner slot */
@@ -2232,6 +2309,7 @@ static void test_schedule_set_format1_upgrade(void)
     invariants();
 }
 
+#ifndef DSP_APP_OPS_NO_MAIN
 int main(void)
 {
     DSP_RUN(test_authorization_fails_closed);
@@ -2263,3 +2341,4 @@ int main(void)
     DSP_RUN(test_config_extreme_values_are_overflow_safe);
     return dsp_test_finish();
 }
+#endif /* DSP_APP_OPS_NO_MAIN */
