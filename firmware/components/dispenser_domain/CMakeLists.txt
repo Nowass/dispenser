@@ -8,6 +8,7 @@
 #
 # Keep the source list here only.
 set(DSP_DOMAIN_SRCS
+    "src/dsp_app.c"
     "src/dsp_codec.c"
     "src/dsp_config.c"
     "src/dsp_connectivity.c"
@@ -21,6 +22,7 @@ set(DSP_DOMAIN_SRCS
     "src/dsp_notify.c"
     "src/dsp_notify_proto.c"
     "src/dsp_notify_state.c"
+    "src/dsp_power.c"
     "src/dsp_recurrence.c"
     "src/dsp_reservoir.c"
     "src/dsp_schedule_repo.c"

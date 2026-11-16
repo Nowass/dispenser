@@ -395,6 +395,14 @@ dsp_notify_status_t dsp_notify_on_refill(dsp_notify_t *n, const dsp_config_t *cf
     return dsp_notify_observe_reservoir(n, cfg, false, clock);
 }
 
+dsp_notify_status_t dsp_notify_flush(dsp_notify_t *n)
+{
+    if (n == NULL || !n->loaded) {
+        return DSP_NOTIFY_ERR_ARG;
+    }
+    return finish(n, false, DSP_NOTIFY_OK);
+}
+
 bool dsp_notify_storage_degraded(const dsp_notify_t *n)
 {
     return n == NULL || !n->loaded || n->dirty;

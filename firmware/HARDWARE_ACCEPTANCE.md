@@ -75,3 +75,13 @@ the "Result" column, and keep the safety rules below. Nothing here has been run 
 |---|---|---|---|
 | 6.1 | BLE session followed by a Wi-Fi/TLS session (never concurrent) | both work, heap recovers | |
 | 6.2 | Image with NimBLE + HTTPS fits the 1.75 MiB slot | `idf.py size` | |
+
+## 7. Application cycle and fail-safe (M1.9b domain; needs the M1.9c adapters)
+
+| # | Check | Pass criterion | Result |
+|---|---|---|---|
+| 7.1 | Pump gate level during reset, boot, brownout, panic and deep sleep | OFF in every state without firmware (pull-down, P1) | |
+| 7.2 | Fail-safe path: force an unconfirmed pump-off reading | no deep sleep; SoC reset; gate OFF throughout | |
+| 7.3 | **Hardware integration risk:** a pump-off confirmation that never succeeds (broken readback) | the fail-safe resets repeatedly with the pump held OFF by hardware: measure the reset period and current draw (battery drain), decide the hardware recovery mechanism only after 7.1/7.2 | |
+| 7.4 | RTC-retained block per reset type (timer, button, software, watchdog, panic, brownout, power-on) | kept / discarded as specified, CRC valid | |
+| 7.5 | BLE suspend before a pump run and resume latency; session lifetime (180 s idle, kept while connected, 15 min maximum) on the monotonic clock | no overlap; deadlines met | |

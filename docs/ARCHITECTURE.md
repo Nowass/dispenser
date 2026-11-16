@@ -264,6 +264,17 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - **Storage:** layout v4 (`dosing` record), history format 2, configuration format 2, `notify` format 3; all forward-only (rollback limitation for a future OTA).
 - **Hardware-dependent (pending):** limit values, the hardware cutoff, the gate pin and its reset/brownout/deep-sleep behavior, watchdog timeouts, brownout under motor inrush.
 
+### Application and Power Services (firmware M1.9b, implemented and host-tested; no platform adapters)
+
+- **Wake cycle:** `dsp_app_run_wake()`, one owner, run to completion, static memory: SAFE_OFF → LOAD → RECOVER → CLOCK → OBSERVE → DOSE → CONNECT (→ DOSE after a sync) → BLE (button wake; → CONNECT if commands ran) → SYNC → PLAN → SHUTDOWN → SLEEP or FAIL_SAFE.
+- **Safety:** SAFE_OFF first (pump port handed to the Dosing Service; the application never drives the pump); unconfirmed OFF skips everything to a fail-safe. LOAD failure = DEGRADED (no dosing, no Wi-Fi or transmission, read-only service session, plan = cap). A pump fault or storage failure ends dosing for the wake.
+- **Priority:** doses before CONNECT; the connectivity guard includes a same-time dose waiting for the interval; BLE suspended before every pump run and resumed if its window remains; BLE commands queued (bounded, 8) and processed by the application task only. Pump, Wi-Fi and BLE never overlap.
+- **Service session:** 180 s without a client (restarted after a disconnect), kept while connected, 15 min maximum (configurable, monotonic clock); `dsp_app_post()` is the only cross-task entry, touches only the queue, and runs under the platform lock (`dsp_app_sync_t`, FreeRTOS in M1.9c/BLE).
+- **Plan (`dsp_power`):** earliest of next dose, next sync and the cap (default 6 h, configurable); never a notification wake; no dose wakes while dosing is impossible until a user action (`SERVICE_REQUIRED`, BLOCKED, refill pending, marker, configuration); an overdue sync is deferred 5 min.
+- **Retained block:** 48 B in RTC memory (magic, version, length, CRC-32): sync retry state, hourly CRITICAL limit, wake and fail-safe counters, last plan. Discarded after power-on/brownout or any validation failure.
+- **Shutdown:** pump OFF confirmed, HTTPS ended, Wi-Fi `DISABLED`, BLE stopped (3 attempts), retained block saved; sleep only if all are confirmed, otherwise `fail_safe` (platform: actuators off, SoC reset). 3 consecutive fail-safes inhibit dosing until a confirmed shutdown. **Hardware integration risk:** an OFF confirmation that never succeeds gives a reset loop (pump OFF by hardware, battery drain); no recovery mechanism before the gate and reset behavior are verified.
+- **Hardware-unverified:** deep sleep, wake sources, RTC memory per reset type, the fail-safe reset and gate level, BLE stop/resume latency (M1.9c adapters and the board).
+
 ### Notification engine (firmware M1.5, implemented and host-tested; transport since M1.7)
 
 - **Events:** `RESERVOIR_LOW` and `BATTERY_LOW` (WARNING, conditions), `RESERVOIR_BLOCKED` (CRITICAL, condition), `DEVICE_ERROR` (CRITICAL; conditions for storage, sync overdue and clock UNKNOWN after 4 failed syncs (a trusted HOLDOVER clock never raises it and stays usable for dosing), plus a one-shot queue-overflow report), and `DOSING_ERROR` (CRITICAL, one-shot, MANUAL flag for manual doses).

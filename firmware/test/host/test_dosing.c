@@ -193,7 +193,13 @@ static void pump_off(void *ctx)
     pump.force_offs++;
 }
 
-static const dsp_pump_port_t PUMP = {NULL, pump_run, pump_off};
+static bool pump_is_off(void *ctx)
+{
+    (void)ctx;
+    return true; /* the fake pump is OFF on every return of run() */
+}
+
+static const dsp_pump_port_t PUMP = {NULL, pump_run, pump_off, pump_is_off};
 
 /* ---- World ------------------------------------------------------------------------------ */
 

@@ -7,8 +7,8 @@
 | ID | Requirement |
 | --- | --- |
 | FR-001 | Autonomous scheduled dosing of roughly 10–20 ml daily; exact volumetric accuracy is not critical. |
-| FR-002 | ESP32-C3 normally in deep sleep, waking for planned dosing and physical button press. |
-| FR-003 | Button on suitable deep-sleep wake GPIO activates BLE maintenance session; default 3 min advertising timeout, maintain session while connected. |
+| FR-002 | ESP32-C3 normally in deep sleep, waking for planned dosing and physical button press. **M1.9b (host-tested, no deep-sleep adapter yet):** one run-to-completion cycle per wake; the plan is the earliest of next dose, next time sync and a 6 h re-evaluation cap (configurable); sleep only after the shutdown checklist. |
+| FR-003 | Button on suitable deep-sleep wake GPIO activates BLE maintenance session; default 3 min advertising timeout, maintain session while connected. **M1.9b (approved policy; domain port only, no NimBLE):** a button wake opens a service session: 180 s without a client (restarted after each disconnect), kept while a client is connected, at most 15 min in total (both configurable, monotonic clock); scheduled doses suspend it and it resumes only while the deadline permits. |
 | FR-004 | Android app provides schedule/configuration, calibration, manual dose, event logs, battery and estimated reservoir level. |
 | FR-005 | Wi-Fi used only on important events/alerts or infrequent time sync. No routine telemetry or daily emails. **CONFIRMED (M1.7, D1-B, 2026-11-16):** Wi-Fi opens only on an existing wake: for the regular time sync (all pending notifications ride along) or, for a pending CRITICAL notification, at most once per hour and only while the Wi-Fi backoff allows it. WARNING notifications wait for the regular session. Never an extra wake-up for a notification, never during dosing, a dose permit or BLE, never close to the next dose. No delivery latency is promised. Implemented as `dsp_connectivity_run()` (host-tested). |
 | FR-006 | Stock estimated in firmware; user confirms/refills volume from the Android app. No level sensor in prototype. |
@@ -64,7 +64,7 @@
 | FR-041 | Each record carries monotonically increasing sequence, action ID, timestamp (with validity flag), requested amount, runtime, outcome and reason. |
 | FR-042 | Flash-write strategy must avoid excessive writes; no high-frequency pump-loop logging to NVS. Firmware M1.3: schedule and configuration writes only on change, two small history writes per automatic dose; estimate and wear analysis in `firmware/README.md`. |
 | FR-043 | Manual dose obeys maximum run and safety limits, requires explicit action/confirmation in app, and is logged. **CONFIRMED (M1.2 brief, 2026-11-15):** a manual dose is independent of scheduled occurrence identity and never resets, clears or overwrites automatic execution history. **M1.9a:** manual doses use the same gates and limits as automatic ones, are refused while BLOCKED, require a trusted clock, and leave a durable in-flight marker with the requested volume so an interruption is reported after a restart (never re-executed). |
-| FR-044 | The pump is forced OFF on all resets/failures/boot/deep sleep transitions; GPIO cannot accidentally drive it during boot. |
+| FR-044 | The pump is forced OFF on all resets/failures/boot/deep sleep transitions; GPIO cannot accidentally drive it during boot. **M1.9b (host-tested):** SAFE_OFF is the first action of every wake; sleep only after the pump OFF state is confirmed; otherwise a fail-safe reset instead of sleep. Gate behavior at reset is hardware-unverified. |
 | FR-045 | Test device using water only until chemical compatibility and safety are confirmed. |
 
 ## Acceptance test examples

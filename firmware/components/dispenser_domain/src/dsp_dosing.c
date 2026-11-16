@@ -1,5 +1,7 @@
 #include "dsp_dosing.h"
 
+#include "dsp_wakeup.h"
+
 #include <string.h>
 
 #include "dsp_reservoir.h"
@@ -666,18 +668,11 @@ typedef struct {
 
 #define MAX_CANDIDATES (2 * DSP_SCHEDULE_CAPACITY)
 
-dsp_dosing_due_report_t dsp_dosing_process_due(dsp_dosing_t *d, const dsp_schedule_t *schedules,
-                                               size_t n, const dsp_dosing_clock_t *clock)
+/* Occurrences inside the due window of now (enabled schedules, valid clock), in time order,
+ * then schedule ID (insertion sort; at most 2 per schedule). */
+static size_t collect_candidates(const dsp_dosing_t *d, const dsp_schedule_t *schedules, size_t n,
+                                 dsp_clock_t now, candidate_t *cand)
 {
-    dsp_dosing_due_report_t rep;
-    memset(&rep, 0, sizeof rep);
-    if (d == NULL || clock == NULL || clock->read == NULL || (schedules == NULL && n > 0) ||
-        n > DSP_SCHEDULE_CAPACITY) {
-        rep.stop = DSP_DOSING_ERR_ARG;
-        return rep;
-    }
-    dsp_clock_t now = clock->read(clock->ctx);
-    candidate_t cand[MAX_CANDIDATES];
     size_t count = 0;
     int64_t window = d->ex->cfg.due_window_s;
     for (size_t i = 0; i < n && count < MAX_CANDIDATES; i++) {
@@ -697,7 +692,6 @@ dsp_dosing_due_report_t dsp_dosing_process_due(dsp_dosing_t *d, const dsp_schedu
             count++;
         }
     }
-    /* Time order, then schedule ID (insertion sort; at most 32 entries). */
     for (size_t i = 1; i < count; i++) {
         candidate_t c = cand[i];
         size_t j = i;
@@ -709,6 +703,22 @@ dsp_dosing_due_report_t dsp_dosing_process_due(dsp_dosing_t *d, const dsp_schedu
         }
         cand[j] = c;
     }
+    return count;
+}
+
+dsp_dosing_due_report_t dsp_dosing_process_due(dsp_dosing_t *d, const dsp_schedule_t *schedules,
+                                               size_t n, const dsp_dosing_clock_t *clock)
+{
+    dsp_dosing_due_report_t rep;
+    memset(&rep, 0, sizeof rep);
+    if (d == NULL || clock == NULL || clock->read == NULL || (schedules == NULL && n > 0) ||
+        n > DSP_SCHEDULE_CAPACITY || d->ex == NULL) {
+        rep.stop = DSP_DOSING_ERR_ARG;
+        return rep;
+    }
+    dsp_clock_t now = clock->read(clock->ctx);
+    candidate_t cand[MAX_CANDIDATES];
+    size_t count = collect_candidates(d, schedules, n, now, cand);
     rep.candidates = count;
     for (size_t i = 0; i < count; i++) {
         dsp_clock_t c = clock->read(clock->ctx); /* time advances with every pump run */
@@ -727,4 +737,105 @@ dsp_dosing_due_report_t dsp_dosing_process_due(dsp_dosing_t *d, const dsp_schedu
         }
     }
     return rep;
+}
+
+/* ---- Planning queries and safe-off (M1.9b) --------------------------------------------- */
+
+/* Persistent gates that make every automatic dose impossible until a user action (no dose
+ * wakes, Q13). DEGRADED is wake-local (state is reloaded at the next boot) and the clock is
+ * handled by the caller, so neither suppresses planning. */
+#define PLAN_SUPPRESS_GATES                                                                    \
+    (DSP_DOSING_G_NOT_LOADED | DSP_DOSING_G_NOT_READY | DSP_DOSING_G_BLOCKED |                \
+     DSP_DOSING_G_REFILL_PENDING | DSP_DOSING_G_MANUAL_ACTIVE | DSP_DOSING_G_PUMP_CONFIG |   \
+     DSP_DOSING_G_RESERVOIR_UNCONFIGURED)
+
+bool dsp_dosing_dose_wakes_allowed(dsp_dosing_t *d)
+{
+    return d != NULL && d->loaded && (dsp_dosing_gates(d, true, NULL) & PLAN_SUPPRESS_GATES) == 0;
+}
+
+static dsp_utc_t later(dsp_utc_t a, dsp_utc_t b)
+{
+    return a > b ? a : b;
+}
+
+bool dsp_dosing_next_due(dsp_dosing_t *d, const dsp_schedule_t *schedules, size_t n,
+                         dsp_clock_t clock, dsp_utc_t *at)
+{
+    if (d == NULL || at == NULL || (schedules == NULL && n > 0) || n > DSP_SCHEDULE_CAPACITY ||
+        d->ex == NULL || !clock.valid || !d->loaded) {
+        return false;
+    }
+    dsp_config_t cfg;
+    if ((state_gates(d) & PLAN_SUPPRESS_GATES) != 0 ||
+        dsp_storage_load_config(d->st, &cfg) != DSP_STORAGE_OK ||
+        (config_gates(d, &cfg, NULL) & PLAN_SUPPRESS_GATES) != 0) {
+        return false;
+    }
+    int64_t window = d->ex->cfg.due_window_s;
+    /* Earliest start the minimum interval allows (overflow-safe: both are bounded). */
+    dsp_utc_t ready = d->s.last_start_utc != 0 ? d->s.last_start_utc + (dsp_utc_t)cfg.min_interval_s
+                                               : DSP_UTC_MIN;
+    bool found = false;
+    dsp_utc_t best = 0;
+    /* 1. Unclaimed occurrences still inside their due window that only the interval holds
+     *    back (a refused same-time dose): retried when the interval allows, if that is
+     *    still inside the window. Other refusals (dose, runtime, daily) do not retry. */
+    candidate_t cand[MAX_CANDIDATES];
+    size_t count = collect_candidates(d, schedules, n, clock, cand);
+    for (size_t i = 0; i < count; i++) {
+        const dsp_schedule_t *s = &schedules[cand[i].index];
+        if (dsp_exec_check(d->ex, s, &cand[i].occ, clock) != DSP_EXEC_OK) {
+            continue; /* claimed, missed (window or floor) or held */
+        }
+        uint32_t rt = 0;
+        uint32_t sum = 0;
+        dsp_date_t date;
+        bool date_ok = true;
+        uint32_t l = check_limits(d, &cfg, s->amount_ul, clock.now, &rt, &date, &sum, &date_ok);
+        if (!date_ok || (l & ~(uint32_t)DSP_DOSING_L_INTERVAL) != 0) {
+            continue;
+        }
+        dsp_utc_t t = later(cand[i].occ.at, ready);
+        if (t > cand[i].occ.at + window) {
+            continue; /* the interval outlasts the window: it will be missed */
+        }
+        if (!found || t < best) {
+            best = t;
+            found = true;
+        }
+    }
+    /* 2. The next future occurrence (moved to the end of the interval if that is still
+     *    inside its window; otherwise its own instant: it is then refused and missed). */
+    dsp_utc_t next = 0;
+    if (dsp_wake_next_dose(schedules, n, d->tz, clock, &next)) {
+        dsp_utc_t t = later(next, ready) <= next + window ? later(next, ready) : next;
+        if (!found || t < best) {
+            best = t;
+            found = true;
+        }
+    }
+    if (found) {
+        *at = best;
+    }
+    return found;
+}
+
+bool dsp_dosing_port_safe_off(const dsp_pump_port_t *pump)
+{
+    if (pump == NULL || pump->force_off == NULL) {
+        return false;
+    }
+    pump->force_off(pump->ctx);
+    return pump->is_off != NULL && pump->is_off(pump->ctx);
+}
+
+bool dsp_dosing_safe_off(dsp_dosing_t *d)
+{
+    return d != NULL && dsp_dosing_port_safe_off(d->pump);
+}
+
+bool dsp_dosing_degraded(const dsp_dosing_t *d)
+{
+    return d == NULL || d->degraded;
 }

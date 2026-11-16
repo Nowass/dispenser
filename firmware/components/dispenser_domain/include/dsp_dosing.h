@@ -62,6 +62,9 @@ typedef struct {
     dsp_pump_result_t (*run)(void *ctx, uint32_t runtime_ms);
     /* Idempotent: drives the pump OFF. Called at init and after every run. */
     void (*force_off)(void *ctx);
+    /* M1.9b: confirms the output is OFF (driver state / gate readback). NULL = cannot be
+     * confirmed: safe-off is then reported unconfirmed (fail-safe, see dsp_power.h). */
+    bool (*is_off)(void *ctx);
 } dsp_pump_port_t;
 
 /* Reads the current clock (for doses executed one after another in one wake). */
@@ -187,6 +190,30 @@ dsp_dosing_status_t dsp_dosing_set_readiness(dsp_dosing_t *d, dsp_readiness_t re
 dsp_notify_status_t dsp_dosing_observe_reservoir(dsp_dosing_t *d, dsp_notify_clock_t clock);
 
 const dsp_dosing_state_t *dsp_dosing_state(const dsp_dosing_t *d);
+
+/* ---- M1.9b: planning and safe-off --------------------------------------------------------- */
+
+/* False while a persistent gate makes every automatic dose impossible until a user action:
+ * not loaded, SERVICE_REQUIRED, BLOCKED, refill pending, manual marker, calibration/limits
+ * or reservoir not configured (Q13: no dose wake-ups then). */
+bool dsp_dosing_dose_wakes_allowed(dsp_dosing_t *d);
+
+/* Earliest instant at which dsp_dosing_process_due() could start an automatic dose, as of
+ * clock (valid only): an unclaimed occurrence still inside its due window that only the
+ * minimum interval holds back (retried when the interval allows, if still inside the
+ * window), or the next future occurrence. *at may be <= clock.now (due now). false when
+ * dose wakes are not allowed (see above), the clock is not valid or nothing is scheduled.
+ * Never actuates and never writes. */
+bool dsp_dosing_next_due(dsp_dosing_t *d, const dsp_schedule_t *schedules, size_t n,
+                         dsp_clock_t clock, dsp_utc_t *at);
+
+/* force_off() then the is_off() confirmation. The port variant serves SAFE_OFF before the
+ * service is initialized (the port is only passed through, never driven by the caller). */
+bool dsp_dosing_port_safe_off(const dsp_pump_port_t *pump);
+bool dsp_dosing_safe_off(dsp_dosing_t *d);
+
+/* True after a storage failure in this wake (no further actuation until the next boot). */
+bool dsp_dosing_degraded(const dsp_dosing_t *d);
 
 /* Runtime for volume_ul at flow_ul_per_s, rounded up, overflow-safe. false if flow is 0,
  * volume is 0 or the result does not fit 32 bits. */

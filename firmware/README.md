@@ -4,9 +4,9 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: M1.1–M1.5, M1.7 and M1.8 (recurrence, execution history, persistent storage, time
-management, notification engine, HTTPS notification transport, integration tests) committed;
-M1.9a (Dosing Service, storage layout v4) implemented, awaiting review.**
+**Status: M1.1–M1.5, M1.7, M1.8, M1.9a and M1.9b (recurrence, execution history, persistent
+storage, time management, notification engine, HTTPS notification transport, integration
+tests, Dosing Service with storage layout v4, Application and Power Services) committed.**
 At run time the firmware still only logs its identification. The domain and platform
 components are compiled into the image's component libraries but not called by
 `app_main` (optional diagnostics exist, off by default), Wi-Fi is never started, and
@@ -58,15 +58,21 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   minimum interval), idempotent recovery of interrupted doses; storage layout v4 (`dosing`
   record) with history format 2 (claimed volume), configuration format 2 and `notify`
   format 3. No real pump driver. See [Dosing Service](#dosing-service-m19a).
+- (M1.9b) **Application and Power Services** (domain only): one single-owner, run-to-completion
+  wake cycle (SAFE_OFF → LOAD → RECOVER → CLOCK → OBSERVE → DOSE → CONNECT → BLE → SYNC → PLAN
+  → SHUTDOWN → SLEEP), the sleep plan (dose / sync / 6 h cap, no notification wakes, no dose
+  wakes while dosing is impossible), a versioned CRC-checked RTC-retained block, the shutdown
+  checklist with an explicit fail-safe, and an injected BLE service-mode port with a bounded
+  command queue. Host-tested only; not called by `app_main` (M1.9c). See
+  [Application and Power Services](#application-and-power-services-m19b).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
 ### Not implemented
 
-Dosing service task (wiring of recurrence, coordinator, storage, time, stock, limits and
-pump) and the application service that calls the Dosing Service and the M1.7 connectivity
-session (M1.9b), the real pump GPIO driver with hardware cutoff, power manager
-and deep-sleep lifecycle, production credential provisioning (authenticated BLE,
+Platform adapters for the application cycle (deep sleep and wake, RTC memory, button,
+BLE/NimBLE, `app_main` wiring: M1.9c and later), the real pump GPIO driver with hardware
+cutoff, production credential provisioning (authenticated BLE,
 per-device credentials), battery measurement, MONTHLY recurrence, event journal, BLE, GPIO
 and motor control, service mode, OTA (update client and rollback; only the partitions
 exist), a storage maintenance/repair tool. The domain code decides and records; nothing
@@ -187,6 +193,8 @@ firmware/
 │   │   ├── include/dsp_connectivity.h  connectivity session: sync, then delivery (M1.7)
 │   │   ├── include/dsp_dosing_state.h  persistent dosing record model (M1.9a)
 │   │   ├── include/dsp_dosing.h      Dosing Service: sole pump owner (M1.9a)
+│   │   ├── include/dsp_power.h       Power Service: plan, RTC-retained block, sleep port (M1.9b)
+│   │   ├── include/dsp_app.h         Application Service: the wake cycle (M1.9b)
 │   │   └── src/                      matching .c files
 │   └── dispenser_platform/     ESP-IDF adapters (never in the host build)
 │       ├── Kconfig                   DSP_SNTP_SERVER (M1.4), DSP_NOTIFY_URL, DSP_NOTIFY_HEALTH_URL (M1.7)
@@ -210,7 +218,8 @@ firmware/
 │   ├── test_proto.c               protocol encoder and response classifier (M1.7)
 │   ├── test_https.c               HTTPS transport and connectivity session (M1.7)
 │   ├── test_proto_vectors.c       runs ../../test-vectors/notification_protocol_v1.txt (M1.8)
-│   └── test_dosing.c              Dosing Service (M1.9a)
+│   ├── test_dosing.c              Dosing Service (M1.9a)
+│   └── test_app.c                 Application and Power Services (M1.9b)
 ├── test/integration/           local end-to-end harness (M1.8, see its README)
 │   ├── notify_harness.c           real domain code driven over stdin
 │   ├── posix_https_port.[ch]      host HTTP port: real TLS (OpenSSL), test CA, timeouts
@@ -1254,15 +1263,133 @@ pin and its reset/brownout/deep-sleep behavior, watchdog timeouts relative to th
 the brownout threshold under motor inrush. Until then provisioning keeps every limit at 0, so
 no pump can be activated.
 
-### Design consequence for M1.9b
+### Same-time schedules
 
 Two schedules due at the same time run one after another only if `min_interval_s` allows it;
-otherwise the second is refused (LIMIT, **not claimed**) and the Application Service must
-re-evaluate it after the interval, inside its due window. Once the window has passed, the
+otherwise the second is refused (LIMIT, **not claimed**) and the Application Service (M1.9b)
+re-evaluates it after the interval, inside its due window (`dsp_dosing_next_due`). Once the window has passed, the
 coordinator reports it as `MISSED` permanently: never dosed later, never caught up, and the
 same after restarts (tested). M1.9a writes no record for a missed occurrence; MISSED is
 derived from the occurrence time. A durable missed-occurrence event belongs to the event
 journal (Q10).
+
+## Application and Power Services (M1.9b)
+
+Pure domain code (`dsp_app`, `dsp_power`, small additions to `dsp_dosing` and `dsp_notify`):
+**implemented and host-tested only.** Nothing calls it from `app_main` yet. There is no deep
+sleep, no RTC memory adapter, no button, no BLE stack and no pump driver: the platform side
+is injected ports, and the M1.9c adapters (and later the BLE milestone) supply them.
+
+### Wake cycle (one owner, run to completion)
+
+`dsp_app_run_wake()` is called once per wake (every deep-sleep wake is a reset on the
+ESP32-C3). One task, static memory, no allocation; every domain service is called only from
+it.
+
+| Stage | What happens | On failure |
+|---|---|---|
+| SAFE_OFF | the pump port is passed to `dsp_dosing_port_safe_off()`: `force_off` plus the `is_off` confirmation | unconfirmed: nothing else runs; straight to SHUTDOWN, which fails safe |
+| LOAD | storage open (provisions on first boot), schedules, configuration, time metadata, timekeeper (with the retained retry state), coordinator, notification engine, Dosing Service | **DEGRADED** (Q12): no recovery, dosing, Wi-Fi or notification transmission; read-only service session on a button wake; plan = cap; the retained block is preserved |
+| RECOVER | `dsp_dosing_recover()` (refill roll-forward, interrupted automatic and manual doses, keyed reports) | continues; dosing gates stay closed where state is not durable |
+| CLOCK | `dsp_timekeeper_evaluate()` (continuity, plausibility, rollback hold) | untrusted clock: no doses |
+| OBSERVE | time conditions, reminders and deferred events, reservoir with the BLOCKED latch | — |
+| DOSE | `dsp_dosing_process_due()` while `dsp_dosing_next_due()` says something is due now (bounded passes, stops without progress) | a pump fault or storage failure ends dosing for the wake |
+| CONNECT | `dsp_connectivity_run()` with the guard {no dose running, no permit, BLE inactive, next dose incl. a same-time dose waiting for the interval}; DOSE runs again after a session that synchronized | Wi-Fi failure: backoff; never touches history or accounting |
+| BLE | button wake only: service session (below); CONNECT once more if commands were processed | — |
+| SYNC | retries a dirty `notify` record (`dsp_notify_flush`) and dirty time metadata | stays dirty; retried next wake |
+| PLAN | `dsp_power_plan()`; a dose that became due meanwhile runs now (at most 2 rounds) instead of a zero-length sleep | minimum sleep 1 s |
+| SHUTDOWN | checklist (pump OFF confirmed, HTTPS ended, Wi-Fi `DISABLED`, BLE confirmed stopped), retried 3 times; RTC block saved | **fail-safe** instead of sleep |
+| SLEEP / FAIL_SAFE | `sleep(sleep_s)`, or `fail_safe(failures)` | — |
+
+**Dosing priority.** Due doses run before CONNECT; CONNECT is skipped when the next dose is
+within the session's worst case plus margin; a BLE session is suspended before every pump run
+(scheduled or manual) and resumed if its window remains. The application never holds or calls
+the pump: doses only through `dsp_dosing_*`, so every pump start still needs the durable
+claim or marker and a redeemed single-use permit. Wi-Fi, BLE and the pump are never active at
+the same time (stages are sequential; the host fakes assert it on every start).
+
+### Sleep plan (Power Service)
+
+- **Inputs:** next dose (`dsp_dosing_next_due`: an unclaimed occurrence still inside its
+  window that only the minimum interval holds back, else the next future occurrence), next
+  time sync (`dsp_timekeeper_next_sync`, incl. its backoff), and the re-evaluation cap
+  (configurable, **default 6 h**, clamped to 60 s–24 h). Earliest wins (ties: dose, sync).
+- **No notification input:** a wake is never planned for a notification (D1-B). A CRITICAL
+  event created in a wake may start a session in that same wake (orchestrator: hourly limit,
+  Wi-Fi backoff, trusted time).
+- **No dose wakes** while dosing is impossible until a user action (Q13): not loaded,
+  `SERVICE_REQUIRED`, BLOCKED, refill pending, manual marker, calibration/limits or
+  reservoir not configured. A wake-local storage failure or pump fault does not suppress
+  them (the next wake reloads everything). Readiness and refill commands change the gates;
+  the plan is computed at the end of every wake and the service session re-checks due work
+  before every wait.
+- **Overdue sync** (could not run in this wake, e.g. a dose was too close): re-planned 5 min
+  ahead instead of a busy wake loop. DEGRADED: cap only.
+
+### RTC-retained block
+
+48 bytes, little-endian: magic `DSPR`, version 1, length, reserved zeros, the M1.4 sync retry
+state (failures, next attempt), the M1.7 hourly CRITICAL attempt limit, wake count,
+consecutive fail-safe count, last planned reason and instant, CRC-32 (IEEE). It is used only
+after a timer, button, software, watchdog or panic reset and only if magic, version, length,
+reserved bytes, CRC and every field range validate; after a power-on or brownout reset, or
+on any mismatch, the defaults apply (one sync attempt allowed, no backoff). The clock
+continuity marker stays in the M1.4 clock adapter.
+
+### Fail-safe (kept as designed; hardware integration risk)
+
+If any checklist item cannot be confirmed after 3 attempts, `sleep()` is **not** called;
+`fail_safe(failures)` is, after the retained block (with the incremented fail-safe count) was
+saved. On hardware the port must not return: drive every actuator off by the strongest means
+available and reset the SoC; the pump gate then falls OFF through its hardware pull-down (P1,
+**hardware-unverified**). After `DSP_POWER_FAILSAFE_LIMIT` (3) consecutive fail-safes, dosing
+is inhibited until a shutdown is confirmed again. **Hardware integration risk:** a pump whose
+OFF state can never be confirmed (e.g. a broken readback) produces a reset loop with the pump
+held OFF by hardware: safe, but it drains the battery. No hardware-specific recovery is
+invented before the pump gate and reset behavior are verified
+([`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md) 7.1–7.3). Saving the RTC block is
+not a checklist item (losing it costs at most one extra sync attempt).
+
+### Service mode (BLE port, no NimBLE/GATT)
+
+On a button wake: `start` → command loop → `stop`. **Session lifetime** (approved), measured
+on the injected **monotonic** clock, never wall time:
+
+| State | Rule |
+|---|---|
+| advertising, no client | ends 180 s (configurable) after the start or after the last disconnect |
+| client connected | stays open |
+| any | ends at the maximum total duration, **15 min** (configurable) |
+| scheduled dose due | BLE suspended (connection closed) before the pump; resumed only while the deadline permits; a connection closed by the suspension restarts the idle timeout |
+
+The BLE port reports the connection state (`connected()`), so this is host-tested without
+NimBLE. **Queue synchronization contract:** `dsp_app_post()` is the only function another
+task may call; it touches only the bounded queue (8 entries; full or no session → the
+platform answers busy), never domain state. Both sides of the queue run under the optional
+`dsp_app_sync_t` lock (the FreeRTOS lock belongs to M1.9c/BLE); posting is accepted only while
+a session is active. Host tests run the producer synchronously inside the BLE fake's
+`wait()` in the application task, so the host implementation has no concurrent access (the
+fake lock also checks balance and no nesting). The application task processes the commands: `STATUS`,
+`MANUAL_DOSE`, `REFILL`, `SET_READINESS`, `END_SESSION`. Every response carries a status
+snapshot (readiness, latch flags, estimate, gates, next due). A manual dose suspends BLE,
+runs a due scheduled dose first, then the manual dose (same gates and limits; refused while
+BLOCKED), then resumes. Unprocessed commands are dropped when the session ends. In DEGRADED
+only `STATUS` is answered (`storage_available = false`).
+
+### Verification and limitations
+
+| Behavior | Status |
+|---|---|
+| Stage order, DEGRADED, dosing priority, BLE suspension, connectivity guard, plan rules, retained block, checklist and fail-safe | **host-verified** (`test_app`) |
+| Power loss at every write, pump run, Wi-Fi connection, HTTP post, BLE wait and sleep entry (2 scenarios × 4 reboot variants) | **host-verified** |
+| 365-day simulations (clean: every expected occurrence exactly once across both DST transitions; chaotic: cuts, resets, Wi-Fi faults, clock steps, pump faults, button sessions) | **host-verified** |
+| Deep sleep, timer and button wake, RTC memory across resets, wake latency, fail-safe reset and the gate level after it, BLE stop/resume latency | **hardware-unverified** (no adapters yet) |
+
+Limitations: a response to a
+command that suspended BLE is delivered after resume, so the phone may have to read it with
+`STATUS` after reconnecting; a refused same-time dose whose interval outlasts its window is
+missed (by design, no catch-up); the real lock and BLE task are M1.9c/BLE work (single-task
+host tests cannot show races); the fail-safe reset loop above is a hardware integration risk.
 
 ## HTTPS notification transport and connectivity session (M1.7)
 
@@ -1514,6 +1641,7 @@ Current host tests (CTest names):
 | `test_proto` | protocol v1 (M1.7): golden request bodies (incl. the PROTOCOL.md example, every code name, extreme values, 48-bit device ID), refusal of invalid notes and too-small buffers, every response rule (strict 200/201 acknowledgement with the exact production bodies, R1 rules for 400/401/404/405/409/413/415/3xx/429/5xx, connect/TLS/send/no-response phases), and 20,000 fuzzed bodies (no crash, no ACK/REJECTED without the confirming body) |
 | `test_proto_vectors` | the shared protocol v1 vectors (M1.8, also run by the backend's Vitest): exact request bodies and canonical payloads, notes the encoder must refuse, the firmware classification of every backend response (byte-exact bodies) and of synthetic responses |
 | `test_dosing` | Dosing Service (M1.9a) over the real coordinator, storage and engine with a fake pump that verifies complete durable state at every activation: default SERVICE_REQUIRED and the checked READY transition, every missing/invalid calibration or limit (no actuation, never BLOCKED), overflow-safe runtime, write order and durable claimed volume, same-time schedules and the due window, per-dose/runtime/daily/interval limits, midnight, both DST days, rollback and untrusted time, restart in cooldown, BLOCKED latch (automatic and manual refused until refill), refill with a power cut at every write (dosing disabled until complete), pump faults, storage failures at every write (DEGRADED), a dose report whose `notify` write fails (durable source kept, dosing disabled for the wake, exactly one report whether flushed in the wake or recovered at boot, never repeated) and reports with no durable source (not invented), a refused same-time dose that becomes MISSED without catch-up, **exhaustive power-loss matrices for automatic and manual doses with a second cut inside recovery** (never a pump run in recovery, interruption reported exactly once with the durable volume, estimate unchanged), format-1 history recovery, and a 3000-step randomized run with cuts, restarts, refills and clock steps |
+| `test_app` | Application and Power Services (M1.9b): complete wake cycles over the real domain services with fakes for the pump, KV (power cuts that abort the wake via longjmp), clock and RTC continuity, NTP, Wi-Fi, HTTP, BLE service mode and the sleep port with RTC memory. Oracles on every pump start (durable claim/marker, last start and consumption; no radio active; inside the due window; no duplicate) and every sleep (pump OFF, radios off, no HTTPS session). Retained-block codec (every bit flip rejected) and plan rules; first boot and exact stage order; scheduled, same-time (interval retry inside the window, else missed) and missed doses; manual dose and bounded queue in service mode; BLE session lifetime (180 s idle, kept while connected, idle restart after disconnect, 15 min and configurable maximum, wall-clock steps ignored, no resume past the deadline, queue lock balance and no posting outside a session); SERVICE_REQUIRED, READY, BLOCKED and refill (dose wakes suppressed and restored); Wi-Fi unavailable (backoff, dosing unaffected); CRITICAL on an existing wake and the hourly limit; BLE suspended for a due dose and resumed; DEGRADED and storage failures; clock rollback (2 h, > 7 days) and DST; SAFE_OFF/shutdown/BLE confirmation failures and the fail-safe inhibit; **power loss at every stage (2 scenarios × 4 reboot variants)**; **two 365-day simulations** (clean: every expected occurrence exactly once; chaotic: cuts, resets, Wi-Fi faults, clock steps, pump faults, button sessions) |
 | `test_https` | HTTPS transport and connectivity session (M1.7) over fakes: exact body and token handed to the port, token wiped after every request, token validation (length, spaces, control characters); **systemic 401/404/405/413/415, ambiguous 400, mismatched 409, redirects, 429 and 5xx never drain the queue** (20 sessions each, then recovery); event-specific 409/400 removed and logged; mismatched acknowledgement UNCERTAIN, then duplicate ACK with an identical payload; timeout after the backend accepted plus power loss; connect/TLS failures; the 60 s budget with a monotonic clock; session gating: dosing/permit/BLE guard, next-dose distance, regular sync vs CRITICAL on an existing wake, the 1-hour limit, the Wi-Fi backoff, untrusted time (nothing sent) vs trusted HOLDOVER, missing token, Wi-Fi always shut down |
 
 Python tool test (no ESP-IDF needed; the real-generator case runs inside an ESP-IDF shell):
@@ -1578,10 +1706,11 @@ alternative to the native setup, not a requirement.
 | Developer credential provisioning tool | tested with dummy values (stub and real `nvs_partition_gen`) | n/a | image never flashed |
 | Integration: domain + real TLS + committed Worker + local D1 + fake Gmail (M1.8) | locally integrated (`test/integration`, 1,000 randomized sessions) | n/a | not run |
 | Dosing Service, storage layout v4, formats (M1.9a) | implemented, tested with fake pump and fake KV (power cuts, failures, randomized) | compiled, not called | not run; **no real pump driver** |
+| Application and Power Services (M1.9b) | implemented, tested with fakes (pump, KV with power cuts, clock, NTP, Wi-Fi, HTTP, BLE, sleep port, RTC memory); 365-day simulations | compiled, not called | not run; **no deep sleep, RTC, button or BLE adapters** |
 | Battery monitor | not started | — | — |
 | Dosing service, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
-| Deep sleep and wake-up | not started | — | — |
+| Deep sleep and wake-up | domain plan and checklist (M1.9b); adapters not started | — | — |
 | BLE, production credential provisioning, OTA client, deep sleep | not started | — | — |
 
 ## Hardware verification still pending
@@ -1595,6 +1724,10 @@ alternative to the native setup, not a requirement.
 - Button on a deep-sleep wake-capable GPIO (GPIO0–GPIO5) and indicator LED (the board has
   no user LED).
 - Deep-sleep current and RTC drift; battery measurement hardware.
+- M1.9b (pending adapters): deep-sleep entry only after the checklist, timer and button wake,
+  the RTC-retained block across each reset type, the fail-safe reset and the pump gate level
+  after it, BLE suspend/resume latency around a dose, wake latency versus the 10-minute due
+  window.
 - NVS adapter on real flash: provisioning, power loss during writes, partition sizing and
   the final partition layout (see "Capacity, flash layout and wear").
 - Time: RTC continuity per reset type, deep-sleep drift, Wi-Fi/SNTP on a real network,
@@ -1605,8 +1738,8 @@ alternative to the native setup, not a requirement.
 
 ## Next milestone
 
-After the M1.9a review: M1.9b (Application and Power Services: wake cycle, shutdown
-checklist, sleep port, long-run simulation) and M1.9c (platform adapters, simulated pump)
-are designed; not started. The on-device acceptance
+M1.9c (platform adapters: deep sleep and wake, RTC memory, pump
+driver with a simulation backend only, `app_main` wiring behind a Kconfig option, default
+off) is designed; not started. The on-device acceptance
 ([`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md)) waits for the board and an approved
 staging backend.

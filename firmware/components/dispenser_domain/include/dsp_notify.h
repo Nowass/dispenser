@@ -193,6 +193,10 @@ dsp_notify_status_t dsp_notify_set_estimate_uncertain(dsp_notify_t *n, bool unce
 dsp_notify_status_t dsp_notify_on_refill(dsp_notify_t *n, const dsp_config_t *cfg,
                                          dsp_notify_clock_t clock);
 
+/* M1.9b: retries the persistence of RAM state left dirty by a failed write (no-op when
+ * clean). ERR_STORAGE while it still fails. */
+dsp_notify_status_t dsp_notify_flush(dsp_notify_t *n);
+
 /* True while the persistent state is not durable (a write failed or the record could not be
  * loaded). Future BLE diagnostics must expose this. */
 bool dsp_notify_storage_degraded(const dsp_notify_t *n);
