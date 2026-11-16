@@ -1,3 +1,11 @@
 # Copy to .dev.vars (ignored by git) for `npm run dev`. Use a throwaway local value,
 # never the production DEVICE_API_TOKEN. At least 32 characters (shorter fails closed).
 DEVICE_API_TOKEN=local-development-token-not-a-secret-0001
+
+# M1.6b e-mail delivery (optional locally; without them delivery stays disabled).
+# Never put real Google credentials here unless you deliberately test against Gmail.
+# GMAIL_CLIENT_ID=
+# GMAIL_CLIENT_SECRET=
+# GMAIL_REFRESH_TOKEN=
+# NOTIFY_SENDER_ADDRESS=
+# NOTIFY_RECIPIENT_ADDRESS=

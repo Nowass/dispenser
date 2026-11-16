@@ -2,7 +2,7 @@
   "name": "dispenser-notify",
   "version": "0.1.0",
   "private": true,
-  "description": "Dispenser V2 notification ingestion backend (Cloudflare Worker + D1)",
+  "description": "Dispenser V2 notification backend (Cloudflare Worker + D1 + Gmail delivery)",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -15,8 +15,11 @@
     "format:check": "prettier --check .",
     "lint": "tsc --noEmit && prettier --check .",
     "test": "vitest run",
-    "test:integration": "node test/integration/restart.mjs",
-    "check": "npm run lint && npm test && npm run test:integration"
+    "test:integration": "node test/integration/restart.mjs && node test/integration/delivery.mjs && node test/integration/oauth-helper.mjs",
+    "check": "npm run lint && npm test && npm run test:integration",
+    "gmail:authorize": "node scripts/gmail-authorize.mjs",
+    "diagnostics:remote": "wrangler d1 execute dispenser-notifications --remote --json --command=\"$(cat scripts/diagnostics.sql)\"",
+    "diagnostics:local": "wrangler d1 execute dispenser-notifications --local --json --command=\"$(cat scripts/diagnostics.sql)\""
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.8.2",

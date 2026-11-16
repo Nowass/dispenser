@@ -8,7 +8,7 @@ Repository layout:
 
 - `android/`: existing Android Studio Kotlin + Jetpack Compose project (`cz.nowass.dispenser`), minSdk 26.
 - `firmware/`: ESP-IDF v6.1 project for Seeed XIAO ESP32-C3 (target `esp32c3`). Milestone M0.2 skeleton with Linux host tests; never run on hardware. See `firmware/README.md`.
-- `cloudflare/dispenser-notify/`: Cloudflare Worker + D1 notification backend (M1.6a, TypeScript). Protocol in its `PROTOCOL.md`. Needs Node.js ≥ 22.12.
+- `cloudflare/dispenser-notify/`: Cloudflare Worker + D1 notification backend (M1.6a ingestion, M1.6b Gmail delivery; TypeScript). Protocol in its `PROTOCOL.md`, Google setup in `GMAIL_SETUP.md`. Needs Node.js ≥ 22.12.
 - `docs/`: source-of-truth product and architecture documents.
 
 Read these documents before making product decisions:
@@ -77,7 +77,7 @@ If any document is missing, **stop and ask** for it; do not guess missing busine
   - **Delivery:** at-least-once, stable IDs `dsp-<device>-<epoch>-<seq>`, removed only on ACK, durable before sent. **No extra Wi-Fi wake-ups**: delivery waits for the regular session.
   - **Reservoir:** estimate from consumption (no sensor); every authorized dose (automatic or manual) subtracts the full requested volume before the pump. This is enforced by a single-use dose permit that the future actuator must require. Start/pump failures and interruptions set the persistent uncertainty flag in the same write; refill clears it.
   - **Review (2026-11-15):** a payload follows the latest value until the first transmission attempt, then is frozen; the freeze is persisted before the first send (survives power loss). A notify persistence failure returns `ERR_STORAGE` / `dsp_notify_storage_degraded()`, to be exposed via BLE diagnostics later. The device ID is the factory MAC, never a secret.
-- **M1.6a — Cloudflare notification backend**, implemented and verified locally, awaiting review; **not deployed**:
+- **M1.6a — Cloudflare notification backend (`543af75`, `6d61393`, `2f7aa48`)**, approved and **deployed** (version `61c7dba5`; `DEVICE_API_TOKEN` rotated to a Cloudflare Secret; migration 0001 recorded; observability on, preview URLs off):
   - **Where:** `cloudflare/dispenser-notify` (Worker `dispenser-notify`, D1 `dispenser-notifications`, binding `DB`, secret `DEVICE_API_TOKEN`).
   - **Protocol v1:** `POST /api/v1/events`, Bearer token, one JSON event, strict validation that mirrors the firmware validator.
   - **Responses:** 201 accepted / 200 duplicate (identical canonical payload) / 409 conflict / 400, 401, 413, 415 / 503 retry.
@@ -86,5 +86,11 @@ If any document is missing, **stop and ask** for it; do not guess missing busine
   - **Safety rules:** never deploy, run remote D1 commands that write, or touch production secrets without explicit approval.
   - **Approved for the firmware HTTPS milestone:** `DSP_TX_REJECTED` for 400/404/405/409/413/415. Record a persistent diagnostic (exposed via BLE), never block the queue, never discard silently. 401 and 5xx stay pending; timeouts stay UNCERTAIN with the same ID.
   - **Open:** per-device credentials, rate limiting.
-- **Next (after M1.6a approval):** scope to be agreed. Do not start it without approval; stop for review at each milestone boundary.
+- **M1.6b — Gmail notification delivery**, implemented and tested locally with a fake Gmail API, awaiting review; **not deployed**, no Google credentials yet:
+  - **Mechanism:** a Cron Trigger in the same Worker; a dedicated sender account sends to a configurable recipient (both addresses are secrets). OAuth with the `gmail.send` scope only; refresh token in Cloudflare Secrets; one-time interactive helper `scripts/gmail-authorize.mjs`.
+  - **Leases and retries:** atomic D1 leases (5 min). **Approved retry policy:** temporary errors (429, 5xx, timeouts, network) retry without an attempt limit, with backoff 1 min to 6 h. Only clearly non-recoverable payload rejections end in FAILED (413, a 400 whose message names the raw payload or its size, unreadable payload); configuration 400s never count, ambiguous 400s stay PENDING with a warning, and message-level outcomes never block other events. Credential/account errors never count; events wait, and Google is retried every 30 min. At-least-once with a stable Message-ID (duplicates possible).
+  - **Diagnostics:** a `delivery_health` structured log line per run (`level: warn` when attention is needed, including any FAILED event and any unclear-400 PENDING event), plus `npm run diagnostics:remote` (read-only SQL). No public endpoint.
+  - **Schema:** additive migration 0002 (not applied in production).
+  - **Safety rules:** never run OAuth authorization, create Google resources, deploy or touch production D1 without explicit approval.
+- **Next (after M1.6b approval):** scope to be agreed. Do not start it without approval; stop for review at each milestone boundary.
 - **Shared test vectors:** when a scheduling rule changes, update `test-vectors/` first and make both the Kotlin and the C tests pass; never regenerate expected values from either implementation.

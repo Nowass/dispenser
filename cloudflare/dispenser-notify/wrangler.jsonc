@@ -16,6 +16,10 @@
       "enabled": true,
     },
   },
+  // M1.6b: e-mail delivery of PENDING notifications every 5 minutes (no HTTP endpoint).
+  "triggers": {
+    "crons": ["*/5 * * * *"],
+  },
   "d1_databases": [
     {
       "binding": "DB",

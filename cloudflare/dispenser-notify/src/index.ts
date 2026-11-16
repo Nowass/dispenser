@@ -1,9 +1,13 @@
 /**
- * Dispenser V2 notification backend (M1.6a): accepts firmware notification events and
- * stores them durably in D1 as PENDING. It does not send e-mail yet. A success response
- * means "durably accepted, delivery is now the backend's responsibility", never "delivered".
+ * Dispenser V2 notification backend.
+ * - fetch (M1.6a): accepts firmware notification events and stores them durably in D1 as
+ *   PENDING. A success response means "durably accepted, delivery is now the backend's
+ *   responsibility", never "delivered".
+ * - scheduled (M1.6b): the Cron Trigger sends PENDING events by e-mail (Gmail API). There
+ *   is no HTTP endpoint for delivery or administration.
  */
 import { authenticate } from "./auth";
+import { runDelivery } from "./delivery/run";
 import { MAX_BODY_BYTES, canonicalPayload, payloadHash, validateRequest } from "./protocol";
 import { StorageError, storeEvent } from "./store";
 
@@ -20,7 +24,12 @@ function json(status: number, body: Record<string, unknown>, headers?: HeadersIn
 
 /** Structured log line without credentials or payload values. */
 function log(fields: Record<string, string | number>): void {
-  console.log(JSON.stringify({ svc: "dispenser-notify", ...fields }));
+  const line = JSON.stringify({ svc: "dispenser-notify", ...fields });
+  if (fields.level === "warn") {
+    console.warn(line); // shown as a warning in Workers Logs (filterable, alertable)
+  } else {
+    console.log(line);
+  }
 }
 
 const retryLater = (): Response => json(503, { status: "retry" }, { "Retry-After": RETRY_AFTER_S });
@@ -136,5 +145,16 @@ export default {
       log({ evt: "internal_error" });
       return retryLater(); // never a false success; the device retries later
     }
+  },
+
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    const report = await runDelivery(env, {
+      fetch: (input, init) => fetch(input, init),
+      now: () => Math.floor(Date.now() / 1000),
+      leaseOwner: crypto.randomUUID(),
+      log,
+    });
+    const { detail, health: _health, ...counts } = report;
+    log({ evt: "delivery_run", ...counts, ...(detail === undefined ? {} : { detail }) });
   },
 } satisfies ExportedHandler<Env>;
