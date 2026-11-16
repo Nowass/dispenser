@@ -47,7 +47,12 @@ enum {
 #define DSP_HISTORY_RECORD_V1_BYTES 92
 #define DSP_HISTORY_RECORD_BYTES 96
 #define DSP_HISTORY_FORMAT_V2 2
-#define DSP_SCHEDULE_ENTRY_BYTES 91
+/* Schedule set: format 2 (M1.10b.1, 132 B entries) = format 1 (91 B) + name (1 + 32 B) +
+ * edit floor (i64). Format 1 is still read (empty names, no floor) and upgraded by the next
+ * write; format 2 is the only one written. */
+#define DSP_SCHEDULE_ENTRY_V1_BYTES 91
+#define DSP_SCHEDULE_ENTRY_BYTES 132
+#define DSP_SCHEDULE_SET_FORMAT_V2 2
 #define DSP_TOMBSTONE_ENTRY_BYTES 65
 #define DSP_SCHEDULE_SET_HEADER_BYTES 8
 #define DSP_SCHEDULE_SET_MAX_BYTES                                                           \
@@ -112,7 +117,8 @@ dsp_codec_status_t dsp_codec_decode_history(const uint8_t *buf, size_t len,
                                             dsp_history_record_t *out);
 
 /* Every schedule must pass dsp_schedule_validate(tz); IDs (active and tombstones) must be
- * unique across the whole set. */
+ * unique across the whole set. Format 2 entry (132 B): format 1 entry (91 B) | 91 name
+ * length | 92..123 name (zero padded) | 124..131 not_before (i64). */
 size_t dsp_codec_encode_schedule_set(const dsp_schedule_set_t *set, const dsp_tz_t *tz,
                                      uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_schedule_set(const uint8_t *buf, size_t len,

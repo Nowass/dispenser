@@ -1,5 +1,7 @@
 #include "dsp_recurrence.h"
 
+#include "dsp_text.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -51,6 +53,16 @@ bool dsp_schedule_id_is_valid(const char *id)
     return id_valid(id);
 }
 
+/* NUL within the buffer, then the protocol's `text` rule over the bytes before it. */
+static bool name_valid(const char *name)
+{
+    size_t n = 0;
+    while (n <= DSP_SCHEDULE_NAME_MAX_BYTES && name[n] != '\0') {
+        n++;
+    }
+    return n <= DSP_SCHEDULE_NAME_MAX_BYTES && dsp_utf8_valid((const uint8_t *)name, n, true);
+}
+
 dsp_sched_errors_t dsp_schedule_validate(const dsp_schedule_t *s, const dsp_tz_t *tz)
 {
     if (s == NULL) {
@@ -73,6 +85,12 @@ dsp_sched_errors_t dsp_schedule_validate(const dsp_schedule_t *s, const dsp_tz_t
     bool start_ok = dsp_date_is_valid(s->start_date);
     if (!start_ok) {
         e |= DSP_SCHED_E_START_DATE;
+    }
+    if (!name_valid(s->name)) {
+        e |= DSP_SCHED_E_NAME;
+    }
+    if (s->not_before != 0 && (s->not_before < DSP_UTC_MIN || s->not_before > DSP_UTC_MAX)) {
+        e |= DSP_SCHED_E_NOT_BEFORE;
     }
     bool time_ok = s->hour <= 23 && s->minute <= 59;
     if (!time_ok) {

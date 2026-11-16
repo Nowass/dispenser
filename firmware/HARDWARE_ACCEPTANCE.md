@@ -108,3 +108,23 @@ these figures are **not** target measurements.
 | 8.2 | Stack high-water mark of the task running the handshake | `uxTaskGetStackHighWaterMark` | |
 | 8.3 | Handshake duration (X25519 in software) for XXpsk3 and IK, and per-frame encrypt/decrypt time | timestamps (`esp_timer_get_time`) | |
 | 8.4 | Hardware RNG quality with the radio on during a BLE session (ephemeral keys) | ESP-IDF RNG notes; entropy check | |
+
+## 9. Configuration limits and storage (M1.10b.1)
+
+The firmware accepts every representable value of the calibration and safety fields (only
+logical rules are enforced: `max_daily_ul ≥ max_dose_ul`, `max_runtime_ms ≤` the hardware
+cutoff, calibration time 0 or ≥ 2025-01-01); all arithmetic is overflow-safe and host-tested at
+the 32-bit extremes. **Physical bounds are not invented and remain open until measured:**
+
+| # | Item | How | Result |
+|---|---|---|---|
+| 9.1 | Plausible range of the calibrated flow `pump_flow_ul_per_s` for the chosen pump at nominal battery voltage (FR-011/012), and whether to refuse values outside it | calibration runs into a measuring vessel | |
+| 9.2 | Hardware cutoff of the real pump driver (`hw_max_runtime_ms`, simulation default 0, Kconfig 0–60,000 ms) and a sensible `max_runtime_ms` | driver design + bench run | |
+| 9.3 | Sensible ranges for `max_dose_ul`, `max_daily_ul`, `min_interval_s` (FR-016) | pump tests, product decision | |
+| 9.4 | NVS on real flash: provisioning, maximum-size `sched` (3,160 B) rewrites, power loss during writes | bench power cuts with a relay | |
+
+**BLOCKER (open): ESP-IDF v6.1 NVS power-loss defect.** A power cut after the new version's last
+data chunk and before its blob index makes NVS recovery erase the old version too, so the record
+is lost (reproduced in `firmware/test/nvs_linux`, 14 of 14 scenarios). The storage then fails
+closed (CORRUPT, no automatic dosing). Hardware acceptance and any release are blocked until a
+fix is approved, implemented and verified (emulator and bench power cuts).

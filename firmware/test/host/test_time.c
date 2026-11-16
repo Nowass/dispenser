@@ -1265,6 +1265,126 @@ static void test_initial_sync_raises_floor(void)
     DSP_CHECK_EQ_INT(0, duplicate_ids + duplicate_days);
 }
 
+/* ---- M1.10b.1: phone time ------------------------------------------------------------ */
+
+static dsp_timekeeper_t tk_with(dsp_utc_t last_sync, dsp_utc_t high, dsp_utc_t hold,
+                                bool continuous, dsp_utc_t now)
+{
+    dsp_time_meta_t m;
+    memset(&m, 0, sizeof m);
+    m.last_sync_utc = last_sync;
+    m.high_water_utc = high;
+    m.hold_until_utc = hold;
+    dsp_time_retained_t r = {3, now + 900};
+    dsp_timekeeper_t ptk;
+    DSP_CHECK(dsp_timekeeper_init(&ptk, &m, 24, &r));
+    dsp_time_reading_t rd = {now, continuous};
+    dsp_timekeeper_evaluate(&ptk, rd);
+    return ptk;
+}
+
+static void test_phone_time_decisions(void)
+{
+    dsp_sync_decision_t d;
+    /* UNKNOWN (never synced): accepted, initial floor, retry schedule untouched. */
+    dsp_timekeeper_t ptk = tk_with(0, 0, 0, false, 5);
+    dsp_time_retained_t keep = ptk.retained;
+    DSP_CHECK_EQ_INT(DSP_PHONE_TIME_ACCEPTED,
+                     dsp_timekeeper_on_phone_time(&ptk, (int64_t)T0 * 1000 + 999, 0, 5, &d));
+    DSP_CHECK(d.apply);
+    DSP_CHECK_EQ_INT(T0, d.set_to);
+    DSP_CHECK_EQ_INT(DSP_CORRECTION_INITIAL, d.kind);
+    DSP_CHECK_EQ_INT(T0 + 1, ptk.meta.not_before_utc);
+    DSP_CHECK_EQ_INT(DSP_TRUST_SYNCED, ptk.trust);
+    DSP_CHECK_EQ_INT(keep.next_attempt, ptk.retained.next_attempt);
+    DSP_CHECK_EQ_INT(keep.consecutive_failures, ptk.retained.consecutive_failures);
+    /* SYNCED: ignored, state unchanged. */
+    dsp_timekeeper_t before = ptk;
+    DSP_CHECK_EQ_INT(DSP_PHONE_TIME_IGNORED_NTP_PREFERRED,
+                     dsp_timekeeper_on_phone_time(&ptk, (int64_t)(T0 + 60) * 1000, 0, T0 + 10, &d));
+    DSP_CHECK(!d.apply);
+    DSP_CHECK(memcmp(&before, &ptk, sizeof ptk) == 0);
+    /* HOLDOVER: accepted (small correction). */
+    ptk = tk_with(T0, T0, 0, true, T0 + 30 * H);
+    DSP_CHECK_EQ_INT(DSP_TRUST_HOLDOVER, ptk.trust);
+    int64_t ms = (int64_t)(T0 + 30 * H + 5) * 1000;
+    DSP_CHECK_EQ_INT(DSP_PHONE_TIME_ACCEPTED,
+                     dsp_timekeeper_on_phone_time(&ptk, ms, 0, T0 + 30 * H, &d));
+    DSP_CHECK_EQ_INT(DSP_CORRECTION_SMALL, d.kind);
+    DSP_CHECK_EQ_INT(5, d.offset_s);
+    /* Recorded hold: HOLD whatever the time and trust; nothing changes. */
+    dsp_utc_t sample_times[] = {T0 - 9 * DAY, T0, T0 + 9 * DAY};
+    for (size_t i = 0; i < 3; i++) {
+        ptk = tk_with(T0, T0 + 10 * DAY, T0 + 3 * DAY, i != 1, T0 + 26 * H);
+        before = ptk;
+        ms = (int64_t)sample_times[i] * 1000;
+        DSP_CHECK_EQ_INT(DSP_PHONE_TIME_HOLD,
+                         dsp_timekeeper_on_phone_time(&ptk, ms, 0, T0 + 26 * H, &d));
+        DSP_CHECK(!d.apply);
+        DSP_CHECK(memcmp(&before, &ptk, sizeof ptk) == 0);
+    }
+    /* Uncertainty and range. */
+    ptk = tk_with(0, 0, 0, false, 5);
+    DSP_CHECK_EQ_INT(DSP_PHONE_TIME_REJECTED_UNCERTAIN,
+                     dsp_timekeeper_on_phone_time(&ptk, (int64_t)T0 * 1000, 2001, 5, &d));
+    ms = (int64_t)DSP_TIME_PLAUSIBLE_MIN * 1000 - 1;
+    DSP_CHECK_EQ_INT(DSP_PHONE_TIME_REJECTED_IMPLAUSIBLE,
+                     dsp_timekeeper_on_phone_time(&ptk, ms, 0, 5, &d));
+    DSP_CHECK_EQ_INT(DSP_PHONE_TIME_REJECTED_IMPLAUSIBLE,
+                     dsp_timekeeper_on_phone_time(&ptk, INT64_MIN, 0, 5, &d));
+    DSP_CHECK_EQ_INT(DSP_PHONE_TIME_REJECTED_IMPLAUSIBLE,
+                     dsp_timekeeper_on_phone_time(NULL, (int64_t)T0 * 1000, 0, 5, &d));
+    DSP_CHECK_EQ_INT(DSP_TRUST_UNKNOWN, ptk.trust);
+    /* Interval setter. */
+    ptk = tk_with(T0, T0, 0, true, T0 + H);
+    ptk.retained.next_attempt = T0 + 48 * H;
+    DSP_CHECK(dsp_timekeeper_set_interval(&ptk, 24));
+    DSP_CHECK_EQ_INT(T0 + 24 * H, ptk.retained.next_attempt);
+    DSP_CHECK(!dsp_timekeeper_set_interval(&ptk, 23));
+    DSP_CHECK(!dsp_timekeeper_set_interval(&ptk, 49));
+}
+
+/* Property: where phone time is applied at all (no recorded hold, not SYNCED), it refuses
+ * with HOLD exactly when an NTP sample with the same value would start a rollback hold,
+ * and otherwise produces exactly the NTP decision and metadata. */
+static void test_phone_time_matches_ntp_rules(void)
+{
+    rng = 777u;
+    int compared = 0;
+    int holds = 0;
+    for (int i = 0; i < 20000; i++) {
+        dsp_utc_t last = rnd(4) == 0 ? 0 : T0 + (dsp_utc_t)rnd(40 * DAY);
+        dsp_utc_t high = last == 0 ? 0 : last + (dsp_utc_t)rnd(20 * DAY);
+        dsp_utc_t now = rnd(5) == 0 ? (dsp_utc_t)rnd(1000) : high + (dsp_utc_t)rnd(3 * DAY) - DAY;
+        bool cont = rnd(3) != 0;
+        dsp_timekeeper_t a = tk_with(last, high, 0, cont, now);
+        if (a.trust == DSP_TRUST_SYNCED) {
+            continue;
+        }
+        dsp_timekeeper_t b = a;
+        dsp_utc_t src = T0 + (dsp_utc_t)rnd(80 * DAY) - 10 * DAY;
+        dsp_sync_decision_t dp, dn;
+        dsp_phone_time_decision_t dec =
+            dsp_timekeeper_on_phone_time(&a, (int64_t)src * 1000, 0, now, &dp);
+        dsp_time_sample_t smp = {src, now};
+        dn = dsp_timekeeper_on_sync(&b, DSP_SYNC_OK, &smp, now);
+        compared++;
+        if (dn.kind == DSP_CORRECTION_ROLLBACK_HOLD) {
+            holds++;
+            DSP_CHECK_EQ_INT(DSP_PHONE_TIME_HOLD, dec);
+            DSP_CHECK(!dp.apply);
+            continue;
+        }
+        DSP_CHECK_EQ_INT(DSP_PHONE_TIME_ACCEPTED, dec);
+        DSP_CHECK_EQ_INT(dn.kind, dp.kind);
+        DSP_CHECK_EQ_INT(dn.set_to, dp.set_to);
+        DSP_CHECK_EQ_INT(dn.offset_s, dp.offset_s);
+        DSP_CHECK(dsp_time_meta_equal(&a.meta, &b.meta));
+    }
+    DSP_CHECK(compared > 5000);
+    DSP_CHECK(holds > 100);
+}
+
 int main(void)
 {
     DSP_RUN(test_first_boot_without_valid_time);
@@ -1287,5 +1407,7 @@ int main(void)
     DSP_RUN(test_initial_sync_raises_floor);
     DSP_RUN(test_randomized_clock_chaos_realistic);
     DSP_RUN(test_randomized_clock_chaos_rtc_glitches);
+    DSP_RUN(test_phone_time_decisions); /* after the chaos runs: they share the RNG */
+    DSP_RUN(test_phone_time_matches_ntp_rules);
     return dsp_test_finish();
 }

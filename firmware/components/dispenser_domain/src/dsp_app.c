@@ -2,6 +2,14 @@
 
 #include <string.h>
 
+#include "dsp_bleproto.h"
+#include "dsp_time_service.h"
+
+_Static_assert(DSP_APP_SCHEDULE_PAGE == DSP_BLE_LIST_MAX, "schedule page = protocol list size");
+_Static_assert(DSP_CONFIG_CALIBRATED_AT_MIN == DSP_TIME_PLAUSIBLE_MIN,
+               "calibration floor = timekeeper plausibility floor");
+_Static_assert(DSP_SCHEDULE_NAME_MAX_BYTES <= DSP_BLE_STR_MAX, "names fit a protocol string");
+
 /* ---- Helpers --------------------------------------------------------------------------- */
 
 static void trace(dsp_app_t *app, dsp_app_stage_t stage)
@@ -42,7 +50,8 @@ static const dsp_schedule_t *schedules(const dsp_app_t *app, size_t *n)
 /* Dosing may still act in this wake (persistent gates are checked by the Dosing Service). */
 static bool dosing_usable(const dsp_app_t *app)
 {
-    return app->loaded && !app->inhibited && !app->pump_fault && !dsp_dosing_degraded(&app->dosing);
+    return app->loaded && !app->inhibited && !app->pump_fault && !app->storage_fault &&
+           !dsp_dosing_degraded(&app->dosing);
 }
 
 static bool next_due(dsp_app_t *app, dsp_utc_t *at)
@@ -109,11 +118,16 @@ static void stage_recover(dsp_app_t *app)
     app->rep.recover_status = dsp_dosing_recover(&app->dosing, c, &app->rep.recovery);
 }
 
+static void stage_clock_eval(dsp_app_t *app)
+{
+    dsp_timekeeper_evaluate(&app->tk,
+                            app->cfg->time->reading(app->cfg->time->ctx, app->tk.meta.last_sync_utc));
+}
+
 static void stage_clock(dsp_app_t *app)
 {
     trace(app, DSP_STAGE_CLOCK);
-    dsp_timekeeper_evaluate(&app->tk,
-                            app->cfg->time->reading(app->cfg->time->ctx, app->tk.meta.last_sync_utc));
+    stage_clock_eval(app);
 }
 
 static void stage_observe(dsp_app_t *app)
@@ -573,6 +587,424 @@ static void stage_shutdown_and_sleep(dsp_app_t *app)
         app->rep.fail_safe = true;
         power->fail_safe(power->ctx, f);
     }
+}
+
+/* ---- M1.10b.1 operations ------------------------------------------------------------------ */
+
+static dsp_app_op_result_t op(dsp_app_op_status_t status, uint32_t detail, uint32_t aux)
+{
+    dsp_app_op_result_t r = {status, detail, aux};
+    return r;
+}
+
+/* Common preconditions, in this order: application task inside a service session, owner
+ * authorization (fail closed: nothing else is looked at without it), storage loaded. */
+static dsp_app_op_result_t guard(dsp_app_t *app, const dsp_app_auth_t *auth)
+{
+    if (app == NULL || app->cfg == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    app->rep.ops++;
+    if (!app->accepting) {
+        return op(DSP_OP_BUSY, 0, 0);
+    }
+    if (auth == NULL || auth->role != DSP_APP_ROLE_OWNER || auth->slot >= DSP_APP_PHONE_SLOTS) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    if (!app->loaded) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    return op(DSP_OP_OK, 0, 0);
+}
+
+static dsp_app_op_result_t done(dsp_app_t *app, dsp_app_op_result_t r)
+{
+    if (r.status == DSP_OP_OK) {
+        app->rep.ops_ok++;
+    }
+    return r;
+}
+
+static bool write_failed(dsp_storage_status_t st)
+{
+    return st == DSP_STORAGE_ERR_WRITE || st == DSP_STORAGE_ERR_NO_SPACE ||
+           st == DSP_STORAGE_ERR_COMMIT || st == DSP_STORAGE_ERR_CONFIRM;
+}
+
+/* A write failed: the durable value is the old or the new one. Dosing ends for this wake. */
+static void storage_failed(dsp_app_t *app)
+{
+    app->storage_fault = true;
+    app->rep.op_storage_fault = true;
+}
+
+/* Base of a new edit floor (D16): the trusted current time (SYNCED or HOLDOVER, plausible);
+ * during a rollback hold the highest trusted time if that is later (nothing up to it may
+ * become executable through an edit). 0 = the clock is untrusted: no floor can be
+ * established, so the edit is refused (an untrusted clock can regain trust without a sync,
+ * e.g. a continuous clock that read behind the last sync, so a floor of "now" or none would
+ * not be safe). */
+static dsp_utc_t floor_base(const dsp_app_t *app)
+{
+    dsp_utc_t now = raw_now(app);
+    if (app->tk.trust == DSP_TRUST_UNKNOWN || now < DSP_UTC_MIN || now >= DSP_UTC_MAX) {
+        return 0;
+    }
+    if (dsp_timekeeper_hold_active(&app->tk, now) && app->tk.meta.high_water_utc > now) {
+        return app->tk.meta.high_water_utc;
+    }
+    return now;
+}
+
+dsp_app_op_result_t dsp_app_get_config(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                       dsp_config_t *out, uint32_t *hw_max_runtime_ms)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    if (dsp_storage_load_config(&app->st, out) != DSP_STORAGE_OK) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    if (hw_max_runtime_ms != NULL) {
+        *hw_max_runtime_ms = app->cfg->hw_max_runtime_ms;
+    }
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_set_config(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                       uint32_t expected_revision, uint16_t field_mask,
+                                       const dsp_config_t *values, uint32_t *new_revision)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (values == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    dsp_config_t cur;
+    if (dsp_storage_load_config(&app->st, &cur) != DSP_STORAGE_OK) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    if (expected_revision != cur.revision || cur.revision == UINT32_MAX) {
+        return op(DSP_OP_CONFLICT, cur.revision, 0);
+    }
+    const dsp_dosing_state_t *ds = dsp_dosing_state(&app->dosing);
+    if (ds == NULL) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    if (ds->flags & DSP_DOSING_F_REFILL_PENDING) {
+        return op(DSP_OP_REFUSED, DSP_OP_R_REFILL_PENDING, 0);
+    }
+    if (ds->readiness == DSP_READINESS_READY) {
+        uint32_t refused = field_mask & DSP_CONFIG_F_SERVICE_ONLY;
+        if ((field_mask & DSP_CONFIG_F_RESERVOIR_CAPACITY) &&
+            (cur.reservoir_capacity_ul == 0 || values->reservoir_capacity_ul == 0)) {
+            refused |= DSP_CONFIG_F_RESERVOIR_CAPACITY; /* would open or close a dosing gate */
+        }
+        if (refused != 0) {
+            return op(DSP_OP_REFUSED, DSP_OP_R_READY, refused);
+        }
+    }
+    dsp_config_t next;
+    uint32_t e =
+        dsp_config_apply_update(&cur, field_mask, values, app->cfg->hw_max_runtime_ms, &next);
+    if (e != 0) {
+        return op(DSP_OP_INVALID, e, 0);
+    }
+    dsp_storage_status_t st = dsp_storage_save_config(&app->st, &next);
+    if (st != DSP_STORAGE_OK) {
+        if (write_failed(st)) {
+            storage_failed(app);
+            return op(DSP_OP_STORAGE, 0, 0);
+        }
+        return op(st == DSP_STORAGE_ERR_REVISION ? DSP_OP_CONFLICT : DSP_OP_DEGRADED, 0, 0);
+    }
+    if (field_mask & DSP_CONFIG_F_SYNC_INTERVAL) {
+        (void)dsp_timekeeper_set_interval(&app->tk, next.time_sync_interval_h);
+    }
+    if (field_mask & (DSP_CONFIG_F_RESERVOIR_CAPACITY | DSP_CONFIG_F_LOW_STOCK)) {
+        /* Low-stock episodes follow the new capacity/threshold; the BLOCKED latch is only
+         * ever cleared by a refill. */
+        (void)dsp_dosing_observe_reservoir(&app->dosing, notify_clock(app));
+    }
+    if (new_revision != NULL) {
+        *new_revision = next.revision;
+    }
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+/* Repository result -> operation result. */
+static dsp_app_op_result_t from_repo(dsp_app_t *app, dsp_storage_status_t st, uint32_t sched_errors)
+{
+    switch (st) {
+    case DSP_STORAGE_OK:
+        return op(DSP_OP_OK, 0, 0);
+    case DSP_STORAGE_ERR_INVALID:
+        return op(DSP_OP_INVALID, sched_errors, 0);
+    case DSP_STORAGE_ERR_ARG:
+        return op(DSP_OP_INVALID, 0, 0);
+    case DSP_STORAGE_ERR_NOT_FOUND:
+        return op(DSP_OP_NOT_FOUND, 0, 0);
+    case DSP_STORAGE_ERR_DUPLICATE_ID:
+        return op(DSP_OP_DUPLICATE, 0, 0);
+    case DSP_STORAGE_ERR_ID_REUSED:
+        return op(DSP_OP_DUPLICATE, 0, 1);
+    case DSP_STORAGE_ERR_CAPACITY:
+        return op(DSP_OP_CAPACITY, 0, DSP_SCHEDULE_CAPACITY);
+    case DSP_STORAGE_ERR_REVISION:
+        return op(DSP_OP_CONFLICT, 0, 0); /* revision space exhausted */
+    default:
+        if (write_failed(st)) {
+            storage_failed(app);
+            /* The durable set is old or new: re-read it so that planning keeps working. */
+            (void)dsp_schedule_repo_load(&app->repo, &app->st);
+            return op(DSP_OP_STORAGE, 0, 0);
+        }
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+}
+
+static dsp_app_op_result_t repo_ready(const dsp_app_t *app)
+{
+    return dsp_schedule_repo_set(&app->repo) != NULL ? op(DSP_OP_OK, 0, 0)
+                                                     : op(DSP_OP_DEGRADED, 0, 0);
+}
+
+dsp_app_op_result_t dsp_app_list_schedules(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                           uint8_t page, dsp_app_schedule_page_t *out)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    g = repo_ready(app);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    const dsp_schedule_set_t *set = dsp_schedule_repo_set(&app->repo);
+    size_t first = (size_t)page * DSP_APP_SCHEDULE_PAGE;
+    if (page != 0 && first >= set->count) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    memset(out, 0, sizeof *out);
+    out->set_revision = set->revision;
+    out->total = set->count;
+    out->page = page;
+    for (size_t i = first; i < set->count && out->n < DSP_APP_SCHEDULE_PAGE; i++) {
+        memcpy(out->items[out->n].id, set->schedules[i].id, sizeof out->items[0].id);
+        out->items[out->n].revision = set->schedules[i].revision;
+        out->n++;
+    }
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_get_schedule(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                         const char *id, dsp_schedule_t *out)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    g = repo_ready(app);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL || !dsp_schedule_id_is_valid(id)) {
+        return op(DSP_OP_INVALID, id == NULL || out == NULL ? 0 : DSP_SCHED_E_ID, 0);
+    }
+    const dsp_schedule_t *s = dsp_schedule_repo_find(&app->repo, id);
+    if (s == NULL) {
+        return op(DSP_OP_NOT_FOUND, 0, 0);
+    }
+    *out = *s;
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+/* Shared input checks of create/update: validation, then the per-dose limit. */
+static dsp_app_op_result_t check_input(dsp_app_t *app, const dsp_schedule_t *s)
+{
+    uint32_t e = dsp_schedule_validate(s, app->cfg->tz);
+    if (e != DSP_SCHED_OK) {
+        return op(DSP_OP_INVALID, e, 0);
+    }
+    dsp_config_t cfg;
+    if (dsp_storage_load_config(&app->st, &cfg) != DSP_STORAGE_OK) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    if (cfg.max_dose_ul != 0 && s->amount_ul > cfg.max_dose_ul) {
+        return op(DSP_OP_LIMIT, DSP_DOSING_L_DOSE, cfg.max_dose_ul);
+    }
+    return op(DSP_OP_OK, 0, 0);
+}
+
+static dsp_utc_t raise_floor(dsp_utc_t floor, dsp_utc_t base)
+{
+    return base + 1 > floor ? base + 1 : floor; /* monotonic per schedule */
+}
+
+static bool timing_changed(const dsp_schedule_t *a, const dsp_schedule_t *b)
+{
+    return dsp_date_compare(a->start_date, b->start_date) != 0 || a->hour != b->hour ||
+           a->minute != b->minute || a->kind != b->kind || a->interval != b->interval ||
+           a->weekday_mask != b->weekday_mask || a->has_end_date != b->has_end_date ||
+           (a->has_end_date && dsp_date_compare(a->end_date, b->end_date) != 0);
+}
+
+dsp_app_op_result_t dsp_app_create_schedule(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                            const dsp_schedule_t *s, uint32_t *set_revision)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    g = repo_ready(app);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (s == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    dsp_utc_t base = floor_base(app);
+    if (base == 0) {
+        return op(DSP_OP_REFUSED, DSP_OP_R_CLOCK, 0);
+    }
+    dsp_schedule_t in = *s;
+    in.not_before = raise_floor(0, base);
+    g = check_input(app, &in);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (in.revision != 1) {
+        return op(DSP_OP_INVALID, DSP_SCHED_E_REVISION, 0);
+    }
+    g = from_repo(app, dsp_schedule_repo_create(&app->repo, &in, &app->hist), 0);
+    if (g.status == DSP_OP_OK && set_revision != NULL) {
+        *set_revision = dsp_schedule_repo_set(&app->repo)->revision;
+    }
+    return done(app, g);
+}
+
+dsp_app_op_result_t dsp_app_update_schedule(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                            uint32_t expected_revision, const dsp_schedule_t *s,
+                                            uint32_t *revision, uint32_t *set_revision)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    g = repo_ready(app);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (s == NULL || !dsp_schedule_id_is_valid(s->id)) {
+        return op(DSP_OP_INVALID, s == NULL ? 0 : DSP_SCHED_E_ID, 0);
+    }
+    const dsp_schedule_t *cur = dsp_schedule_repo_find(&app->repo, s->id);
+    if (cur == NULL) {
+        return op(DSP_OP_NOT_FOUND, 0, 0);
+    }
+    if (expected_revision != cur->revision || cur->revision == UINT32_MAX) {
+        return op(DSP_OP_CONFLICT, cur->revision, 0);
+    }
+    dsp_schedule_t in = *s;
+    in.not_before = cur->not_before;
+    if (timing_changed(cur, &in) || (!cur->enabled && in.enabled)) {
+        dsp_utc_t base = floor_base(app);
+        if (base == 0) {
+            return op(DSP_OP_REFUSED, DSP_OP_R_CLOCK, 0);
+        }
+        in.not_before = raise_floor(cur->not_before, base);
+    }
+    g = check_input(app, &in);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (in.revision != expected_revision + 1u) {
+        return op(DSP_OP_INVALID, DSP_SCHED_E_REVISION, 0);
+    }
+    g = from_repo(app, dsp_schedule_repo_update(&app->repo, &in), 0);
+    if (g.status == DSP_OP_OK) {
+        if (revision != NULL) {
+            *revision = in.revision;
+        }
+        if (set_revision != NULL) {
+            *set_revision = dsp_schedule_repo_set(&app->repo)->revision;
+        }
+    }
+    return done(app, g);
+}
+
+dsp_app_op_result_t dsp_app_delete_schedule(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                            const char *id, uint32_t expected_revision,
+                                            uint32_t *set_revision)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    g = repo_ready(app);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (!dsp_schedule_id_is_valid(id)) {
+        return op(DSP_OP_INVALID, id == NULL ? 0 : DSP_SCHED_E_ID, 0);
+    }
+    const dsp_schedule_t *cur = dsp_schedule_repo_find(&app->repo, id);
+    if (cur == NULL) {
+        return op(DSP_OP_NOT_FOUND, 0, 0);
+    }
+    if (expected_revision != cur->revision) {
+        return op(DSP_OP_CONFLICT, cur->revision, 0);
+    }
+    g = from_repo(app, dsp_schedule_repo_delete(&app->repo, id, expected_revision), 0);
+    if (g.status == DSP_OP_OK && set_revision != NULL) {
+        *set_revision = dsp_schedule_repo_set(&app->repo)->revision;
+    }
+    return done(app, g);
+}
+
+dsp_app_op_result_t dsp_app_set_phone_time(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                           int64_t phone_utc_ms, uint32_t uncertainty_ms,
+                                           dsp_app_time_result_t *out)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    memset(out, 0, sizeof *out);
+    /* Current trust first (the session may have crossed the SYNCED/HOLDOVER boundary). */
+    stage_clock_eval(app);
+    dsp_timekeeper_t before = app->tk;
+    dsp_sync_decision_t d;
+    dsp_phone_time_decision_t dec =
+        dsp_timekeeper_on_phone_time(&app->tk, phone_utc_ms, uncertainty_ms, raw_now(app), &d);
+    out->decision = (uint8_t)dec;
+    if (dec == DSP_PHONE_TIME_ACCEPTED) {
+        dsp_storage_status_t ps =
+            dsp_time_apply(&app->tk, &before, &app->st, app->cfg->clock, &d, NULL);
+        if (ps != DSP_STORAGE_OK) {
+            out->decision = 0;
+            if (write_failed(ps)) {
+                storage_failed(app);
+                return op(DSP_OP_STORAGE, 0, 0);
+            }
+            return op(DSP_OP_DEGRADED, 0, 0);
+        }
+        out->offset_s = d.offset_s;
+        (void)dsp_notify_observe_time(&app->notify, &app->tk, raw_now(app));
+    }
+    return done(app, op(DSP_OP_OK, 0, 0));
 }
 
 /* ---- Public API ------------------------------------------------------------------------ */

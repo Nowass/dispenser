@@ -12,8 +12,11 @@ Android companion app.
   queue (M1.5) and its HTTPS transport with a connectivity session (M1.7), verified end to
   end against a local Worker (M1.8), the Dosing Service with storage layout v4 (M1.9a), and
   the Application and Power Services wake cycle (M1.9b), and opt-in ESP-IDF platform adapters
-  with a simulated pump (M1.9c), and the BLE protocol v1 codec with its Noise feasibility gate
-  (M1.10a). Nothing drives hardware yet; not yet run on hardware.
+  with a simulated pump (M1.9c), the BLE protocol v1 codec with its Noise feasibility gate
+  (M1.10a), and the configuration, schedule and phone-time operations for the future BLE
+  dispatcher (M1.10b.1). Nothing drives hardware yet; not yet run on hardware. **Open firmware
+  release and hardware-acceptance blocker:** an ESP-IDF v6.1 NVS power-loss defect
+  ([`firmware/test/nvs_linux`](firmware/test/nvs_linux/README.md)).
 - [`cloudflare/dispenser-notify/`](cloudflare/dispenser-notify/README.md) – Cloudflare Worker
   and D1 backend that durably accepts device notifications (M1.6a, deployed; protocol in
   its [`PROTOCOL.md`](cloudflare/dispenser-notify/PROTOCOL.md)) and e-mails them through the

@@ -73,6 +73,15 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   fail-safe reset), command-queue lock, **simulated pump (no GPIO)**, time-continuity port,
   and an opt-in `app_main` runtime (`CONFIG_DSP_APP_RUNTIME`, default off). See
   [Platform adapters and application runtime](#platform-adapters-and-application-runtime-m19c).
+- (M1.10a) **BLE protocol v1 codec** and the Noise feasibility gate (see
+  [BLE protocol codec and Noise gate](#ble-protocol-codec-and-noise-gate-m110a)).
+- (M1.10b.1) **Configuration, schedules and phone time** behind the Application Service, for the
+  future BLE dispatcher: revisioned configuration read/update (calibration and limits only in
+  SERVICE_REQUIRED), schedule list/get/create/update/delete with on-device names (≤ 32 bytes
+  UTF-8) and a per-schedule edit floor (no catch-up after edits), owner phone time through the
+  timekeeper (never creates or lifts a rollback hold); authorization is an explicit input and
+  fails closed. `sched` record format 2, no layout change. Domain only, host-tested. See
+  [Configuration, schedules and phone time](#configuration-schedules-and-phone-time-m110b1).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
@@ -663,7 +672,7 @@ dosing service (future) ──► dsp_exec ──► dsp_history_store_t ─┐
 |---|---|---|
 | `layout` | layout marker (version 4, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
 | `h00` … `h31` | execution history slot: M1.2 record (format 2 since M1.9a: + claimed volume) or the explicit EMPTY record | 96 B each (format 1: 92 B) |
-| `sched` | the whole schedule set (schedules + deleted-ID tombstones + set revision) | 8 … 2,504 B |
+| `sched` | the whole schedule set (schedules + deleted-ID tombstones + set revision); format 2 since M1.10b.1 (+ name, edit floor per schedule) | 8 … 3,160 B (format 1: 8 … 2,504 B) |
 | `config` | device configuration (format 2 since M1.9a: + pump calibration and safety limits) | 46 B (format 1: 18 B) |
 | `time` | time metadata (M1.4): last sync, high-water time, rollback hold, last correction, dosing floor | 42 B |
 | `notify` | notification state (M1.5): ID epoch and sequence, condition latches, 16-entry queue; since M1.7 (format 2) also the transport diagnostics and the 4-entry rejection log; since M1.9a (format 3) the dose-bound report keys | 794 B (format 2: 758 B, format 1: 682 B) |
@@ -693,7 +702,8 @@ in place for maintenance (no repair tool exists yet).
 Every record: byte 0 = type (1 layout, 2 history, 3 schedule set, 4 config, 5 time,
 6 notify), byte 1 =
 format version (1; since M1.9a `notify` is at format 3, `h00`–`h31` and `config` at format 2;
-older formats are still read and upgraded by the next write). Decoders require the exact length, a known type and version, valid
+since M1.10b.1 `sched` is at format 2; older formats are still read and upgraded by the next
+write). Decoders require the exact length, a known type and version, valid
 fields and zero padding. Encoders never produce an invalid record.
 
 ```text
@@ -702,12 +712,16 @@ history slot (96 B):  0 type | 1 ver (2) | 2 state (0=EMPTY,1=STARTED,2=COMPLETE
                       70 month | 71 day | 72..75 revision | 76..83 scheduled_at (i64) |
                       84..91 claimed_at (i64) | 92..95 claimed volume µl (format 2; format 1
                       = the first 92 B, volume unknown = 0). EMPTY: state 0, rest zero.
-schedule set:         0 type | 1 ver | 2..5 set revision | 6 count (<=16) |
+schedule set:         0 type | 1 ver (2) | 2..5 set revision | 6 count (<=16) |
                       7 tombstones (<=16) | count x entry | tombstones x id
-  entry (91 B):       0 id_len | 1..64 id | 65..68 revision | 69 enabled (0/1) |
+  entry (132 B):      0 id_len | 1..64 id | 65..68 revision | 69 enabled (0/1) |
                       70..73 amount_ul | 74..77 start date | 78 hour | 79 minute | 80 kind |
                       81..84 interval | 85 weekday mask | 86 has_end (0/1) |
-                      87..90 end date (zero when absent)
+                      87..90 end date (zero when absent) | 91 name length (0..32) |
+                      92..123 name, UTF-8 without control characters (zero padded, no NUL
+                      inside) | 124..131 edit floor not_before (i64, 0 or a valid instant)
+                      (format 2, M1.10b.1; format 1 entries are the first 91 B: empty name,
+                      no floor)
   tombstone (65 B):   0 id_len | 1..64 id
 config (46 B):        0 type | 1 ver (2) | 2..5 revision | 6..9 reservoir capacity µl |
                       10..13 estimated remaining µl | 14 low-stock % | 15..16 NTP interval h |
@@ -766,6 +780,12 @@ extra CRC would only re-check what NVS already checks.
 | Interruption report (M1.9a recovery) | `notify` (event + report key), then `hNN` / `dosing` cleared | report first and keyed: a repeat is idempotent, never lost |
 | Refill (M1.9a) | `dosing` (intent) → `notify` → `config` → `dosing` (latch + intent cleared) | **no**: roll-forward; dosing disabled until the last write |
 
+**Known platform defect (found in M1.10b.1, `test/nvs_linux`):** ESP-IDF v6.1 NVS can lose a blob
+key entirely on a power cut at one point of its replacement (after the last new data chunk,
+before the new blob index), so "old or new value" does not hold at that instant; the storage
+detects the missing key and fails closed (CORRUPT). Until mitigated, the per-key atomicity
+above is conditional on that window. **Release and hardware-acceptance blocker (open).**
+
 Every write is: encode → `set` → `commit` → read back → compare bytes. Any failure
 returns an error; the schedule repository then refuses changes until it re-reads the
 durable set (old or new, never a mix). In the randomized test, 400 operations per mode
@@ -781,6 +801,12 @@ with injected faults and restarts always left exactly the old or the new set.
   concurrency as in the Android repository). The ID never changes.
 - **delete:** expected revision must match; the ID moves to the **tombstone ring
   (16 newest deleted IDs)**. History is not touched.
+- **Names (M1.10b.1, D9):** stored with each schedule (format 2), 0–32 bytes of well-formed
+  UTF-8 without control characters, not normalized. Validated by `dsp_schedule_validate`
+  (`DSP_SCHED_E_NAME`) with the same rule as the protocol's `text` strings (`dsp_text`).
+- **Edit floor `not_before` (M1.10b.1):** maintained by the Application Service, never sent
+  over BLE; occurrences scheduled before it are MISSED in the coordinator (see
+  [Configuration, schedules and phone time](#configuration-schedules-and-phone-time-m110b1)).
 - **Non-reuse (approved: "UUID + bounded tombstones"):** enforced against active IDs,
   the 16 most recently deleted IDs and every ID in the 32-slot history. Beyond that it rests
   on Android-generated UUIDv4 randomness. A reused ID can only suppress a dose its old
@@ -823,9 +849,9 @@ firmware, see M1.7), never in `config`, this namespace or logs.
 ### Capacity, flash layout and wear
 
 NVS entries are 32 B and blobs cost 2 entries plus 1 per 32 data bytes. History
-32 × 5 = 160 entries, schedule set ≤ 81, config 3, time 4 (M1.4, 42 B), notify 26 (M1.7,
-758 B), marker 3, namespace 1: **≤ about 281 entries (9 KB)**, plus up to 81 free entries
-while the largest record is rewritten.
+32 × 5 = 160 entries, schedule set ≤ 101 (format 2, 3,160 B; format 1: 81), config 4 (46 B),
+time 4 (M1.4, 42 B), notify 27 (M1.9a, 794 B), dosing 4, marker 3, namespace 1: **≤ about
+304 entries (10 KB)**, plus up to 101 free entries while the largest record is rewritten.
 The M1.7 partition table gives `nvs` 80 KiB (20 pages, about 2,500 usable entries): the
 live data uses about 11 %, which leaves room for ESP-IDF's own Wi-Fi/PHY/BLE data and
 spreads wear. Wear: about 10 entries per automatic dose (plus 3 for the reservoir estimate
@@ -850,9 +876,12 @@ provisioning value as left by an interrupted migration:
 - the marker is rewritten as v4 **last**;
 - a power cut before the marker is resumed at the next boot.
 
-Record formats inside a layout: history 1 → 2, configuration 1 → 2 and `notify` 1/2 → 3 are
-read as before (new fields 0) and upgraded by the next write of that record; no migration
-step is needed.
+Record formats inside a layout: history 1 → 2, configuration 1 → 2, `notify` 1/2 → 3 and
+(M1.10b.1) `sched` 1 → 2 are read as before (new fields 0) and upgraded by the next write of
+that record; no migration step is needed. M1.10b.1 therefore keeps **layout v4**: names and the
+edit floor live inside the existing `sched` key (single atomic write, upgraded lazily). Layout v5
+is reserved for the credential record and the manual-dose anti-replay state (M1.10b.2+, see
+`docs/BLE_PROTOCOL_DESIGN.md` section 7.1).
 
 Without write permission the open reports `ERR_MIGRATION_REQUIRED` and writes nothing. An old
 marker next to a newer key with real data is `CORRUPT`. Older firmware reading a newer layout
@@ -1534,6 +1563,89 @@ security model [`../docs/BLE_PROTOCOL_DESIGN.md`](../docs/BLE_PROTOCOL_DESIGN.md
   host, Android NDK r30 and ESP32-C3 by `gate/run_gate.sh` (34 checks). Not yet integrated into
   the firmware (M1.10c).
 
+## Configuration, schedules and phone time (M1.10b.1)
+
+**Implemented and host-tested in the domain; not reachable over BLE yet** (the dispatcher, the
+security layer and NimBLE are M1.10c/d). New public operations of the Application Service
+(`dsp_app.h`), called by the future dispatcher from the application task inside a service
+session:
+
+| Operation | Protocol message | Reuses |
+|---|---|---|
+| `dsp_app_get_config`, `dsp_app_set_config` | GET_CONFIG, SET_CONFIG | `dsp_config_apply_update`, `dsp_storage_*_config` |
+| `dsp_app_list_schedules`, `dsp_app_get_schedule` | LIST_SCHEDULES, GET_SCHEDULE | `dsp_schedule_repo` |
+| `dsp_app_create_schedule`, `dsp_app_update_schedule`, `dsp_app_delete_schedule` | CREATE/UPDATE/DELETE_SCHEDULE | `dsp_schedule_repo`, `dsp_schedule_validate` |
+| `dsp_app_set_phone_time` | SET_TIME | `dsp_timekeeper_on_phone_time`, `dsp_time_apply` |
+
+- **Ownership:** the Application Service stays the only owner of state; the operations read
+  and write only through the existing modules, never drive the pump and never change
+  readiness. Results (`dsp_app_op_result_t`: status, detail, aux) map 1:1 to the protocol's
+  error codes (`docs/BLE_PROTOCOL.md` section 10).
+- **Authorization fails closed:** every operation takes `const dsp_app_auth_t *` from the
+  future security layer; NULL, a non-owner role or a slot ≥ 4 is FORBIDDEN before any storage
+  access. Nothing produces an owner authorization yet. Outside a service session every
+  operation is BUSY; without loaded storage DEGRADED.
+- **Configuration:** `expected_revision` must equal the stored revision (CONFLICT with the
+  current one otherwise; doses also advance it, because the estimate lives in this record);
+  only the fields in `field_mask` change (bits = protocol), all others and the read-only ones
+  (`revision`, `reservoir_remaining_ul`, the hardware cutoff) are preserved. Calibration and
+  limits only while SERVICE_REQUIRED (D12); while READY the capacity may change but never
+  from or to 0 (which would close or reopen a dosing gate). Refused while a refill is pending.
+  Strict validation: thresholds, interval, mask bits, capacity ≥ estimate, calibration time 0
+  or ≥ 2025-01-01, `max_daily ≥ max_dose`, `max_runtime ≤` the hardware cutoff. One atomic
+  record write; a new sync interval applies to the running timekeeper; capacity/threshold
+  changes re-observe the reservoir.
+- **Schedules:** create (revision 1), update (record revision = `expected_revision` + 1, stored
+  revision must match), delete (revision must match) through the repository: IDs never
+  reused, tombstones, history untouched, one atomic write of the set. Names are stored on the
+  device. `amount_ul` above a configured `max_dose_ul` is refused (LIMIT); volumes are `u32` µl
+  by type (the app must refuse anything larger). Pages of 4.
+- **Edit floor (D16, approved; no catch-up after edits):** create, an update of any timing
+  field (start date, time, kind, interval, weekdays, end date) and re-enabling set the
+  schedule's `not_before` to the trusted edit time + 1 s (during a rollback hold: the highest
+  trusted time + 1 s if later); monotonic per schedule, never lowered. With an untrusted clock
+  these three edits are **refused** (REFUSED, detail 3: send SET_TIME first), because an
+  untrusted clock can regain trust without a sync (a continuous clock that read behind the
+  last sync); name, volume and disable edits and deletion stay possible. The coordinator treats occurrences before it as MISSED.
+  So moving a time into the current due window, re-enabling a schedule, creating a schedule
+  for a time just passed, or deleting and recreating a schedule never doses for that past
+  instant. Name- and volume-only edits keep the floor. Claimed occurrences stay blocked by
+  the M1.2 watermark (identity `<id>@<date>`), so an edit never resurrects one, also across
+  DST (one occurrence at the earlier instant on fall-back days, skipped on spring-forward days).
+- **Phone time (D10):** accepted only while the clock is UNKNOWN or in HOLDOVER (SYNCED:
+  IGNORED_NTP_PREFERRED; the NTP retry schedule is unchanged), uncertainty ≤ 2,000 ms, within
+  2025-01-01..2100. A recorded rollback hold refuses it (HOLD), and so does a time more than 7
+  days behind the highest trusted time: phone time never creates or lifts a hold. Otherwise
+  the M1.4 rules apply unchanged (initial-sync floor, forward-step floor, high water), durable
+  before effective (`dsp_time_apply`, shared with the NTP path). Missed doses are never run.
+- **Failures:** a write failure answers STORAGE and ends dosing for the rest of the wake; the
+  schedule repository is re-read at once so the wake plan keeps the durable set. Every write
+  is a single NVS key.
+- **Configuration bounds:** every representable value is accepted where no approved limit
+  exists; the arithmetic (runtime from volume and flow, daily total, interval, reservoir
+  percentages) is 64-bit and overflow-safe, host-tested with every field at its 32-bit extreme
+  (a 4,294,967,295 µl dose at 4,294,967,295 µl/s runs exactly 1,000 ms; at 1 µl/s it does not fit
+  32 bits and is refused, never truncated). Physical bounds wait for measurements
+  (`HARDWARE_ACCEPTANCE.md` section 9).
+- **Real ESP-IDF NVS (`test/nvs_linux`, linux target, committed partition table):** the
+  maximum layout (`sched` 3,160 B, 304 entries) plus PHY/Wi-Fi co-tenants leaves 1,952 of 2,520
+  entries available; repeated maximum-size writes need about 140 available entries in steady
+  state (margin about 1,800); 20,000 rewrites: 0.82 page erases per write, no entry leak; a
+  write that does not fit is refused cleanly (old set intact). **Defect found in ESP-IDF v6.1
+  NVS:** a power cut after the new version's last data chunk and before the new blob index
+  makes `nvs_flash_init_partition()` erase the old version too (the page loader's "duplicate
+  last item" check ignores the chunk index), so the key is lost; reproduced with plain
+  `nvs_set_blob()` at exactly one cut point per write. The storage then reports CORRUPT and
+  fails closed (no dosing, never an extra dose). This affects every record since M1.3. **Unresolved, release
+  and hardware-acceptance blocker** (`HARDWARE_ACCEPTANCE.md` section 9); the investigation of a
+  fix is the next task.
+
+Sizes (ESP32-C3, `-Os`): the operations add about 4.4 KB of code once the dispatcher links them
+(`dsp_app` +2.9 KB, timekeeper +0.5 KB, config +0.4 KB, codec +0.25 KB, shared UTF-8 validator
+0.2 KB, the BLE codec −0.2 KB because it now uses the shared validator); static RAM +2,744 B
+(`dsp_app_t` 15,856 B: the larger schedule set in the repository and the storage buffers);
+at most 208 B of stack per operation.
+
 ## HTTPS notification transport and connectivity session (M1.7)
 
 Pure domain code (`dsp_notify_proto`, `dsp_https_transport`, `dsp_connectivity`, extensions
@@ -1785,6 +1897,7 @@ Current host tests (CTest names):
 | `test_proto_vectors` | the shared protocol v1 vectors (M1.8, also run by the backend's Vitest): exact request bodies and canonical payloads, notes the encoder must refuse, the firmware classification of every backend response (byte-exact bodies) and of synthetic responses |
 | `test_dosing` | Dosing Service (M1.9a) over the real coordinator, storage and engine with a fake pump that verifies complete durable state at every activation: default SERVICE_REQUIRED and the checked READY transition, every missing/invalid calibration or limit (no actuation, never BLOCKED), overflow-safe runtime, write order and durable claimed volume, same-time schedules and the due window, per-dose/runtime/daily/interval limits, midnight, both DST days, rollback and untrusted time, restart in cooldown, BLOCKED latch (automatic and manual refused until refill), refill with a power cut at every write (dosing disabled until complete), pump faults, storage failures at every write (DEGRADED), a dose report whose `notify` write fails (durable source kept, dosing disabled for the wake, exactly one report whether flushed in the wake or recovered at boot, never repeated) and reports with no durable source (not invented), a refused same-time dose that becomes MISSED without catch-up, **exhaustive power-loss matrices for automatic and manual doses with a second cut inside recovery** (never a pump run in recovery, interruption reported exactly once with the durable volume, estimate unchanged), format-1 history recovery, and a 3000-step randomized run with cuts, restarts, refills and clock steps |
 | `test_app` | Application and Power Services (M1.9b): complete wake cycles over the real domain services with fakes for the pump, KV (power cuts that abort the wake via longjmp), clock and RTC continuity, NTP, Wi-Fi, HTTP, BLE service mode and the sleep port with RTC memory. Oracles on every pump start (durable claim/marker, last start and consumption; no radio active; inside the due window; no duplicate) and every sleep (pump OFF, radios off, no HTTPS session). Retained-block codec (every bit flip rejected) and plan rules; first boot and exact stage order; scheduled, same-time (interval retry inside the window, else missed) and missed doses; manual dose and bounded queue in service mode; BLE session lifetime (180 s idle, kept while connected, idle restart after disconnect, 15 min and configurable maximum, wall-clock steps ignored, no resume past the deadline, queue lock balance and no posting outside a session); SERVICE_REQUIRED, READY, BLOCKED and refill (dose wakes suppressed and restored); Wi-Fi unavailable (backoff, dosing unaffected); CRITICAL on an existing wake and the hourly limit; BLE suspended for a due dose and resumed; DEGRADED and storage failures; clock rollback (2 h, > 7 days) and DST; SAFE_OFF/shutdown/BLE confirmation failures and the fail-safe inhibit; **power loss at every stage (2 scenarios × 4 reboot variants)**; **two 365-day simulations** (clean: every expected occurrence exactly once; chaotic: cuts, resets, Wi-Fi faults, clock steps, pump faults, button sessions) |
+| `test_app_ops` | M1.10b.1 operations through complete wakes (operations run from the BLE fake's `wait()`, i.e. the application task, like the future dispatcher), oracles on every pump start (no BLE, no operation in progress, inside the due window, never before the edit floor, no duplicate). Authorization fails closed (NULL, non-owner, bad slot: FORBIDDEN, no write; BUSY outside a session; DEGRADED storage); phone time: initial sync without catch-up, plan follows, SYNCED ignored, uncertainty and range boundaries (incl. INT64 extremes), HOLDOVER acceptance and a 2 h step back without re-running a claimed occurrence, > 7 days back and recorded holds refused, forward step skips jumped-over doses, write and clock-set failures, power cut at every write; configuration: field mask, read-only fields, stale revision, every calibration/limit field refused while READY, capacity rules, 25 field boundaries, SERVICE_REQUIRED never enables dosing, refill pending, write failure ends dosing for the wake, power cuts; schedules: CRUD across restarts with names, 30 validation and name cases, revisions, duplicate and reused IDs, capacity and paging, no resurrection after edits, edits near the due window, delete + recreate, Prague DST (fall back and spring forward), plan follows changes, write failure and power cuts in create/update/delete (old or new set, floor durable), format-1 upgrade |
 | `test_endpoint_guard` | M1.9c build-time endpoint guard (`cmake -P`): runtime disabled, runtime without connectivity, connectivity without an endpoint (fails), explicit staging endpoint, production without approval (fails), production with approval; production-host spellings, non-https and host-less URLs, a look-alike host, and the guard's production host equal to the `DSP_NOTIFY_URL` default |
 | `test_bleproto` | M1.10a BLE protocol v1 codec: every record of `test-vectors/ble_protocol_v1.txt` (59 messages decoded field by field and re-encoded byte for byte, 63 rejections with their reason, encrypted headers, forward compatibility, negotiation, fragmentation for MTU 23–517, reassembly errors and timeout, Info and advertising records), canonical re-encoding of every accepted bit-flipped frame (12,968 mutations), rejection of every body truncation, 200,000 random frames and 200,000 random fragments, encoder refusals |
 | `test_platform` | M1.9c pure adapter rules (`dsp_platform_logic.c`, compiled unchanged into the firmware): reset/wake mapping for every reset kind and wake-source combination, retained block and clock continuity agreeing on every reset, sleep clamping, button pin check (strapping and non-wake pins rejected), RTC header (power-on garbage, torn header, oversize, corrupt data rejected by the domain CRC), backoff and hourly limit preserved through the RTC buffer, no clock trust from retained data; and a **two-thread** queue test (a producer thread posting 400 commands, queue full and session-closed refusals, while the application task runs a service session under a mutex): every accepted command answered exactly once. Also run separately under ThreadSanitizer (0 races; a lock-free mutant reports races) |
@@ -1853,6 +1966,7 @@ alternative to the native setup, not a requirement.
 | Integration: domain + real TLS + committed Worker + local D1 + fake Gmail (M1.8) | locally integrated (`test/integration`, 1,000 randomized sessions) | n/a | not run |
 | Dosing Service, storage layout v4, formats (M1.9a) | implemented, tested with fake pump and fake KV (power cuts, failures, randomized) | compiled, not called | not run; **no real pump driver** |
 | Application and Power Services (M1.9b) | implemented, tested with fakes (pump, KV with power cuts, clock, NTP, Wi-Fi, HTTP, BLE, sleep port, RTC memory); 365-day simulations | compiled, not called | not run; **no deep sleep, RTC, button or BLE adapters** |
+| Configuration, schedules, phone time operations (M1.10b.1) | implemented, tested through complete wakes with power cuts (`test_app_ops`) and unit tests | compiled, not linked (no caller until the dispatcher) | not run |
 | BLE protocol v1 codec (`dsp_bleproto`, M1.10a) | implemented, shared vectors + property/fuzz tests; Kotlin codec runs the same vectors | compiled, not linked (not called) | not run |
 | Platform adapters: power/sleep, RTC block, queue lock, simulated pump, runtime (M1.9c) | pure rules host-tested (`test_platform`, incl. a two-thread queue test; TSan-clean separately) | compiled in four configurations; runtime opt-in | **not run**; no real pump driver, no button pin |
 | Battery monitor | not started | — | — |
@@ -1887,8 +2001,12 @@ alternative to the native setup, not a requirement.
 
 ## Next milestone
 
-After the M1.10a review: M1.10b (domain interfaces M1–M4, M6, M7, storage layout v5), then
-M1.10c–f (session security, NimBLE adapter, Android integration, on-device acceptance); the
+**Release blocker (open):** the ESP-IDF v6.1 NVS power-loss defect (`test/nvs_linux`,
+`HARDWARE_ACCEPTANCE.md` section 9). Next task: a focused NVS reliability investigation (root
+cause, a project-scoped `nvs_flash` fix vs. redundant records), reported before any permanent fix.
+After that: M1.10b.2–b.4 (manual-dose anti-replay and the credential record with
+storage layout v5, Wi-Fi provisioning store, reset service), only after explicit authorization;
+then M1.10c–f (session security, NimBLE adapter, Android integration, on-device acceptance); the
 hardware review (pin map, pump gate and cutoff, button, battery measurement) is not started.
 The on-device acceptance
 ([`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md)) waits for the board and an approved

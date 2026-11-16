@@ -213,6 +213,8 @@ dsp_codec_status_t dsp_codec_decode_history(const uint8_t *buf, size_t len,
  *  entry (91 B): 0..64 id | 65..68 revision | 69 enabled | 70..73 amount_ul |
  *    74..77 start date | 78 hour | 79 minute | 80 kind | 81..84 interval |
  *    85 weekday mask | 86 has end | 87..90 end date (zero when absent)
+ *  format 2 entry (132 B, M1.10b.1): format 1 entry | 91 name length (0..32) |
+ *    92..123 name bytes (zero padded) | 124..131 not_before (i64)
  *  tombstone (65 B): id                                                                */
 
 static bool ids_unique(const dsp_schedule_set_t *set)
@@ -266,9 +268,13 @@ static void put_schedule(uint8_t *p, const dsp_schedule_t *s)
     if (s->has_end_date) {
         put_date(p + 87, s->end_date);
     }
+    size_t name_len = strlen(s->name); /* validated: <= DSP_SCHEDULE_NAME_MAX_BYTES */
+    p[91] = (uint8_t)name_len;
+    memcpy(p + 92, s->name, name_len);
+    put_i64(p + 124, s->not_before);
 }
 
-static bool get_schedule(const uint8_t *p, dsp_schedule_t *s)
+static bool get_schedule(const uint8_t *p, bool v2, dsp_schedule_t *s)
 {
     memset(s, 0, sizeof *s);
     if (!get_id(p, s->id) || p[69] > 1 || p[86] > 1) {
@@ -289,12 +295,24 @@ static bool get_schedule(const uint8_t *p, dsp_schedule_t *s)
     } else if (!all_zero(p + 87, 4)) {
         return false;
     }
-    return true;
+    if (v2) {
+        uint8_t name_len = p[91];
+        if (name_len > DSP_SCHEDULE_NAME_MAX_BYTES ||
+            !all_zero(p + 92 + name_len, DSP_SCHEDULE_NAME_MAX_BYTES - name_len) ||
+            memchr(p + 92, 0, name_len) != NULL) {
+            return false; /* padding must be zero; an embedded NUL would truncate the name */
+        }
+        memcpy(s->name, p + 92, name_len);
+        s->name[name_len] = '\0';
+        s->not_before = get_i64(p + 124);
+    }
+    return true; /* name text rules and the floor range: dsp_schedule_validate */
 }
 
-static size_t set_size(uint8_t count, uint8_t tombstones)
+static size_t set_size(uint8_t count, uint8_t tombstones, bool v2)
 {
-    return DSP_SCHEDULE_SET_HEADER_BYTES + (size_t)count * DSP_SCHEDULE_ENTRY_BYTES +
+    return DSP_SCHEDULE_SET_HEADER_BYTES +
+           (size_t)count * (v2 ? DSP_SCHEDULE_ENTRY_BYTES : DSP_SCHEDULE_ENTRY_V1_BYTES) +
            (size_t)tombstones * DSP_TOMBSTONE_ENTRY_BYTES;
 }
 
@@ -304,12 +322,12 @@ size_t dsp_codec_encode_schedule_set(const dsp_schedule_set_t *set, const dsp_tz
     if (set == NULL || buf == NULL || !set_valid(set, tz)) {
         return 0;
     }
-    size_t size = set_size(set->count, set->tombstone_count);
+    size_t size = set_size(set->count, set->tombstone_count, true);
     if (cap < size) {
         return 0;
     }
     buf[0] = DSP_REC_TYPE_SCHEDULE_SET;
-    buf[1] = DSP_CODEC_VERSION;
+    buf[1] = DSP_SCHEDULE_SET_FORMAT_V2;
     put_u32(buf + 2, set->revision);
     buf[6] = set->count;
     buf[7] = set->tombstone_count;
@@ -326,10 +344,17 @@ size_t dsp_codec_encode_schedule_set(const dsp_schedule_set_t *set, const dsp_tz
 dsp_codec_status_t dsp_codec_decode_schedule_set(const uint8_t *buf, size_t len,
                                                  const dsp_tz_t *tz, dsp_schedule_set_t *out)
 {
-    dsp_codec_status_t st = check_header(buf, len, DSP_REC_TYPE_SCHEDULE_SET);
-    if (st != DSP_CODEC_OK) {
-        return st;
+    if (buf == NULL || len < 2) {
+        return DSP_CODEC_ERR_SIZE;
     }
+    if (buf[0] != DSP_REC_TYPE_SCHEDULE_SET) {
+        return DSP_CODEC_ERR_TYPE;
+    }
+    if (buf[1] != DSP_CODEC_VERSION && buf[1] != DSP_SCHEDULE_SET_FORMAT_V2) {
+        return DSP_CODEC_ERR_VERSION; /* newer format: unsupported (fail closed) */
+    }
+    bool v2 = buf[1] == DSP_SCHEDULE_SET_FORMAT_V2;
+    size_t entry = v2 ? DSP_SCHEDULE_ENTRY_BYTES : DSP_SCHEDULE_ENTRY_V1_BYTES;
     if (len < DSP_SCHEDULE_SET_HEADER_BYTES || out == NULL) {
         return DSP_CODEC_ERR_SIZE;
     }
@@ -338,7 +363,7 @@ dsp_codec_status_t dsp_codec_decode_schedule_set(const uint8_t *buf, size_t len,
     if (count > DSP_SCHEDULE_CAPACITY || tombstones > DSP_TOMBSTONE_CAPACITY) {
         return DSP_CODEC_ERR_FIELD;
     }
-    if (len != set_size(count, tombstones)) {
+    if (len != set_size(count, tombstones, v2)) {
         return DSP_CODEC_ERR_SIZE;
     }
     /* Decode into *out only after full validation would need a second set; decode in
@@ -349,8 +374,8 @@ dsp_codec_status_t dsp_codec_decode_schedule_set(const uint8_t *buf, size_t len,
     out->tombstone_count = tombstones;
     const uint8_t *p = buf + DSP_SCHEDULE_SET_HEADER_BYTES;
     bool ok = true;
-    for (size_t i = 0; i < count && ok; i++, p += DSP_SCHEDULE_ENTRY_BYTES) {
-        ok = get_schedule(p, &out->schedules[i]);
+    for (size_t i = 0; i < count && ok; i++, p += entry) {
+        ok = get_schedule(p, v2, &out->schedules[i]);
     }
     for (size_t i = 0; i < tombstones && ok; i++, p += DSP_TOMBSTONE_ENTRY_BYTES) {
         ok = get_id(p, out->tombstones[i]);

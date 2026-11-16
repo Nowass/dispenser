@@ -998,8 +998,30 @@ static void test_capacity_full_default_slots(void)
     DSP_CHECK_EQ_INT(1, lost); /* exactly one old record (21 Nov) recycled */
 }
 
+/* ---- M1.10b.1: per-schedule edit floor --------------------------------------------- */
+
+static void test_schedule_edit_floor(void)
+{
+    setup_default();
+    S.not_before = O20.at + 1; /* edited one second after the scheduled instant */
+    DSP_CHECK_EQ_INT(DSP_EXEC_MISSED, dsp_exec_check(&ex, &S, &O20, clk(O20.at + 30)));
+    dsp_exec_token_t tok;
+    DSP_CHECK_EQ_INT(DSP_EXEC_MISSED, claim(&S, &O20, O20.at + 30, &tok));
+    DSP_CHECK_EQ_INT(0, store.writes); /* nothing claimed */
+    S.not_before = O20.at; /* exactly at the instant: allowed */
+    DSP_CHECK_EQ_INT(DSP_EXEC_OK, dsp_exec_check(&ex, &S, &O20, clk(O20.at + 30)));
+    /* The next day's occurrence is after the floor. */
+    S.not_before = O20.at + 1;
+    dsp_occurrence_t o21 = occ_on(&S, D(2026, 11, 21));
+    DSP_CHECK_EQ_INT(DSP_EXEC_OK, dsp_exec_check(&ex, &S, &o21, clk(o21.at + 30)));
+    /* An invalid floor makes the schedule invalid (never silently ignored). */
+    S.not_before = 5;
+    DSP_CHECK_EQ_INT(DSP_EXEC_ERR_SCHEDULE, dsp_exec_check(&ex, &S, &o21, clk(o21.at + 30)));
+}
+
 int main(void)
 {
+    DSP_RUN(test_schedule_edit_floor);
     DSP_RUN(test_normal_execution);
     DSP_RUN(test_same_occurrence_twice);
     DSP_RUN(test_restart_before_occurrence);

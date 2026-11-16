@@ -75,7 +75,8 @@ static bool sched_equal(const dsp_schedule_t *a, const dsp_schedule_t *b)
            a->hour == b->hour && a->minute == b->minute && a->kind == b->kind &&
            a->interval == b->interval && a->weekday_mask == b->weekday_mask &&
            a->has_end_date == b->has_end_date &&
-           (!a->has_end_date || dsp_date_compare(a->end_date, b->end_date) == 0);
+           (!a->has_end_date || dsp_date_compare(a->end_date, b->end_date) == 0) &&
+           strcmp(a->name, b->name) == 0 && a->not_before == b->not_before;
 }
 
 static bool set_equal(const dsp_schedule_set_t *a, const dsp_schedule_set_t *b)
@@ -507,8 +508,9 @@ static void test_unsupported_versions(void)
         size_t len = e->len;
         memcpy(v, e->value, len);
         /* Format version from a newer firmware ("notify" is at format 3 since M1.9a, "h12"
-         * and "config" at format 2). */
-        bool at2 = strcmp(keys[k], "h12") == 0 || strcmp(keys[k], "config") == 0;
+         * and "config" at format 2, "sched" at format 2 since M1.10b.1). */
+        bool at2 = strcmp(keys[k], "h12") == 0 || strcmp(keys[k], "config") == 0 ||
+                   strcmp(keys[k], "sched") == 0;
         v[1] = strcmp(keys[k], "notify") == 0 ? 4 : (at2 ? 3 : 2);
         fake_kv_put_raw(&kv, keys[k], v, len);
         expect_open(DSP_STORAGE_ERR_UNSUPPORTED);
@@ -763,20 +765,50 @@ static void test_codec_golden_bytes(void)
     s->end_date = D(2027, 1, 31);
     set.tombstone_count = 1;
     strcpy(set.tombstones[0], "old");
+    /* Format 2 (M1.10b.1): name "Ráno" (UTF-8, 5 bytes) and edit floor. */
+    strcpy(s->name, "R\xC3\xA1no");
+    s->not_before = (dsp_utc_t)1795158001;
     uint8_t b[DSP_SCHEDULE_SET_MAX_BYTES];
-    DSP_CHECK_EQ_INT(164, dsp_codec_encode_schedule_set(&set, TZ, b, sizeof b));
-    static const uint8_t shdr[] = {0x03, 0x01, 0x07, 0x00, 0x00, 0x00, 0x01, 0x01};
+    DSP_CHECK_EQ_INT(8 + 132 + 65, dsp_codec_encode_schedule_set(&set, TZ, b, sizeof b));
+    static const uint8_t shdr[] = {0x03, 0x02, 0x07, 0x00, 0x00, 0x00, 0x01, 0x01};
     static const uint8_t etail[] = {0x02, 0x00, 0x00, 0x00, 0x01, 0xD4, 0x30, 0x00, 0x00,
                                     0xEA, 0x07, 0x0B, 0x02, 0x08, 0x1E, 0x02, 0x03, 0x00,
                                     0x00, 0x00, 0x09, 0x01, 0xEB, 0x07, 0x01, 0x1F};
+    static const uint8_t ename[] = {0x05, 'R', 0xC3, 0xA1, 'n', 'o'};
+    static const uint8_t efloor[] = {0xF1, 0xEF, 0xFF, 0x6A, 0x00, 0x00, 0x00, 0x00};
     static const uint8_t thead[] = {0x03, 0x6F, 0x6C, 0x64};
     DSP_CHECK(memcmp(b, shdr, sizeof shdr) == 0);
     DSP_CHECK(b[8] == 2 && b[9] == 'x' && b[10] == '1');
     DSP_CHECK(memcmp(b + 8 + 65, etail, sizeof etail) == 0);
-    DSP_CHECK(memcmp(b + 8 + 91, thead, sizeof thead) == 0);
+    DSP_CHECK(memcmp(b + 8 + 91, ename, sizeof ename) == 0);
+    uint8_t zero[32];
+    memset(zero, 0, sizeof zero);
+    DSP_CHECK(memcmp(b + 8 + 97, zero, 32 - 5) == 0); /* name padding */
+    DSP_CHECK(memcmp(b + 8 + 124, efloor, sizeof efloor) == 0);
+    DSP_CHECK(memcmp(b + 8 + 132, thead, sizeof thead) == 0);
     dsp_schedule_set_t sb;
-    DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_schedule_set(b, 164, TZ, &sb));
+    DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_schedule_set(b, 8 + 132 + 65, TZ, &sb));
     DSP_CHECK(set_equal(&set, &sb));
+    DSP_CHECK_EQ_STR("R\xC3\xA1no", sb.schedules[0].name);
+    DSP_CHECK_EQ_INT((dsp_utc_t)1795158001, sb.schedules[0].not_before);
+
+    /* Format 1 (M1.3 .. M1.10a, 91 B entries) is still decoded: no name, no floor. These are
+     * the exact format 1 golden bytes of the same set. */
+    uint8_t f1[8 + 91 + 65];
+    memcpy(f1, b, 8 + 91);
+    memcpy(f1 + 8 + 91, b + 8 + 132, 65);
+    f1[1] = 0x01;
+    DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_schedule_set(f1, sizeof f1, TZ, &sb));
+    s->name[0] = '\0';
+    s->not_before = 0;
+    DSP_CHECK(set_equal(&set, &sb));
+    DSP_CHECK_EQ_STR("", sb.schedules[0].name);
+    DSP_CHECK_EQ_INT(0, sb.schedules[0].not_before);
+    /* A format 1 length with the format 2 version byte (and vice versa) is refused. */
+    f1[1] = 0x02;
+    DSP_CHECK_EQ_INT(DSP_CODEC_ERR_SIZE, dsp_codec_decode_schedule_set(f1, sizeof f1, TZ, &sb));
+    b[1] = 0x01;
+    DSP_CHECK_EQ_INT(DSP_CODEC_ERR_SIZE, dsp_codec_decode_schedule_set(b, 8 + 132 + 65, TZ, &sb));
 }
 
 static void test_codec_boundaries(void)
@@ -795,6 +827,9 @@ static void test_codec_boundaries(void)
         s.interval = DSP_REC_INTERVAL_MAX;
         s.has_end_date = true;
         s.end_date = D(2099, 12, 31);
+        memset(s.name, 'n', DSP_SCHEDULE_NAME_MAX_BYTES); /* 32-byte name */
+        s.name[DSP_SCHEDULE_NAME_MAX_BYTES] = '\0';
+        s.not_before = DSP_UTC_MAX;
         max.schedules[i] = s;
         memset(max.tombstones[i], 'A' + i, DSP_SCHEDULE_ID_MAX_LEN);
         max.tombstones[i][DSP_SCHEDULE_ID_MAX_LEN] = '\0';
@@ -802,7 +837,7 @@ static void test_codec_boundaries(void)
     max.count = DSP_SCHEDULE_CAPACITY;
     max.tombstone_count = DSP_TOMBSTONE_CAPACITY;
     static uint8_t buf[DSP_SCHEDULE_SET_MAX_BYTES + 8];
-    DSP_CHECK_EQ_INT(2504, DSP_SCHEDULE_SET_MAX_BYTES);
+    DSP_CHECK_EQ_INT(3160, DSP_SCHEDULE_SET_MAX_BYTES); /* format 2 (2,504 B in format 1) */
     DSP_CHECK_EQ_INT(DSP_SCHEDULE_SET_MAX_BYTES, dsp_codec_encode_schedule_set(&max, TZ, buf, sizeof buf));
     DSP_CHECK_EQ_INT(0, dsp_codec_encode_schedule_set(&max, TZ, buf, DSP_SCHEDULE_SET_MAX_BYTES - 1));
     static dsp_schedule_set_t back;
@@ -821,17 +856,31 @@ static void test_codec_boundaries(void)
     memset(&one, 0, sizeof one);
     one.count = 1;
     one.schedules[0] = sched("pad", 8);
+    strcpy(one.schedules[0].name, "ab");
     size_t n = dsp_codec_encode_schedule_set(&one, TZ, buf, sizeof buf);
-    DSP_CHECK_EQ_INT(8 + 91, n);
+    DSP_CHECK_EQ_INT(8 + 132, n);
     const size_t e = DSP_SCHEDULE_SET_HEADER_BYTES;
-    const size_t mutate[] = {e + 10 /* ID padding */, e + 69 /* enabled=2 */, e + 86 /* has_end=2 */,
-                             e + 88 /* end bytes w/o flag */, e + 80 /* kind */};
+    /* {offset, value}: ID padding, enabled=2, has_end=2, end bytes without flag, kind,
+     * name length 33, name padding, NUL inside the name, invalid UTF-8 lead byte, control
+     * character, floor below DSP_UTC_MIN (non-zero), floor negative. */
+    const struct {
+        size_t off;
+        uint8_t v;
+    } mutate[] = {{e + 10, 2},   {e + 69, 2},   {e + 86, 2},    {e + 88, 2},
+                  {e + 80, 7},   {e + 91, 33},  {e + 100, 'x'}, {e + 93, 0x00},
+                  {e + 93, 0xFF}, {e + 92, 0x1F}, {e + 124, 1},  {e + 131, 0x80}};
     for (size_t i = 0; i < sizeof mutate / sizeof mutate[0]; i++) {
-        uint8_t copy[8 + 91];
+        uint8_t copy[8 + 132];
         memcpy(copy, buf, n);
-        copy[mutate[i]] = (uint8_t)(i == 4 ? 7 : 2);
+        copy[mutate[i].off] = mutate[i].v;
         DSP_CHECK_EQ_INT(DSP_CODEC_ERR_FIELD, dsp_codec_decode_schedule_set(copy, n, TZ, &back));
     }
+    /* The encoder refuses a name it could not store faithfully. */
+    dsp_schedule_set_t badname = one;
+    memset(badname.schedules[0].name, 'n', sizeof badname.schedules[0].name); /* no NUL */
+    DSP_CHECK_EQ_INT(0, dsp_codec_encode_schedule_set(&badname, TZ, buf, sizeof buf));
+    strcpy(badname.schedules[0].name, "a\x7F");
+    DSP_CHECK_EQ_INT(0, dsp_codec_encode_schedule_set(&badname, TZ, buf, sizeof buf));
     /* History record with extreme valid values round-trips; invalid ones are refused. */
     dsp_history_record_t rec;
     memset(&rec, 0, sizeof rec);
@@ -1186,6 +1235,57 @@ static void test_time_record_codec_and_storage(void)
     DSP_CHECK_EQ_INT(DSP_STORAGE_ERR_ARG, dsp_storage_save_time(&st, NULL));
 }
 
+/* ---- M1.10b.1: schedule set format 1 -> 2 (no layout change) ------------------------- */
+
+static void test_schedule_set_format_upgrade_is_lazy_and_atomic(void)
+{
+    for (int durable = 0; durable < 2; durable++) {
+        fresh(durable != 0);
+        /* A layout v4 device whose "sched" record is still format 1 (M1.3 .. M1.10a). */
+        dsp_schedule_t a = sched("legacy-a", 8);
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_schedule_repo_create(&repo, &a, &hist));
+        const fake_kv_entry_t *e = fake_kv_find(&kv, "sched");
+        DSP_CHECK(e != NULL && e->len == 8 + 132);
+        uint8_t f1[8 + 91];
+        memcpy(f1, e->value, sizeof f1);
+        f1[1] = 1;
+        fake_kv_put_raw(&kv, "sched", f1, sizeof f1);
+        int sets = kv.sets;
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
+        DSP_CHECK_EQ_INT(sets, kv.sets); /* opening never rewrites (no bulk migration) */
+        DSP_CHECK(!st.migrated_now);
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_schedule_repo_load(&repo, &st));
+        DSP_CHECK_EQ_STR("", dsp_schedule_repo_find(&repo, "legacy-a")->name);
+        /* The upgrade write fails (power cut before commit or a write error): format 1 stays. */
+        dsp_schedule_t b = sched("new-b", 9);
+        strcpy(b.name, "Evening");
+        kv.fail_sets = true;
+        DSP_CHECK(dsp_schedule_repo_create(&repo, &b, &hist) != DSP_STORAGE_OK);
+        fake_kv_clear_faults(&kv);
+        fake_kv_power_cycle(&kv);
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
+        e = fake_kv_find(&kv, "sched");
+        DSP_CHECK(e != NULL && e->value[1] == 1 && e->len == sizeof f1);
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_schedule_repo_load(&repo, &st));
+        DSP_CHECK_EQ_INT(1, dsp_schedule_repo_set(&repo)->count);
+        /* The next successful write upgrades the whole record. */
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_schedule_repo_create(&repo, &b, &hist));
+        fake_kv_power_cycle(&kv);
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
+        e = fake_kv_find(&kv, "sched");
+        DSP_CHECK(e != NULL && e->value[1] == DSP_SCHEDULE_SET_FORMAT_V2 && e->len == 8 + 2 * 132);
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_schedule_repo_load(&repo, &st));
+        DSP_CHECK_EQ_STR("", dsp_schedule_repo_find(&repo, "legacy-a")->name);
+        DSP_CHECK_EQ_STR("Evening", dsp_schedule_repo_find(&repo, "new-b")->name);
+        DSP_CHECK_EQ_INT(2, dsp_schedule_repo_set(&repo)->revision);
+        /* The layout marker is unchanged: still layout v4. */
+        e = fake_kv_find(&kv, "layout");
+        dsp_layout_t lay;
+        DSP_CHECK(e != NULL && dsp_codec_decode_layout(e->value, e->len, &lay) == DSP_CODEC_OK);
+        DSP_CHECK_EQ_INT(4, lay.layout_version);
+    }
+}
+
 int main(void)
 {
     DSP_RUN(test_first_boot_provisions_every_key);
@@ -1202,6 +1302,7 @@ int main(void)
     DSP_RUN(test_storage_failures);
     DSP_RUN(test_codec_golden_bytes);
     DSP_RUN(test_codec_boundaries);
+    DSP_RUN(test_schedule_set_format_upgrade_is_lazy_and_atomic);
     DSP_RUN(test_randomized_atomicity);
     DSP_RUN(test_layout_migrations_to_v4);
     DSP_RUN(test_layout_v3_to_v4_dosing_record);

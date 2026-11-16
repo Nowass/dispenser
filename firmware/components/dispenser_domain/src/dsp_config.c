@@ -89,3 +89,63 @@ bool dsp_config_equal(const dsp_config_t *a, const dsp_config_t *b)
            a->max_dose_ul == b->max_dose_ul && a->max_daily_ul == b->max_daily_ul &&
            a->max_runtime_ms == b->max_runtime_ms && a->min_interval_s == b->min_interval_s;
 }
+
+uint32_t dsp_config_apply_update(const dsp_config_t *cur, uint16_t field_mask,
+                                 const dsp_config_t *values, uint32_t hw_max_runtime_ms,
+                                 dsp_config_t *next)
+{
+    if (cur == NULL || values == NULL || next == NULL) {
+        return DSP_CONFIG_E_FIELD_MASK;
+    }
+    uint32_t e = 0;
+    if (field_mask == 0 || (field_mask & ~DSP_CONFIG_F_ALL) != 0) {
+        e |= DSP_CONFIG_E_FIELD_MASK;
+    }
+    dsp_config_t n = *cur;
+    n.revision = cur->revision + 1u; /* caller refuses UINT32_MAX */
+    if (field_mask & DSP_CONFIG_F_RESERVOIR_CAPACITY) {
+        n.reservoir_capacity_ul = values->reservoir_capacity_ul;
+    }
+    if (field_mask & DSP_CONFIG_F_LOW_STOCK) {
+        n.low_stock_percent = values->low_stock_percent;
+    }
+    if (field_mask & DSP_CONFIG_F_SYNC_INTERVAL) {
+        n.time_sync_interval_h = values->time_sync_interval_h;
+    }
+    if (field_mask & DSP_CONFIG_F_NOTIFY_MASK) {
+        n.notify_mask = values->notify_mask;
+    }
+    if (field_mask & DSP_CONFIG_F_PUMP_FLOW) {
+        n.pump_flow_ul_per_s = values->pump_flow_ul_per_s;
+    }
+    if (field_mask & DSP_CONFIG_F_CALIBRATED_AT) {
+        n.calibrated_at = values->calibrated_at;
+        if (n.calibrated_at != 0 && n.calibrated_at < DSP_CONFIG_CALIBRATED_AT_MIN) {
+            e |= DSP_CONFIG_E_CALIBRATED_AT;
+        }
+    }
+    if (field_mask & DSP_CONFIG_F_MAX_DOSE) {
+        n.max_dose_ul = values->max_dose_ul;
+    }
+    if (field_mask & DSP_CONFIG_F_MAX_DAILY) {
+        n.max_daily_ul = values->max_daily_ul;
+    }
+    if (field_mask & DSP_CONFIG_F_MAX_RUNTIME) {
+        n.max_runtime_ms = values->max_runtime_ms;
+        if (hw_max_runtime_ms != 0 && n.max_runtime_ms > hw_max_runtime_ms) {
+            e |= DSP_CONFIG_E_RUNTIME_HW;
+        }
+    }
+    if (field_mask & DSP_CONFIG_F_MIN_INTERVAL) {
+        n.min_interval_s = values->min_interval_s;
+    }
+    if ((field_mask & (DSP_CONFIG_F_MAX_DOSE | DSP_CONFIG_F_MAX_DAILY)) != 0 &&
+        n.max_dose_ul != 0 && n.max_daily_ul != 0 && n.max_daily_ul < n.max_dose_ul) {
+        e |= DSP_CONFIG_E_LIMITS;
+    }
+    e |= dsp_config_validate(&n);
+    if (e == 0) {
+        *next = n;
+    }
+    return e;
+}

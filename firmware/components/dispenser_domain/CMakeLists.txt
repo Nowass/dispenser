@@ -28,6 +28,7 @@ set(DSP_DOMAIN_SRCS
     "src/dsp_reservoir.c"
     "src/dsp_schedule_repo.c"
     "src/dsp_storage.c"
+    "src/dsp_text.c"
     "src/dsp_time.c"
     "src/dsp_time_service.c"
     "src/dsp_timekeeping.c"

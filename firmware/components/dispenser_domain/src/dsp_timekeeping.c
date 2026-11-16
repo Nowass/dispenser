@@ -145,6 +145,28 @@ static dsp_sync_decision_t fail(dsp_timekeeper_t *tk, dsp_sync_status_t status, 
     return d;
 }
 
+bool dsp_timekeeper_set_interval(dsp_timekeeper_t *tk, uint16_t interval_h)
+{
+    if (tk == NULL || !tk->initialized || interval_h < 24 || interval_h > 48) {
+        return false;
+    }
+    tk->interval_s = (int64_t)interval_h * 3600;
+    if (trusted(tk) && tk->retained.next_attempt > tk->meta.last_sync_utc + tk->interval_s) {
+        tk->retained.next_attempt = tk->meta.last_sync_utc + tk->interval_s;
+    }
+    return true;
+}
+
+/* Highest trusted time before a sample (as dsp_timekeeper_on_sync computes it). */
+static dsp_utc_t high_before(const dsp_timekeeper_t *tk, dsp_utc_t clock_utc)
+{
+    dsp_utc_t prev_high = tk->meta.high_water_utc;
+    if (trusted(tk) && plausible(clock_utc) && clock_utc > prev_high) {
+        prev_high = clock_utc;
+    }
+    return prev_high;
+}
+
 dsp_sync_decision_t dsp_timekeeper_on_sync(dsp_timekeeper_t *tk, dsp_sync_status_t status,
                                            const dsp_time_sample_t *sample, dsp_utc_t now)
 {
@@ -160,10 +182,7 @@ dsp_sync_decision_t dsp_timekeeper_on_sync(dsp_timekeeper_t *tk, dsp_sync_status
     }
     dsp_utc_t source = sample->source_utc;
     bool was_trusted = trusted(tk) && plausible(sample->clock_utc);
-    dsp_utc_t prev_high = tk->meta.high_water_utc;
-    if (was_trusted && sample->clock_utc > prev_high) {
-        prev_high = sample->clock_utc;
-    }
+    dsp_utc_t prev_high = high_before(tk, sample->clock_utc);
     d.status = DSP_SYNC_OK;
     d.offset_s = was_trusted ? source - sample->clock_utc : 0;
     if (prev_high != 0 && source < prev_high - DSP_TIME_ROLLBACK_LIMIT_S) {
@@ -206,4 +225,41 @@ dsp_sync_decision_t dsp_timekeeper_on_sync(dsp_timekeeper_t *tk, dsp_sync_status
     d.apply = true;
     d.set_to = source;
     return d;
+}
+
+dsp_phone_time_decision_t dsp_timekeeper_on_phone_time(dsp_timekeeper_t *tk, int64_t phone_utc_ms,
+                                                       uint32_t uncertainty_ms, dsp_utc_t clock_utc,
+                                                       dsp_sync_decision_t *out)
+{
+    dsp_sync_decision_t none = {false, 0, DSP_CORRECTION_NONE, 0, DSP_SYNC_ERR_SOURCE};
+    if (out != NULL) {
+        *out = none;
+    }
+    if (tk == NULL || !tk->initialized || out == NULL) {
+        return DSP_PHONE_TIME_REJECTED_IMPLAUSIBLE;
+    }
+    if (uncertainty_ms > DSP_PHONE_TIME_MAX_UNCERTAINTY_MS) {
+        return DSP_PHONE_TIME_REJECTED_UNCERTAIN;
+    }
+    /* Range check in milliseconds first: no overflow for any int64 input. */
+    if (phone_utc_ms < (int64_t)DSP_TIME_PLAUSIBLE_MIN * 1000 ||
+        phone_utc_ms > (int64_t)DSP_UTC_MAX * 1000) {
+        return DSP_PHONE_TIME_REJECTED_IMPLAUSIBLE;
+    }
+    dsp_utc_t source = phone_utc_ms / 1000; /* positive: truncation = floor */
+    if (tk->meta.hold_until_utc != 0) {
+        return DSP_PHONE_TIME_HOLD;
+    }
+    if (tk->trust == DSP_TRUST_SYNCED) {
+        return DSP_PHONE_TIME_IGNORED_NTP_PREFERRED;
+    }
+    dsp_utc_t prev_high = high_before(tk, clock_utc);
+    if (prev_high != 0 && source < prev_high - DSP_TIME_ROLLBACK_LIMIT_S) {
+        return DSP_PHONE_TIME_HOLD; /* would need a rollback hold: refused, not applied */
+    }
+    dsp_time_retained_t keep = tk->retained; /* NTP preferred: its retry schedule stays */
+    dsp_time_sample_t sample = {source, clock_utc};
+    *out = dsp_timekeeper_on_sync(tk, DSP_SYNC_OK, &sample, clock_utc);
+    tk->retained = keep;
+    return DSP_PHONE_TIME_ACCEPTED;
 }

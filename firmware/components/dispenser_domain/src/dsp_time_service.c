@@ -55,32 +55,16 @@ dsp_time_sync_report_t dsp_time_service_run(dsp_time_service_t *svc, bool force,
     r.decision = dsp_timekeeper_on_sync(svc->tk, ss, ss == DSP_SYNC_OK ? &sample : NULL,
                                         svc->clock->now(svc->clock->ctx));
     if (r.decision.apply) {
-        /* Durable before effective: the new metadata (last sync, high water, hold, dosing
-         * floor) must be confirmed in storage BEFORE the clock is stepped and the
-         * continuity marker refreshed. Otherwise a restart could re-synchronize from stale
-         * metadata and lose the floor or the hold. */
-        if (svc->storage != NULL) {
-            r.persist = dsp_storage_save_time(svc->storage, &svc->tk->meta);
-            if (r.persist != DSP_STORAGE_OK) {
-                *svc->tk = before; /* nothing applied: clock, trust and metadata unchanged */
-                r.decision = dsp_timekeeper_on_sync(svc->tk, DSP_SYNC_ERR_PERSIST, NULL,
-                                                    svc->clock->now(svc->clock->ctx));
-                if (!keep_wifi) {
-                    dsp_wifi_shutdown(svc->wifi);
-                }
-                return r;
+        r.persist = dsp_time_apply(svc->tk, &before, svc->storage, svc->clock, &r.decision,
+                                   &r.clock_set);
+        if (r.persist != DSP_STORAGE_OK) {
+            /* Nothing applied (clock, trust and metadata unchanged): retry scheduled. */
+            r.decision = dsp_timekeeper_on_sync(svc->tk, DSP_SYNC_ERR_PERSIST, NULL,
+                                                svc->clock->now(svc->clock->ctx));
+            if (!keep_wifi) {
+                dsp_wifi_shutdown(svc->wifi);
             }
-            svc->tk->meta_dirty = false;
-        }
-        r.clock_set = svc->clock->set(svc->clock->ctx, r.decision.set_to);
-        if (r.clock_set) {
-            svc->clock->mark_synced(svc->clock->ctx, svc->tk->meta.last_sync_utc);
-        } else {
-            /* The system clock still holds the old time: do not trust it for dosing. The
-             * continuity marker is not refreshed either, so the next wake starts UNKNOWN and
-             * synchronizes again; the already persisted metadata (incl. the floor) applies. */
-            svc->tk->trust = DSP_TRUST_UNKNOWN;
-            svc->tk->reason = DSP_UNTRUSTED_TIME_BASE_LOST;
+            return r;
         }
     }
     persist(svc, &r);
@@ -88,4 +72,43 @@ dsp_time_sync_report_t dsp_time_service_run(dsp_time_service_t *svc, bool force,
         dsp_wifi_shutdown(svc->wifi);
     }
     return r;
+}
+
+dsp_storage_status_t dsp_time_apply(dsp_timekeeper_t *tk, const dsp_timekeeper_t *before,
+                                    dsp_storage_t *storage, const dsp_clock_port_t *clock,
+                                    const dsp_sync_decision_t *decision, bool *clock_set)
+{
+    if (clock_set != NULL) {
+        *clock_set = false;
+    }
+    if (tk == NULL || before == NULL || clock == NULL || clock->set == NULL ||
+        clock->mark_synced == NULL || decision == NULL || !decision->apply) {
+        return DSP_STORAGE_ERR_ARG;
+    }
+    /* Durable before effective: the new metadata (last sync, high water, hold, dosing floor)
+     * must be confirmed in storage BEFORE the clock is stepped and the continuity marker
+     * refreshed. Otherwise a restart could re-synchronize from stale metadata and lose the
+     * floor or the hold. */
+    if (storage != NULL) {
+        dsp_storage_status_t ps = dsp_storage_save_time(storage, &tk->meta);
+        if (ps != DSP_STORAGE_OK) {
+            *tk = *before;
+            return ps;
+        }
+        tk->meta_dirty = false;
+    }
+    bool set = clock->set(clock->ctx, decision->set_to);
+    if (set) {
+        clock->mark_synced(clock->ctx, tk->meta.last_sync_utc);
+    } else {
+        /* The system clock still holds the old time: do not trust it for dosing. The
+         * continuity marker is not refreshed either, so the next wake starts UNKNOWN and
+         * synchronizes again; the already persisted metadata (incl. the floor) applies. */
+        tk->trust = DSP_TRUST_UNKNOWN;
+        tk->reason = DSP_UNTRUSTED_TIME_BASE_LOST;
+    }
+    if (clock_set != NULL) {
+        *clock_set = set;
+    }
+    return DSP_STORAGE_OK;
 }

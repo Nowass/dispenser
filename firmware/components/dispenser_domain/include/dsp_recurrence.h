@@ -44,6 +44,8 @@ extern "C" {
 #define DSP_SCHEDULE_ID_MAX_LEN 64
 /* "<id>@YYYY-MM-DD" plus NUL. */
 #define DSP_OCCURRENCE_ID_BUF_LEN (DSP_SCHEDULE_ID_MAX_LEN + 1 + 10 + 1)
+/* Schedule display name: at most 32 bytes of UTF-8 (approved D9). */
+#define DSP_SCHEDULE_NAME_MAX_BYTES 32
 /* Upper bound of `interval` (Kotlin Int.MAX_VALUE, so every Android schedule fits). */
 #define DSP_REC_INTERVAL_MAX 2147483647u
 
@@ -76,6 +78,15 @@ typedef struct {
     uint8_t weekday_mask;  /* WEEKLY only */
     bool has_end_date;
     dsp_date_t end_date;   /* inclusive; valid only if has_end_date */
+    /* M1.10b.1 (schedule set format 2). Both default to zero = format 1 behavior. */
+    char name[DSP_SCHEDULE_NAME_MAX_BYTES + 1]; /* display name: UTF-8, 0..32 bytes, no
+                                                   control characters, NUL-terminated,
+                                                   stored as sent (not normalized) */
+    dsp_utc_t not_before; /* device-maintained edit floor: occurrences scheduled before it
+                             are never executed automatically (they are MISSED). Raised to
+                             the trusted edit time + 1 s by create, by edits of timing
+                             fields and by re-enabling; never lowered; never sent over BLE.
+                             0 = none */
 } dsp_schedule_t;
 
 /* Validation result: bitwise OR of all detected problems, 0 = valid. */
@@ -98,6 +109,9 @@ enum {
     DSP_SCHED_E_END_BEFORE_START = 1u << 13,   /* Kotlin END_BEFORE_START */
     DSP_SCHED_E_ONCE_FORM = 1u << 14,          /* ONCE with interval != 1 or an end date */
     DSP_SCHED_E_TIME_NONEXISTENT = 1u << 15,   /* ONCE in a DST gap (Kotlin TIME_NONEXISTENT) */
+    DSP_SCHED_E_NAME = 1u << 16,               /* name: > 32 bytes, no NUL, malformed UTF-8 or
+                                                  a control character (M1.10b.1) */
+    DSP_SCHED_E_NOT_BEFORE = 1u << 17,         /* edit floor neither 0 nor a valid instant */
 };
 
 /* True for 1..DSP_SCHEDULE_ID_MAX_LEN characters of [A-Za-z0-9._-] followed by NUL

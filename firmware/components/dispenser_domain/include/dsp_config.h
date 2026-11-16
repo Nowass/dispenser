@@ -57,6 +57,37 @@ enum {
     DSP_CONFIG_E_CALIBRATED_AT = 1u << 4, /* calibration time neither 0 nor a valid instant */
 };
 
+/* M1.10b.1: additional problems reported only by dsp_config_apply_update (stored records
+ * are never refused for them, so existing data stays readable). */
+enum {
+    DSP_CONFIG_E_FIELD_MASK = 1u << 5, /* no field selected, or bits outside DSP_CONFIG_F_ALL */
+    DSP_CONFIG_E_LIMITS = 1u << 6,     /* max_daily_ul below max_dose_ul (both set) */
+    DSP_CONFIG_E_RUNTIME_HW = 1u << 7, /* max_runtime_ms above the known hardware cutoff */
+};
+
+/* Updatable fields (bit numbers = BLE protocol v1 SET_CONFIG field_mask, section 7.4).
+ * revision, reservoir_remaining_ul (REFILL only) and the hardware cutoff are read-only. */
+enum {
+    DSP_CONFIG_F_RESERVOIR_CAPACITY = 1u << 0,
+    DSP_CONFIG_F_LOW_STOCK = 1u << 1,
+    DSP_CONFIG_F_SYNC_INTERVAL = 1u << 2,
+    DSP_CONFIG_F_NOTIFY_MASK = 1u << 3,
+    DSP_CONFIG_F_PUMP_FLOW = 1u << 4,
+    DSP_CONFIG_F_CALIBRATED_AT = 1u << 5,
+    DSP_CONFIG_F_MAX_DOSE = 1u << 6,
+    DSP_CONFIG_F_MAX_DAILY = 1u << 7,
+    DSP_CONFIG_F_MAX_RUNTIME = 1u << 8,
+    DSP_CONFIG_F_MIN_INTERVAL = 1u << 9,
+};
+#define DSP_CONFIG_F_ALL 0x03FFu
+/* Calibration and safety limits: changeable only while SERVICE_REQUIRED (D12). */
+#define DSP_CONFIG_F_SERVICE_ONLY                                                            \
+    (DSP_CONFIG_F_PUMP_FLOW | DSP_CONFIG_F_CALIBRATED_AT | DSP_CONFIG_F_MAX_DOSE |            \
+     DSP_CONFIG_F_MAX_DAILY | DSP_CONFIG_F_MAX_RUNTIME | DSP_CONFIG_F_MIN_INTERVAL)
+/* Earliest accepted calibration time in an update (= the timekeeper's plausibility floor,
+ * 2025-01-01T00:00:00Z). */
+#define DSP_CONFIG_CALIBRATED_AT_MIN ((int64_t)1735689600)
+
 /* Pump calibration/limit problems (bitmask, 0 = the pump may be used). */
 enum {
     DSP_PUMPCFG_E_FLOW = 1u << 0,         /* no calibrated flow */
@@ -80,6 +111,21 @@ void dsp_config_defaults(dsp_config_t *cfg);
 uint32_t dsp_config_validate(const dsp_config_t *cfg);
 
 bool dsp_config_equal(const dsp_config_t *a, const dsp_config_t *b);
+
+/*
+ * Revisioned partial update (M1.10b.1), pure: *next = *cur with the fields selected by
+ * field_mask taken from *values, revision + 1; every other field (including the read-only
+ * ones, whatever *values holds) is preserved. Returns DSP_CONFIG_E_* (0 = valid):
+ * dsp_config_validate on the result, plus FIELD_MASK, CALIBRATED_AT (a selected calibration
+ * time must be 0 or >= DSP_CONFIG_CALIBRATED_AT_MIN), LIMITS (checked when max_dose or
+ * max_daily is selected) and RUNTIME_HW (when max_runtime is selected and
+ * hw_max_runtime_ms != 0). The caller checks the expected revision and refuses
+ * cur->revision == UINT32_MAX (no next revision). State rules (readiness, refill) belong
+ * to the Application Service.
+ */
+uint32_t dsp_config_apply_update(const dsp_config_t *cur, uint16_t field_mask,
+                                 const dsp_config_t *values, uint32_t hw_max_runtime_ms,
+                                 dsp_config_t *next);
 
 #ifdef __cplusplus
 }

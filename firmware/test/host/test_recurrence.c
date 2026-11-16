@@ -514,8 +514,67 @@ static void test_time_api_range_boundaries(void)
     DSP_CHECK_EQ_INT(1, a);
 }
 
+/* ---- M1.10b.1: schedule names ------------------------------------------------------- */
+
+static void test_schedule_name_validation(void)
+{
+    dsp_schedule_t s = daily("n", D(2026, 11, 2), 8, 0);
+    struct {
+        const char *name;
+        bool ok;
+    } cases[] = {
+        {"", true},
+        {"Morning dose", true},
+        {"\xC5\x98\xC3\xA1no \xF0\x9F\x92\x8A", true}, /* "Řáno 💊" */
+        {"\xE2\x82\xAC", true},                         /* U+20AC */
+        {"\xF4\x8F\xBF\xBF", true},                     /* U+10FFFF */
+        {"\xC0\xAF", false},                             /* overlong */
+        {"\xE0\x80\xAF", false},                         /* overlong */
+        {"\xED\xBF\xBF", false},                         /* surrogate */
+        {"\xF4\x90\x80\x80", false},                     /* above U+10FFFF */
+        {"\xF5\x80\x80\x80", false},
+        {"\x80", false},                                 /* lone continuation */
+        {"\xE2\x82", false},                             /* truncated */
+        {"tab\there", false},                            /* control character */
+        {"del\x7F", false},
+        {"\x1F", false},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        memset(s.name, 0, sizeof s.name);
+        strcpy(s.name, cases[i].name);
+        DSP_CHECK_EQ_INT(cases[i].ok ? 0 : DSP_SCHED_E_NAME, dsp_schedule_validate(&s, TZ));
+    }
+    memset(s.name, 'a', DSP_SCHEDULE_NAME_MAX_BYTES);
+    s.name[DSP_SCHEDULE_NAME_MAX_BYTES] = '\0';
+    DSP_CHECK_EQ_INT(0, dsp_schedule_validate(&s, TZ)); /* exactly 32 bytes */
+    s.name[DSP_SCHEDULE_NAME_MAX_BYTES] = 'a';         /* no terminator within 33 bytes */
+    DSP_CHECK_EQ_INT(DSP_SCHED_E_NAME, dsp_schedule_validate(&s, TZ));
+    /* A 3-byte character that would end at byte 33 does not fit. */
+    memset(s.name, 'a', DSP_SCHEDULE_NAME_MAX_BYTES - 2);
+    memcpy(s.name + DSP_SCHEDULE_NAME_MAX_BYTES - 2, "\xE2\x82", 2);
+    s.name[DSP_SCHEDULE_NAME_MAX_BYTES] = '\0';
+    DSP_CHECK_EQ_INT(DSP_SCHED_E_NAME, dsp_schedule_validate(&s, TZ)); /* truncated */
+    memset(s.name, 0, sizeof s.name);
+    /* Edit floor: 0 or a valid instant. */
+    s.not_before = DSP_UTC_MIN;
+    DSP_CHECK_EQ_INT(0, dsp_schedule_validate(&s, TZ));
+    s.not_before = DSP_UTC_MIN - 1;
+    DSP_CHECK_EQ_INT(DSP_SCHED_E_NOT_BEFORE, dsp_schedule_validate(&s, TZ));
+    s.not_before = DSP_UTC_MAX + 1;
+    DSP_CHECK_EQ_INT(DSP_SCHED_E_NOT_BEFORE, dsp_schedule_validate(&s, TZ));
+    /* Names do not affect occurrences or identity. */
+    dsp_schedule_t a = daily("n", D(2026, 11, 2), 8, 0);
+    dsp_schedule_t b = a;
+    strcpy(b.name, "x");
+    dsp_occurrence_t oa, ob;
+    DSP_CHECK_EQ_INT(DSP_REC_OK, dsp_rec_next(&a, TZ, T_2026_11_14_0700Z, &oa));
+    DSP_CHECK_EQ_INT(DSP_REC_OK, dsp_rec_next(&b, TZ, T_2026_11_14_0700Z, &ob));
+    DSP_CHECK_EQ_INT(oa.at, ob.at);
+}
+
 int main(void)
 {
+    DSP_RUN(test_schedule_name_validation);
     DSP_RUN(test_dates_match_naive_calendar_walk);
     DSP_RUN(test_invalid_dates_rejected);
     DSP_RUN(test_timezone_validation);

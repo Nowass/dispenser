@@ -51,6 +51,18 @@ typedef struct {
  */
 dsp_time_sync_report_t dsp_time_service_run(dsp_time_service_t *svc, bool force, bool keep_wifi);
 
+/*
+ * Applies an accepted synchronization decision (NTP or phone time, M1.10b.1): durable
+ * before effective. The timekeeper's new metadata is confirmed in storage first (storage
+ * NULL: not persisted, diagnostics only); if that fails *tk is restored to *before and
+ * nothing is applied. Then the clock is stepped and the continuity marker refreshed; if the
+ * clock cannot be set, trust drops to UNKNOWN (the persisted floor still applies).
+ * Returns the persist status (DSP_STORAGE_OK when nothing failed); *clock_set (optional).
+ */
+dsp_storage_status_t dsp_time_apply(dsp_timekeeper_t *tk, const dsp_timekeeper_t *before,
+                                    dsp_storage_t *storage, const dsp_clock_port_t *clock,
+                                    const dsp_sync_decision_t *decision, bool *clock_set);
+
 #ifdef __cplusplus
 }
 #endif

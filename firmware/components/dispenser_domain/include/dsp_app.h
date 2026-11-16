@@ -209,6 +209,9 @@ typedef struct {
     uint8_t ble_end;            /* dsp_app_ble_end_t */
     size_t commands;
     size_t responses;
+    size_t ops;                 /* M1.10b.1 operations called (any result) */
+    size_t ops_ok;
+    bool op_storage_fault;      /* an operation's write failed (dosing ended for the wake) */
     bool synced_ok;             /* SYNC left nothing dirty */
     dsp_wake_plan_t plan;
     uint32_t shutdown_attempts;
@@ -220,8 +223,158 @@ typedef struct {
     uint8_t trace[DSP_APP_TRACE_MAX]; /* dsp_app_stage_t in execution order */
 } dsp_app_report_t;
 
-/* Caller-owned, statically allocated application state. Treat as opaque. */
+typedef struct dsp_app dsp_app_t;
+
+/* ---- M1.10b.1: configuration, schedules and phone time ------------------------------------
+ *
+ * Operations for the future BLE dispatcher (M1.10c/d), which will decode a frame with
+ * dsp_bleproto, authorize it in the security layer and call exactly one of these. They run
+ * in the APPLICATION TASK only, inside an active service session (between the BLE port's
+ * start and stop, i.e. from the dispatcher that handle_command will host); outside a session
+ * they return DSP_OP_BUSY. They reuse the existing modules (dsp_config, dsp_schedule_repo,
+ * dsp_timekeeper, dsp_storage) and never drive the pump.
+ *
+ * Authorization is an explicit input produced by the security layer (M1.10c). Until that
+ * layer exists nothing produces an owner authorization, so every operation fails closed:
+ * a NULL authorization or any role other than OWNER returns DSP_OP_FORBIDDEN before any
+ * storage access.
+ *
+ * A storage WRITE failure (old or new value durable) answers DSP_OP_STORAGE and ends dosing
+ * for the rest of the wake (as a Dosing Service storage failure does); the schedule
+ * repository is re-read at once so that planning keeps using the durable set.
+ *
+ * Results map 1:1 to BLE protocol v1 error codes (docs/BLE_PROTOCOL.md 5.1); detail and aux
+ * travel as the error body's `detail` and `aux`. */
+
+typedef enum {
+    DSP_APP_ROLE_NONE = 0,
+    DSP_APP_ROLE_OWNER = 1,
+} dsp_app_role_t;
+
+#define DSP_APP_PHONE_SLOTS 4
+
 typedef struct {
+    uint8_t role; /* dsp_app_role_t, set by the security layer after a verified session */
+    uint8_t slot; /* enrolled phone slot, 0..DSP_APP_PHONE_SLOTS - 1 */
+} dsp_app_auth_t;
+
+typedef enum {
+    DSP_OP_OK = 0,
+    DSP_OP_FORBIDDEN, /* no owner authorization (fail closed)                 wire FORBIDDEN */
+    DSP_OP_BUSY,      /* not inside a service session                         wire BUSY */
+    DSP_OP_REFUSED,   /* state precondition: detail DSP_OP_R_*, aux the refused
+                         field bits                                           wire REFUSED */
+    DSP_OP_LIMIT,     /* detail DSP_DOSING_L_DOSE, aux max_dose_ul             wire LIMIT */
+    DSP_OP_CAPACITY,  /* schedule capacity reached, aux = 16                   wire LIMIT */
+    DSP_OP_INVALID,   /* detail = DSP_CONFIG_E_* / DSP_SCHED_E_* bits (0 = argument)
+                                                                              wire INVALID */
+    DSP_OP_CONFLICT,  /* stale revision: detail = current revision            wire CONFLICT */
+    DSP_OP_NOT_FOUND, /*                                                      wire NOT_FOUND */
+    DSP_OP_STORAGE,   /* a write failed; durable state is the old or the new value
+                                                                              wire STORAGE */
+    DSP_OP_DEGRADED,  /* storage not loaded or unreadable                      wire DEGRADED */
+    DSP_OP_DUPLICATE, /* schedule ID active (aux 0) or deleted/executed before (aux 1)
+                                                                              wire DUPLICATE */
+} dsp_app_op_status_t;
+
+enum {
+    DSP_OP_R_READY = 1,          /* field changeable only while SERVICE_REQUIRED */
+    DSP_OP_R_REFILL_PENDING = 2, /* an interrupted refill must be completed first */
+    DSP_OP_R_CLOCK = 3,          /* time not trusted: create / timing edit / re-enable need a
+                                    trusted clock for the edit floor (send SET_TIME first) */
+};
+
+typedef struct {
+    dsp_app_op_status_t status;
+    uint32_t detail;
+    uint32_t aux;
+} dsp_app_op_result_t;
+
+/* Configuration (M1). *out: the stored record; *hw_max_runtime_ms (optional): the
+ * platform's hardware cutoff (read-only, as in the protocol's Config record). */
+dsp_app_op_result_t dsp_app_get_config(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                       dsp_config_t *out, uint32_t *hw_max_runtime_ms);
+
+/* Revisioned partial update: expected_revision must equal the stored revision (else
+ * CONFLICT with the current one; note that every dose also advances it, because the
+ * reservoir estimate lives in this record). Only the fields in field_mask
+ * (DSP_CONFIG_F_*) change; all others, including the read-only ones, are preserved.
+ * Calibration and limits (DSP_CONFIG_F_SERVICE_ONLY) only while SERVICE_REQUIRED; while
+ * READY the reservoir capacity may change but neither from nor to 0. Readiness is never
+ * changed (a configuration change never enables dosing). Strictly validated
+ * (dsp_config_apply_update). One atomic record write with read-back. *new_revision
+ * (optional) on success. */
+dsp_app_op_result_t dsp_app_set_config(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                       uint32_t expected_revision, uint16_t field_mask,
+                                       const dsp_config_t *values, uint32_t *new_revision);
+
+/* Schedules (M2). Pages of DSP_APP_SCHEDULE_PAGE entries in stored order. */
+#define DSP_APP_SCHEDULE_PAGE 4
+
+typedef struct {
+    uint32_t set_revision;
+    uint8_t total; /* schedules stored */
+    uint8_t page;
+    uint8_t n;     /* entries on this page */
+    struct {
+        char id[DSP_SCHEDULE_ID_MAX_LEN + 1];
+        uint32_t revision;
+    } items[DSP_APP_SCHEDULE_PAGE];
+} dsp_app_schedule_page_t;
+
+/* page beyond the last one -> INVALID (page 0 of an empty set is valid and empty). */
+dsp_app_op_result_t dsp_app_list_schedules(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                           uint8_t page, dsp_app_schedule_page_t *out);
+
+/* *out includes the name; not_before is device-internal (never sent over BLE). */
+dsp_app_op_result_t dsp_app_get_schedule(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                         const char *id, dsp_schedule_t *out);
+
+/*
+ * Create / update / delete through dsp_schedule_repo (IDs never reused, tombstones,
+ * execution history untouched, one atomic write of the whole set). In addition:
+ *  - create: revision must be 1; update: s->revision must be expected_revision + 1 and
+ *    expected_revision the stored one (else CONFLICT with the current revision).
+ *  - s->not_before is ignored on input. The device sets the schedule's edit floor (D16,
+ *    approved) to the trusted current time + 1 s on create, on an update that changes any
+ *    timing field (start date, time, kind, interval, weekdays, end date) and when an update
+ *    re-enables the schedule; during a rollback hold to the highest trusted time + 1 s if
+ *    later; otherwise it keeps the stored floor (never lowered). Occurrences before the
+ *    floor are never executed: an edit never makes an already elapsed occurrence
+ *    executable, and deleting and recreating a schedule cannot repeat today's dose. With an
+ *    untrusted clock these three edits are REFUSED (DSP_OP_R_CLOCK); name, volume and
+ *    disable edits and deletion stay possible. Claimed occurrences stay blocked by the M1.2
+ *    watermark.
+ *  - amount_ul above a configured max_dose_ul -> LIMIT (detail DSP_DOSING_L_DOSE,
+ *    aux = max_dose_ul); 0 = no limit configured yet (dosing refuses then anyway).
+ * The next dose and wake are always derived from the durable set (nothing is cached), so
+ * a successful change takes effect for the session's dose checks and the wake plan at once.
+ */
+dsp_app_op_result_t dsp_app_create_schedule(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                            const dsp_schedule_t *s, uint32_t *set_revision);
+dsp_app_op_result_t dsp_app_update_schedule(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                            uint32_t expected_revision, const dsp_schedule_t *s,
+                                            uint32_t *revision, uint32_t *set_revision);
+dsp_app_op_result_t dsp_app_delete_schedule(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                            const char *id, uint32_t expected_revision,
+                                            uint32_t *set_revision);
+
+/* Phone time (M3): dsp_timekeeper_on_phone_time, then dsp_time_apply (durable before
+ * effective). status OK carries the decision (DSP_PHONE_TIME_*) and, when accepted, the
+ * applied offset (0 when the previous clock was untrusted). STORAGE: the metadata could
+ * not be made durable, nothing applied. Accepted time never executes missed doses: the
+ * initial-sync and forward-step floors apply, and dose checks use the new clock at once. */
+typedef struct {
+    uint8_t decision; /* dsp_phone_time_decision_t */
+    int64_t offset_s;
+} dsp_app_time_result_t;
+
+dsp_app_op_result_t dsp_app_set_phone_time(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                           int64_t phone_utc_ms, uint32_t uncertainty_ms,
+                                           dsp_app_time_result_t *out);
+
+/* Caller-owned, statically allocated application state. Treat as opaque. */
+struct dsp_app {
     const dsp_app_config_t *cfg;
     dsp_storage_t st;
     dsp_history_store_t hist;
@@ -241,8 +394,9 @@ typedef struct {
     dsp_app_cmd_t q[DSP_APP_CMDQ_CAPACITY];
     size_t q_head;
     size_t q_count;
+    bool storage_fault; /* M1.10b.1: an operation's write failed: no dosing in this wake */
     dsp_app_report_t rep;
-} dsp_app_t;
+};
 
 /* Runs one complete wake (ends with the sleep or fail-safe port call). */
 dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg);

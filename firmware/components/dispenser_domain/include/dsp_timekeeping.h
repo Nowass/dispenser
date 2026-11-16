@@ -153,6 +153,45 @@ bool dsp_timekeeper_sync_overdue(const dsp_timekeeper_t *tk, dsp_utc_t now);
 dsp_sync_decision_t dsp_timekeeper_on_sync(dsp_timekeeper_t *tk, dsp_sync_status_t status,
                                            const dsp_time_sample_t *sample, dsp_utc_t now);
 
+/* Changes the sync interval (configuration, 24..48 h) of a running timekeeper. A trusted
+ * clock's next attempt is brought forward if the shorter interval makes it due earlier.
+ * Trust classification follows at the next dsp_timekeeper_evaluate(). */
+bool dsp_timekeeper_set_interval(dsp_timekeeper_t *tk, uint16_t interval_h);
+
+/* ---- Phone-provided time (M1.10b.1, decision D10) -------------------------------------
+ *
+ * The owner's phone may supply the time over an authenticated BLE session (FR-032
+ * fallback). It is applied through the same M1.4 correction rules as an NTP sample (the
+ * initial-sync floor, the forward-step floor, high water), with these restrictions:
+ *   - uncertainty above DSP_PHONE_TIME_MAX_UNCERTAINTY_MS        -> REJECTED_UNCERTAIN
+ *   - outside 2025-01-01 .. DSP_UTC_MAX                           -> REJECTED_IMPLAUSIBLE
+ *   - a rollback hold is recorded (active, or not yet provably over because the clock is
+ *     untrusted)                                                  -> HOLD, nothing applied:
+ *     only NTP or the NTP-established clock reaching the hold ends it; phone time could
+ *     otherwise move the clock past the hold and end it indirectly
+ *   - the clock is SYNCED (an accepted sync within the interval)  -> IGNORED_NTP_PREFERRED
+ *   - more than 7 days behind the highest trusted time            -> HOLD, nothing applied:
+ *     phone time never creates a hold either (an NTP sample would be applied with a hold)
+ * Accepted only while the clock is UNKNOWN or in HOLDOVER. The NTP retry schedule is left
+ * unchanged (NTP stays preferred and keeps its attempts). On ACCEPTED *out is the sync
+ * decision to make durable and apply exactly like an NTP one (dsp_time_apply); for every
+ * other result out->apply is false and the timekeeper is unchanged. clock_utc is the
+ * device clock when the request is processed.
+ */
+#define DSP_PHONE_TIME_MAX_UNCERTAINTY_MS 2000u
+
+typedef enum { /* values = BLE protocol v1 SET_TIME `decision` */
+    DSP_PHONE_TIME_ACCEPTED = 0,
+    DSP_PHONE_TIME_REJECTED_IMPLAUSIBLE = 1,
+    DSP_PHONE_TIME_REJECTED_UNCERTAIN = 2,
+    DSP_PHONE_TIME_IGNORED_NTP_PREFERRED = 3,
+    DSP_PHONE_TIME_HOLD = 4,
+} dsp_phone_time_decision_t;
+
+dsp_phone_time_decision_t dsp_timekeeper_on_phone_time(dsp_timekeeper_t *tk, int64_t phone_utc_ms,
+                                                       uint32_t uncertainty_ms, dsp_utc_t clock_utc,
+                                                       dsp_sync_decision_t *out);
+
 #ifdef __cplusplus
 }
 #endif

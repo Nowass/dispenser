@@ -5,7 +5,10 @@
  * ESP-IDF NVS implementation of dsp_kv_t (milestone M1.3).
  *
  * - One namespace per instance; values are stored as NVS blobs (nvs_set_blob), which
- *   NVS replaces atomically per key (old or new value after power loss).
+ *   NVS replaces atomically per key (old or new value after power loss), EXCEPT for one
+ *   window found in M1.10b.1 (firmware/test/nvs_linux): a power cut after the new version's
+ *   last data chunk and before its blob index makes ESP-IDF v6.1's recovery erase the old
+ *   version too, so the key is missing (reported by dsp_storage as CORRUPT, fail closed).
  * - nvs_commit() is called by commit(). In ESP-IDF v6.1 nvs_set_blob() is already
  *   durable when it returns OK and nvs_commit() is a no-op; the adapter still calls it,
  *   as the API requires.

@@ -1,0 +1,11 @@
+CONFIG_IDF_TARGET="linux"
+# The firmware's own partition table (not modified): nvs = 0x14000 at 0x11000.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../partitions.csv"
+# The firmware places the table at 0x10000. ESP-IDF v6.1's linux flash emulation reads the table
+# only correctly when its offset is below the 64 KiB MMU page (load_partitions() adds just the
+# in-page offset to the mapped base), so the emulated table copy sits at 0x8000. The partition
+# entries carry explicit offsets: nvs is the same 0x14000 bytes at 0x11000 (checked at run time).
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+CONFIG_ESP_PARTITION_ENABLE_STATS=y

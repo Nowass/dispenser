@@ -1,7 +1,9 @@
 # Dispenser V2 — BLE/GATT protocol design (M1.10, revision 3, DRAFT for review)
 
-Status: **design proposal, not approved, not implemented.** Baseline: firmware M1.9c
-(`abe88e6`), Android beta UI with demo data. Nothing here has run on hardware.
+Status: revision 3 approved as the M1.10 baseline. Implemented so far: M1.10a (codecs, shared
+vectors, Noise feasibility gate) and M1.10b.1 (configuration, schedules and phone time behind the
+Application Service, in review); the rest is design. Baseline of the original proposal: firmware
+M1.9c (`abe88e6`), Android beta UI with demo data. Nothing here has run on hardware.
 
 Revision 2 incorporates the review of 2026-11-16 (security refinements 1–10, data/protocol
 items 11–16). Already approved and kept unchanged: one GATT service with Info, Request and
@@ -28,9 +30,9 @@ Decisions are marked **[Dn]** and collected in section 13.
 | Service-mode command queue (bounded), lock contract, session lifetime (180 s idle / kept while connected / 15 min max, monotonic), BLE suspended before every pump run | `dsp_app` (M1.9b), `dsp_esp_app_sync` (M1.9c) | the only entry point from the BLE task |
 | STATUS, MANUAL_DOSE, REFILL, SET_READINESS, END_SESSION with a status snapshot | `dsp_app` | reused as protocol operations |
 | Dosing gates, limits, durable claim/marker, permits, refill roll-forward, readiness | `dsp_dosing` (M1.9a) | reached only through `dsp_app` |
-| Schedules with revision and tombstones; validation bits named like the Kotlin errors | `dsp_schedule_repo` | storage API only, no application command |
-| Configuration record incl. calibration and limits | `dsp_config`, `dsp_storage` | storage API only, no application command |
-| Timekeeper (trust evidence, rollback hold, dosing floor) | `dsp_timekeeping` | phone time not wired |
+| Schedules with revision and tombstones; validation bits named like the Kotlin errors | `dsp_schedule_repo` | M1.10b.1: application operations with names and edit floor (`dsp_app_*_schedule`) |
+| Configuration record incl. calibration and limits | `dsp_config`, `dsp_storage` | M1.10b.1: revisioned application operations (`dsp_app_get/set_config`) |
+| Timekeeper (trust evidence, rollback hold, dosing floor) | `dsp_timekeeping` | M1.10b.1: phone time (`dsp_timekeeper_on_phone_time`, `dsp_app_set_phone_time`) |
 | Wi-Fi credentials and API token in the read-only `nvs_sec` partition (developer tool) | M1.7 D5 | user Wi-Fi provisioning needs a separate writable store |
 | Notification diagnostics, rejection log | `dsp_notify` | thin read/ack commands |
 | 32 history watermark records, no event journal (Q10) | `dsp_history` | no device history to page yet |
@@ -519,9 +521,13 @@ otherwise. Never reachable by a gesture alone.
 | Change | Record | Format |
 |---|---|---|
 | new key `auth` | credential record (7.5) | format 1 |
-| schedule names | `sched` set | format 3 (format 2 decodes with empty names) |
+| schedule names (+ per-schedule edit floor) | `sched` set | **done in M1.10b.1 without a layout change:** format 2 (format 1 decodes with empty names and no floor) |
 | manual-dose anti-replay | `dosing` | format 2: per-slot high-water marks, marker slot/seq, result ring (format 1 decodes with zeros) |
 | Wi-Fi | namespace `dsp_wifi` (not part of the layout marker) | separate |
+
+M1.10b.1 note: schedule names needed only the `sched` record format, which is upgraded lazily
+inside layout v4, so v5 is introduced only with the records that need a new key or the
+anti-replay state (M1.10b.2+). The table above is the remaining plan.
 
 **Migration v4 → v5** reuses the resumable M1.3 scheme: (1) write the provisioned `auth` record
 (unclaimed, no identity key) if absent; (2) rewrite the layout marker last. Records with new
@@ -541,7 +547,12 @@ newer formats (fail closed), as in M1.3–M1.9a.
 
 - Stored on the device: UTF-8, **at most 32 bytes**, well-formed, no control characters (U+0000–
   U+001F, U+007F), not normalized by the device (stored as sent). Empty allowed.
-- The schedule set grows by 16 × 33 B to 3,032 B (fits the NVS blob limits).
+- The schedule set grows by 16 × 33 B (name) + 16 × 8 B (edit floor, M1.10b.1) to 3,160 B (fits
+  the NVS blob limits; 101 NVS entries).
+- Edit floor (M1.10b.1, device-internal, not on the wire): create, timing edits and re-enabling
+  set `not_before` = trusted edit time + 1 s; occurrences before it are never executed. Prevents
+  catch-up doses when an edit moves an occurrence into its due window and repeated doses after
+  delete + recreate under a new ID (**D16**).
 - The device is the source of truth for every Android-visible schedule field (name, amount,
   time, recurrence, start/end, enabled, revision), so a replaced phone sees everything after
   enrollment. Phone-only data: display preferences only.
@@ -855,11 +866,12 @@ quality with RF on; suspend/resume latency around a dose; advertising power; but
 | D7 | Wi-Fi provisioning | `dsp_wifi` namespace in `nvs`; `nvs_sec` read-only; API token not over BLE in v1 | **approved** (separate storage) |
 | D8 | Manual-dose anti-replay | per-slot monotonic `seq` with a durable high-water mark in the same write as the manual marker; refusals decided durably; result ring of 8 for convenience only (7.4) | **needs approval** (revision 3) |
 | D9 | Schedule names | on the device, ≤ 32 bytes UTF-8 | **approved** |
-| D10 | Phone time | owner session, through the M1.4 rules, source BLE, uncertainty ≤ 2 s, NTP preferred, never lifts a rollback hold | **needs approval** |
+| D10 | Phone time | owner session, through the M1.4 rules, source BLE, uncertainty ≤ 2 s, NTP preferred, never lifts a rollback hold | **implemented (M1.10b.1)**: accepted only while UNKNOWN or HOLDOVER (SYNCED = NTP preferred), NTP retry schedule unchanged; also never *creates* a hold (> 7 days back is refused, not applied); a recorded hold refuses phone time entirely |
 | D11 | Wire format | fixed-layout little-endian binary | **approved** |
-| D12 | Config while READY | calibration and limits only in SERVICE_REQUIRED | **needs approval** |
+| D12 | Config while READY | calibration and limits only in SERVICE_REQUIRED | **implemented (M1.10b.1)**; additionally the capacity cannot change from or to 0 while READY, and changes are refused while a refill is pending |
 | D13 | Device history | deferred to the journal milestone | **needs approval** |
 | D14 | Identifiers | UUID base `36b6XXXX-3457-4e8e-9cba-8126de3f52e4`; no manufacturer data, no company identifier | **needs approval** |
+| D16 | Edits and catch-up | per-schedule edit floor (`not_before`) in the `sched` record, raised by create, timing edits and re-enabling (trusted time + 1 s; highest trusted time during a rollback hold), never by name/volume edits; those three edits are refused while the clock is untrusted | **approved** (M1.10b.1 final review) |
 | D15 | Noise implementation | `esphome/noise-c` v0.1.31 + `esphome/libsodium` 1.10021.12 on both sides (Android via NDK + JNI); ESP-IDF name table enabled (upstream option preferred, else pinned vendored copy with a recorded build-definition diff); suite ChaChaPoly | **needs approval** (revision 3) |
 
 ### 13.2 Still requiring owner approval (revision 3)
@@ -881,7 +893,8 @@ quality with RF on; suspend/resume latency around a dose; advertising power; but
 | Milestone | Scope | Hardware | Exit criteria |
 |---|---|---|---|
 | **M1.10a** (done: gate 34/34, codecs + shared vectors, reproduced from a clean worktree) | **Gate first:** fetch the pinned noise-c/libsodium sources, run their unit and official vector tests on the host (ChaChaPoly/25519/SHA-256 incl. XXpsk3 and IK), cross-build them for the ESP32-C3 with the name table enabled and measure flash/heap/stack, and build them with the Android NDK (no app integration yet). Then: normative `docs/BLE_PROTOCOL.md` and the normative security specification; shared codec vectors with an independent Python generator; C codec `dsp_bleproto` and Kotlin codec; fuzz harness. No security code of our own. | no | gate results reported and accepted; codec vectors pass on both sides; security spec approved |
-| **M1.10b** | Domain work items M1–M4, M6, M7 behind `dsp_app`; storage layout v5 with migration; schedule names; per-slot manual-dose anti-replay in the dosing record (7.4) with the extended power-loss matrix | no | host suites incl. migrations and power cuts |
+| **M1.10b.1** (implemented, in review) | M1 configuration, M2 schedules (names, edit floor), M3 phone time behind `dsp_app`; `sched` format 2 inside layout v4; authorization as an explicit, fail-closed input | no | host suites incl. power cuts (`test_app_ops`) |
+| **M1.10b.2–b.4** | M4 per-slot manual-dose anti-replay (7.4) and the credential record with storage layout v5 and migration; M6 Wi-Fi store; M7 reset service | no | host suites incl. migrations and power cuts |
 | **M1.10c** | `dsp_blesec`: integration of the pinned noise-c (RNG hook, key handling, framing); credential record (M5); enrollment, sessions, invites, removal, recovery state machine; authorization tests; cross-check through the real application; JNI binding with the same vectors on Android | no | official and cross vectors pass on host, target and Android; authorization tests pass |
 | **M1.10d** | NimBLE adapter (GATT, advertising with service data, fragmentation, flow control, suspend/resume, `connected()`), button events (M10) behind the reviewed pin, off by default; size/heap gate | compile only | builds pass the budget gate |
 | **M1.10e** | Android: Companion Device Manager, native Noise (JNI) with Keystore wrapping, claim via QR, sessions, schedules (`DEVICE_APPLIED`), refill, manual dose with confirmation and per-slot `seq`, phones/invites/recovery UI, Wi-Fi provisioning | no (fake transport) | JVM + instrumented tests |

@@ -224,3 +224,77 @@ MANUAL_DOSE plaintext body (`seq = 0x1122334455667788`, 2,000 µl), sent encrypt
 `88 77 66 55 44 33 22 11 d0 07 00 00`.
 
 The complete byte-level cases are the shared vectors.
+
+## 10. Operation semantics: configuration, schedules, time (M1.10b.1)
+
+Implemented in the firmware domain (`dsp_app_*`, M1.10b.1); reachable once the session layer and
+dispatcher exist (M1.10c/d). Every operation requires an **owner** session; without one the
+device answers `FORBIDDEN` and touches nothing. A response carries the body of section 5; a
+refusal the error body `code, detail, aux` below.
+
+### 10.1 Error mapping
+
+| Situation | `code` | `detail` | `aux` |
+|---|---|---|---|
+| no owner authorization | 5 FORBIDDEN | 0 | 0 |
+| not inside a service session | 6 BUSY | 0 | 0 |
+| state precondition | 7 REFUSED | 1 = field changeable only in SERVICE_REQUIRED, 2 = refill pending, 3 = device time not trusted (send SET_TIME first) | refused `field_mask` bits (detail 1) |
+| schedule `amount_ul` above `max_dose_ul` | 8 LIMIT | 1 (per-dose limit) | `max_dose_ul` |
+| 16 schedules stored | 8 LIMIT | 0 | 16 |
+| validation | 10 INVALID | configuration or schedule problem bits (below); 0 = malformed argument | 0 |
+| stale revision | 11 CONFLICT | current revision | 0 |
+| unknown schedule ID | 12 NOT_FOUND | 0 | 0 |
+| write failed (the old or the new value is durable; read back to decide) | 13 STORAGE | 0 | 0 |
+| storage unreadable / device degraded | 14 DEGRADED | 0 | 0 |
+| schedule ID active (`aux` 0) or deleted / executed before (`aux` 1) | 17 DUPLICATE | 0 | 0 or 1 |
+
+Configuration problem bits: 0 remaining > capacity, 1 low-stock percent outside 1–99, 2 sync
+interval outside 24–48 h, 3 unknown notification bits, 4 calibration time neither 0 nor
+2025-01-01..2100, 5 field mask empty or bits 10–15 set, 6 `max_daily_ul` < `max_dose_ul`,
+7 `max_runtime_ms` above `hw_max_runtime_ms`. Schedule problem bits: as the firmware's
+`DSP_SCHED_E_*` (named like the Android validation errors), plus bit 16 name.
+
+### 10.2 Configuration
+
+- `GET_CONFIG` returns the stored record and the read-only hardware cutoff.
+- `SET_CONFIG`: `expected_revision` must equal the stored revision. The revision also advances
+  with every dose (the reservoir estimate is part of the record), so read before writing and
+  retry on `CONFLICT`. Only fields selected in `field_mask` change; `revision`,
+  `reservoir_remaining_ul` (REFILL only) and `hw_max_runtime_ms` are ignored. Response:
+  the new revision.
+- Calibration and limits (bits 4–9) are accepted only while the device is SERVICE_REQUIRED;
+  while READY they are `REFUSED` (detail 1). The reservoir capacity may change while READY, but
+  neither from 0 nor to 0. A configuration change never changes readiness.
+
+### 10.3 Schedules
+
+- `LIST_SCHEDULES`: 4 entries per page in stored order; `total` = schedules stored; a page
+  beyond the last is `INVALID` (page 0 of an empty set is valid and empty).
+- `CREATE_SCHEDULE`: `revision` 1, a new ID (never reused, also after deletion). Response:
+  the new set revision.
+- `UPDATE_SCHEDULE`: `expected_revision` = the stored revision (else `CONFLICT`), the record's
+  `revision` = `expected_revision` + 1 (else `INVALID`). Response: the new schedule revision
+  and set revision.
+- `DELETE_SCHEDULE`: `expected_revision` must match. Execution history is kept.
+- Names: 0–32 bytes of UTF-8 without control characters, stored as sent.
+- Volumes are `u32` µl; the app must refuse larger values before sending.
+- **No catch-up after edits:** creating a schedule, changing its time or recurrence, or
+  re-enabling it never doses for an instant at or before the change. These three need a trusted
+  device time; otherwise they are `REFUSED` with detail 3 (send `SET_TIME` first). Name, volume
+  and disable edits and deletion work without it. An occurrence already
+  executed on a date is never executed again on that date, whatever the edit (identity
+  `<id>@<date>`). Name and volume edits do not affect pending occurrences.
+
+### 10.4 Time
+
+`SET_TIME`: `phone_utc_ms` is truncated to seconds. `decision`:
+
+| Value | Meaning | Applied |
+|---|---|---|
+| 0 ACCEPTED | the device had no trusted time or its last synchronization is older than the sync interval; the M1.4 correction rules apply (missed doses are never run) | yes |
+| 1 REJECTED_IMPLAUSIBLE | before 2025-01-01 or after 2100 | no |
+| 2 REJECTED_UNCERTAIN | `uncertainty_ms` > 2,000 | no |
+| 3 IGNORED_NTP_PREFERRED | the device synchronized within the sync interval | no |
+| 4 HOLD | a rollback hold is recorded, or the time is more than 7 days behind the highest trusted time; phone time never starts or ends a hold | no |
+
+`offset_s` = new minus previous device time when accepted from a trusted clock, else 0.
