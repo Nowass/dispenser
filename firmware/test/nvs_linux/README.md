@@ -1,16 +1,21 @@
 # Domain storage over the real ESP-IDF NVS (linux target)
 
-M1.10b.1 capacity and power-loss check: `dsp_storage` / `dsp_schedule_repo` / codec over the
-firmware's NVS adapter (`components/dispenser_platform/src/dsp_nvs_kv.c`, unchanged) and the
-**real ESP-IDF v6.1 `nvs_flash`**, on ESP-IDF's emulated SPI flash (linux target) with the
-committed `partitions.csv` (not modified). Not part of CTest (needs ESP-IDF); run manually.
+Capacity and power-loss checks: `dsp_storage` / `dsp_schedule_repo` / codec over the firmware's
+NVS adapter (`components/dispenser_platform/src/dsp_nvs_kv.c`, unchanged) and the **real ESP-IDF
+v6.1 `nvs_flash`** - by default the project's patched copy (`firmware/third_party/nvs_flash`),
+with `NVS_UNPATCHED=1` ESP-IDF's original component as negative control - on ESP-IDF's emulated
+SPI flash (linux target) with the committed `partitions.csv` (not modified). Not part of CTest
+(needs ESP-IDF).
 
 ```sh
-. $HOME/.espressif/tools/activate_idf_v6.1.sh
-cd firmware/test/nvs_linux
-idf.py -B /tmp/dsp-nvs-linux build
-/tmp/dsp-nvs-linux/dsp_nvs_linux.elf
+firmware/test/nvs_linux/run_checks.sh            # checks 1-5 + compatibility, both components
+firmware/test/nvs_linux/run_checks.sh --matrix   # + two-cut matrices (about 30-40 minutes)
 ```
+
+`run_checks.sh` requires the patched component to pass everything AND the unpatched component
+to still reproduce the known defects (negative control); see its header. Modes of the program
+(`MODE`): unset = checks 1-5, `matrix` = 6-8, `dump`/`load` = 9 (images exchanged between the
+components), `ab` = 10 (redundant-record alternative, kept for comparison).
 
 Prerequisite: the host's libbsd development headers (`libbsd-dev`), which ESP-IDF's linux target
 needs. Without root they can be unpacked locally (`apt-get download libbsd-dev && dpkg-deb -x
@@ -28,13 +33,13 @@ Notes:
   interrupted erase leaves its sector untouched) and every later flash modification fails;
   NVS is then deinitialized and re-initialized. ESP-IDF's own `esp_partition_fail_after()` lets
   later calls of the same operation succeed; it shows the same defect (see below).
-- **Finding (ESP-IDF NVS defect, UNRESOLVED, release and hardware-acceptance blocker):** see
-  the header comment of `main/nvs_capacity.c`. Checks 3 (format 1 → 2 upgrade) and 5 (plain
-  `nvs_set_blob`) fail at exactly one cut point per write. The program therefore exits non-zero;
-  this is the expected, documented state until the defect is fixed. Do not skip or relax the
-  checks.
+- **Finding (ESP-IDF NVS defect, espressif/esp-idf#19212):** see the header comment of
+  `main/nvs_capacity.c`. With the UNPATCHED component checks 3 (format 1 → 2 upgrade) and 5 (plain
+  `nvs_set_blob`) fail at exactly one cut point per write, and the matrices lose keys; with the
+  patched component everything passes. Do not skip or relax the checks: they are the regression
+  gate of the patches (`firmware/third_party/nvs_flash/README.md`).
 
-## Results (2026-11-16, ESP-IDF v6.1 `fff9895c`, precise power-off model)
+## Results of the unpatched component (2026-11-16, ESP-IDF v6.1 `fff9895c`, precise power-off model)
 
 | Check | Result |
 |---|---|

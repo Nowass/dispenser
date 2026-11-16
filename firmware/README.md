@@ -783,8 +783,10 @@ extra CRC would only re-check what NVS already checks.
 **Known platform defect (found in M1.10b.1, `test/nvs_linux`):** ESP-IDF v6.1 NVS can lose a blob
 key entirely on a power cut at one point of its replacement (after the last new data chunk,
 before the new blob index), so "old or new value" does not hold at that instant; the storage
-detects the missing key and fails closed (CORRUPT). Until mitigated, the per-key atomicity
-above is conditional on that window. **Release and hardware-acceptance blocker (open).**
+detects the missing key and fails closed (CORRUPT). The project's patched `nvs_flash`
+([`third_party/nvs_flash`](third_party/nvs_flash/README.md)) closes that window
+(0 losses in the emulator's single- and two-cut matrices). **Release and hardware-acceptance
+blocker: open until bench power cuts on the ESP32-C3 pass (acceptance 9.4).**
 
 Every write is: encode → `set` → `commit` → read back → compare bytes. Any failure
 returns an error; the schedule repository then refuses changes until it re-reads the
@@ -1636,9 +1638,10 @@ session:
   makes `nvs_flash_init_partition()` erase the old version too (the page loader's "duplicate
   last item" check ignores the chunk index), so the key is lost; reproduced with plain
   `nvs_set_blob()` at exactly one cut point per write. The storage then reports CORRUPT and
-  fails closed (no dosing, never an extra dose). This affects every record since M1.3. **Unresolved, release
-  and hardware-acceptance blocker** (`HARDWARE_ACCEPTANCE.md` section 9); the investigation of a
-  fix is the next task.
+  fails closed (no dosing, never an extra dose). This affects every record since M1.3. **Fixed in software:**
+  a project-scoped patched `nvs_flash` ([`third_party/nvs_flash`](third_party/nvs_flash/README.md),
+  espressif/esp-idf#19212/#19213/#19214); the release and hardware-acceptance blocker stays open
+  until bench power cuts verify it (`HARDWARE_ACCEPTANCE.md` 9.4).
 
 Sizes (ESP32-C3, `-Os`): the operations add about 4.4 KB of code once the dispatcher links them
 (`dsp_app` +2.9 KB, timekeeper +0.5 KB, config +0.4 KB, codec +0.25 KB, shared UTF-8 validator
@@ -2002,8 +2005,8 @@ alternative to the native setup, not a requirement.
 ## Next milestone
 
 **Release blocker (open):** the ESP-IDF v6.1 NVS power-loss defect (`test/nvs_linux`,
-`HARDWARE_ACCEPTANCE.md` section 9). Next task: a focused NVS reliability investigation (root
-cause, a project-scoped `nvs_flash` fix vs. redundant records), reported before any permanent fix.
+`HARDWARE_ACCEPTANCE.md` section 9); fixed in software (`third_party/nvs_flash`), bench
+verification (9.4) pending.
 After that: M1.10b.2–b.4 (manual-dose anti-replay and the credential record with
 storage layout v5, Wi-Fi provisioning store, reset service), only after explicit authorization;
 then M1.10c–f (session security, NimBLE adapter, Android integration, on-device acceptance); the

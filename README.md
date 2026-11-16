@@ -16,7 +16,8 @@ Android companion app.
   (M1.10a), and the configuration, schedule and phone-time operations for the future BLE
   dispatcher (M1.10b.1). Nothing drives hardware yet; not yet run on hardware. **Open firmware
   release and hardware-acceptance blocker:** an ESP-IDF v6.1 NVS power-loss defect
-  ([`firmware/test/nvs_linux`](firmware/test/nvs_linux/README.md)).
+  ([`firmware/test/nvs_linux`](firmware/test/nvs_linux/README.md)); fix implemented, bench verification pending
+  ([`firmware/third_party/nvs_flash`](firmware/third_party/nvs_flash/README.md)).
 - [`cloudflare/dispenser-notify/`](cloudflare/dispenser-notify/README.md) – Cloudflare Worker
   and D1 backend that durably accepts device notifications (M1.6a, deployed; protocol in
   its [`PROTOCOL.md`](cloudflare/dispenser-notify/PROTOCOL.md)) and e-mails them through the

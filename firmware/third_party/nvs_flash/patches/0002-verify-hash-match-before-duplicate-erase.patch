@@ -1,0 +1,33 @@
+ESP-IDF v6.1 nvs_flash, patch 0002 (upstream issue espressif/esp-idf#19213, IDFGH-18442)
+
+Problem: while loading the active page, Page::mLoadEntryTable() erases an earlier item whose
+24-bit hash (namespace index, key, chunk index) equals the current item's, without comparing
+the items: two different items with colliding hashes lose the earlier one at every
+nvs_flash_init(). No power cut is needed.
+
+Fix: treat a hash match only as a candidate; erase it only if namespace index, chunk index
+and key are equal, otherwise continue with the next candidate. The datatype stays out of the
+comparison, so an old-format blob is still replaced by a later blob index (upstream comment).
+The on-flash format and every write are unchanged.
+
+--- a/src/nvs_page.cpp
++++ b/src/nvs_page.cpp
+@@ -806,6 +806,18 @@
+              * when old-format blob is present along with new-format blob-index
+              * for same key on active page. Since datatype is not used in hash calculation,
+              * old-format blob will be removed.*/
++            // a 24-bit hash match is only a candidate: erase it only if it really
++            // is the same item (namespace, key and chunk index)
++            while (duplicateIndex < i) {
++                Item candidate;
++                if (readEntry(duplicateIndex, candidate) == ESP_OK
++                        && candidate.nsIndex == item.nsIndex
++                        && candidate.chunkIndex == item.chunkIndex
++                        && strncmp(candidate.key, item.key, sizeof(item.key)) == 0) {
++                    break;
++                }
++                duplicateIndex = mHashList.find(duplicateIndex + 1, item);
++            }
+             if (duplicateIndex < i) {
+                 eraseEntryAndSpan(duplicateIndex, DEFAULT_PURGE_AFTER_ERASE);
+             }

@@ -1,0 +1,35 @@
+ESP-IDF v6.1 nvs_flash, patch 0003 (upstream issue espressif/esp-idf#19214, IDFGH-18475)
+
+Problem: when loading the active page, NVS checks whether the first entry the state table
+calls empty was half-written by a power cut by reading only its first 4-byte word. A cut write
+that left the first word erased and later words programmed is taken as free; the next write
+lands on the leftover bits, returns ESP_OK, is then found with a CRC mismatch and erased - the
+key and (for an update) its previous value are lost. (Reproduced in firmware/test/nvs_linux
+with the "first word erased" flash model; whether a chip can tear a program that way is not
+specified by the datasheets checked upstream.)
+
+Fix: check every word of the entry. Reads 32 bytes instead of 4 once per page load. The
+on-flash format and every write are unchanged.
+
+--- a/src/nvs_page.cpp
++++ b/src/nvs_page.cpp
+@@ -693,13 +693,16 @@
+             if (err != ESP_OK) {
+                 return err;
+             }
+-            uint32_t header;
+-            auto rc = mPartition->read_raw(entryAddress, &header, sizeof(header));
++            // a cut write can leave the first word erased and later ones
++            // programmed, so every word of the entry is checked
++            const size_t WORD_COUNT = ENTRY_SIZE / sizeof(uint32_t);
++            uint32_t words[WORD_COUNT];
++            auto rc = mPartition->read_raw(entryAddress, words, sizeof(words));
+             if (rc != ESP_OK) {
+                 mState = PageState::INVALID;
+                 return rc;
+             }
+-            if (header != 0xffffffff) {
++            if (std::any_of(words, words + WORD_COUNT, [](uint32_t val) -> bool { return val != 0xffffffff; })) {
+                 auto oldState = state;
+                 rc = mEntryTable.get(mNextFreeEntry, &oldState);
+                 if (rc != ESP_OK) {

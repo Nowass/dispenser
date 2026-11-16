@@ -125,6 +125,8 @@ the 32-bit extremes. **Physical bounds are not invented and remain open until me
 
 **BLOCKER (open): ESP-IDF v6.1 NVS power-loss defect.** A power cut after the new version's last
 data chunk and before its blob index makes NVS recovery erase the old version too, so the record
-is lost (reproduced in `firmware/test/nvs_linux`, 14 of 14 scenarios). The storage then fails
-closed (CORRUPT, no automatic dosing). Hardware acceptance and any release are blocked until a
-fix is approved, implemented and verified (emulator and bench power cuts).
+is lost (reproduced in `firmware/test/nvs_linux`, 14 of 14 scenarios; espressif/esp-idf#19212).
+The storage then fails closed (CORRUPT, no automatic dosing). **Fix implemented and approved in software:**
+project-scoped patched `nvs_flash` (`firmware/third_party/nvs_flash`, patches for #19212, #19213,
+#19214), passing the emulator matrices and ESP-IDF's NVS suite. The blocker stays open until the
+bench power cuts (9.4) pass on real ESP32-C3 flash; 9.4 is NOT complete.

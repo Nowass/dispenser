@@ -1,0 +1,2 @@
+# The patches carry context lines that start with a single space.
+*.patch -whitespace

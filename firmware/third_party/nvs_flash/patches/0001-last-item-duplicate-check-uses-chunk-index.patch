@@ -1,0 +1,26 @@
+ESP-IDF v6.1 nvs_flash, patch 0001 (upstream issue espressif/esp-idf#19212, IDFGH-18441)
+
+Problem: Page::mLoadEntryTable() checks whether the last item of the active page duplicates
+an earlier one with findItem(nsIndex, datatype, key) - without the chunk index. The data
+chunks of the two versions of a blob share namespace, type and key and differ only in the
+chunk index (0x00.. / 0x80..). A reset after the new version's last chunk was written and
+before its blob index makes the next nvs_flash_init() erase the OLD version's chunk as a
+"duplicate"; eraseMismatchedBlobIndexes() then deletes the old index and
+eraseOrphanDataBlobs() the new chunks: the key is lost (reproduced: firmware/test/nvs_linux).
+
+Fix: pass item.chunkIndex, as PageManager::load() already does. Only recovery decisions
+change; the on-flash format and every write are unchanged.
+
+--- a/src/nvs_page.cpp
++++ b/src/nvs_page.cpp
+@@ -815,7 +815,9 @@
+         if (lastItemIndex != INVALID_ENTRY) {
+             size_t findItemIndex = 0;
+             Item dupItem;
+-            if (findItem(item.nsIndex, item.datatype, item.key, findItemIndex, dupItem) == ESP_OK) {
++            // The chunks of a blob share namespace, type and key: only the chunk
++            // index tells a chunk of one version from a chunk of the other.
++            if (findItem(item.nsIndex, item.datatype, item.key, findItemIndex, dupItem, item.chunkIndex) == ESP_OK) {
+                 if (findItemIndex < lastItemIndex) {
+                     auto err = eraseEntryAndSpan(findItemIndex, DEFAULT_PURGE_AFTER_ERASE);
+                     if (err != ESP_OK) {

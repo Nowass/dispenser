@@ -9,6 +9,8 @@
  *   window found in M1.10b.1 (firmware/test/nvs_linux): a power cut after the new version's
  *   last data chunk and before its blob index makes ESP-IDF v6.1's recovery erase the old
  *   version too, so the key is missing (reported by dsp_storage as CORRUPT, fail closed).
+ *   The firmware builds against a patched nvs_flash that fixes it
+ *   (firmware/third_party/nvs_flash: espressif/esp-idf#19212, #19213, #19214).
  * - nvs_commit() is called by commit(). In ESP-IDF v6.1 nvs_set_blob() is already
  *   durable when it returns OK and nvs_commit() is a no-op; the adapter still calls it,
  *   as the API requires.

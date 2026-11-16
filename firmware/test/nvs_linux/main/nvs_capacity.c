@@ -21,6 +21,13 @@
  *   5. the same cut-everywhere check on plain nvs_set_blob() without any dispenser code, for
  *      several size pairs on a fresh and an aged partition (traced and dumped for 32 -> 64 B).
  *
+ * Modes (environment MODE): unset = checks 1-5; "matrix" = 6 (two-cut matrix: a cut at every
+ * cycle of a write, then at every cycle of the recovery that follows, two more boots and a
+ * follow-up write), 7 (the same with the #19214 "first word erased" tear model) and 8 (#19213
+ * hash collisions of this firmware's item identities); "ab" = 10 (redundant-record alternative,
+ * kept for comparison); "dump"/"load" = 9 (flash images exchanged between the patched and the
+ * unpatched component, IMG=<path>).
+ *
  * FINDING (2026-11-16, ESP-IDF v6.1 fff9895c): every blob replacement has exactly one cut point
  * at which the key is lost (nvs_get_blob -> ESP_ERR_NVS_NOT_FOUND): power lost after the new
  * version's last data chunk is complete and before the new blob index is written. At the next
@@ -28,7 +35,9 @@
  * nvs_page.cpp) looks up the page's last item WITHOUT its chunk index and erases the OLD
  * version's data chunk as a "duplicate"; eraseMismatchedBlobIndexes() then deletes the old
  * index and eraseOrphanDataBlobs() the new chunk. The dispenser storage reports the missing key
- * as CORRUPT (fail closed). Checks 3 and 5 therefore fail by design until this is resolved.
+ * as CORRUPT (fail closed). With the UNPATCHED component checks 3 and 5 (and the matrix) fail;
+ * with the project's patched component (firmware/third_party/nvs_flash) everything passes.
+ * run_checks.sh requires both outcomes (negative control).
  * Exit status 0 only if every check passed.
  */
 #include <inttypes.h>
@@ -40,6 +49,7 @@
 #include "esp_private/partition_linux.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "esp_rom_crc.h"
 
 #include "dsp_codec.h"
 #include "dsp_nvs_kv.h"
@@ -58,6 +68,7 @@ static bool pw_off;     /* the cut happened: flash is no longer modified */
 static size_t pw_left;  /* cycles before the cut (4 bytes written or 1 sector erased each) */
 static size_t pw_cycles; /* cycles counted since pw_count_reset() */
 static bool pw_trace;    /* print every write/erase (diagnostics) */
+static int pw_tear_mode; /* 0: the cut write keeps a prefix; 1: every word but the first (#19214) */
 
 static void pw_arm(size_t cycles)
 {
@@ -88,7 +99,12 @@ static esp_err_t pw_write(write_fn real, const esp_partition_t *p, size_t off, c
         if (pw_left > cyc) {
             pw_left -= cyc;
         } else {
-            if (pw_left > 0) {
+            if (pw_tear_mode == 1 && size >= 8) {
+                size_t m = pw_left < cyc - 1 ? pw_left : cyc - 1;
+                if (m > 0) { /* first word left erased, later words programmed */
+                    (void)real(p, off + 4, (const uint8_t *)src + 4, m * 4);
+                }
+            } else if (pw_left > 0) {
                 (void)real(p, off, src, pw_left * 4); /* torn write */
             }
             pw_off = true;
@@ -495,7 +511,7 @@ static int raw_blob_cuts(size_t len_a, size_t len_b, bool aged, const char *labe
     return bad;
 }
 
-int main(void)
+static int sections_1_to_5(void)
 {
     esp_partition_iterator_t it = esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
     for (; it != NULL; it = esp_partition_next(it)) {
@@ -701,6 +717,446 @@ int main(void)
         printf("  5. raw NVS total lost/torn: %d\n", raw_bad);
     }
 
+    return 0;
+}
+
+/* ================= Modes: matrix, ab, dump, load (see run_checks.sh) ================= */
+
+static uint8_t snap2[0x14000];
+
+static void flash_put(const uint8_t *img)
+{
+    pw_restore_power();
+    CHECK(esp_partition_erase_range(part, 0, part->size) == ESP_OK);
+    CHECK(esp_partition_write(part, 0, img, part->size) == ESP_OK);
+}
+
+static esp_err_t raw_get(const char *ns, const char *key, uint8_t *buf, size_t *len)
+{
+    nvs_handle_t h;
+    esp_err_t e = nvs_open_from_partition("nvs", ns, NVS_READONLY, &h);
+    if (e != ESP_OK) {
+        return e;
+    }
+    e = nvs_get_blob(h, key, buf, len);
+    nvs_close(h);
+    return e;
+}
+
+static esp_err_t raw_set(const char *ns, const char *key, const uint8_t *buf, size_t len)
+{
+    nvs_handle_t h;
+    esp_err_t e = nvs_open_from_partition("nvs", ns, NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        return e;
+    }
+    e = nvs_set_blob(h, key, buf, len);
+    nvs_close(h);
+    return e;
+}
+
+/* 0 = A, 1 = B, -1 = lost or torn */
+static int classify(const uint8_t *a, size_t la, const uint8_t *b, size_t lb)
+{
+    static uint8_t back[4096];
+    size_t len = sizeof back;
+    if (raw_get("raw", "k", back, &len) != ESP_OK) {
+        return -1;
+    }
+    if (len == la && memcmp(back, a, la) == 0) {
+        return 0;
+    }
+    if (len == lb && memcmp(back, b, lb) == 0) {
+        return 1;
+    }
+    return -1;
+}
+
+typedef struct {
+    long cuts1, cuts2, lost1, lost2, unstable, followup_lost, boots_failed;
+} two_cut_t;
+
+/* Writes blob A (optionally after aging), snapshots, then for every cut k of the A -> B
+ * write and every cut j of the recovery that follows: reboot, check A|B, reboot again, check
+ * the same value, then a follow-up write to another key and to k must survive a reboot. */
+static two_cut_t two_cut(size_t len_a, size_t len_b, bool aged, int tear)
+{
+    static uint8_t a[4096], b[4096], c[64], back[4096];
+    two_cut_t r;
+    memset(&r, 0, sizeof r);
+    memset(a, 0x11, sizeof a);
+    memset(b, 0x22, sizeof b);
+    memset(c, 0x33, sizeof c);
+    pw_restore_power();
+    dsp_nvs_kv_close(&nvs);
+    nvs_flash_deinit_partition("nvs");
+    CHECK(esp_partition_erase_range(part, 0, part->size) == ESP_OK);
+    CHECK(nvs_flash_init_partition("nvs") == ESP_OK);
+    if (aged) {
+        for (int i = 0; i < 300; i++) {
+            b[0] = (uint8_t)i;
+            CHECK(raw_set("raw", "k", b, len_b) == ESP_OK);
+        }
+        b[0] = 0x22;
+    }
+    CHECK(raw_set("raw", "k", a, len_a) == ESP_OK);
+    CHECK(raw_set("raw", "other", c, 16) == ESP_OK);
+    nvs_flash_deinit_partition("nvs");
+    snapshot();
+    CHECK(nvs_flash_init_partition("nvs") == ESP_OK);
+    pw_cycles = 0;
+    CHECK(raw_set("raw", "k", b, len_b) == ESP_OK);
+    size_t n = pw_cycles;
+    nvs_flash_deinit_partition("nvs");
+    pw_tear_mode = tear;
+    for (size_t k = 1; k <= n; k++) {
+        flash_put(snap);
+        CHECK(nvs_flash_init_partition("nvs") == ESP_OK);
+        pw_arm(k);
+        (void)raw_set("raw", "k", b, len_b);
+        nvs_flash_deinit_partition("nvs");
+        pw_restore_power();
+        CHECK(esp_partition_read(part, 0, snap2, part->size) == ESP_OK);
+        r.cuts1++;
+        /* recovery without a second cut: measure its cycles and the outcome */
+        pw_cycles = 0;
+        if (nvs_flash_init_partition("nvs") != ESP_OK) {
+            r.boots_failed++;
+            continue;
+        }
+        size_t rec = pw_cycles;
+        int v1 = classify(a, len_a, b, len_b);
+        r.lost1 += v1 < 0;
+        /* follow-up writes after this single-cut recovery (#19214 exposure) */
+        c[0] = (uint8_t)k;
+        CHECK(raw_set("raw", "other", c, 16) == ESP_OK);
+        uint8_t d[48];
+        memset(d, 0x44, sizeof d);
+        d[0] = (uint8_t)k;
+        CHECK(raw_set("raw", "k", d, sizeof d) == ESP_OK);
+        nvs_flash_deinit_partition("nvs");
+        CHECK(nvs_flash_init_partition("nvs") == ESP_OK);
+        size_t len = sizeof back;
+        bool ok_other = raw_get("raw", "other", back, &len) == ESP_OK && len == 16 && memcmp(back, c, 16) == 0;
+        len = sizeof back;
+        bool ok_k = raw_get("raw", "k", back, &len) == ESP_OK && len == sizeof d && memcmp(back, d, sizeof d) == 0;
+        r.followup_lost += !(ok_other && ok_k);
+        nvs_flash_deinit_partition("nvs");
+        /* second cut at every cycle of the recovery */
+        for (size_t j = 1; j <= rec; j++) {
+            flash_put(snap2);
+            pw_arm(j);
+            (void)nvs_flash_init_partition("nvs");
+            nvs_flash_deinit_partition("nvs");
+            pw_restore_power();
+            r.cuts2++;
+            if (nvs_flash_init_partition("nvs") != ESP_OK) {
+                r.boots_failed++;
+                continue;
+            }
+            int v2 = classify(a, len_a, b, len_b);
+            r.lost2 += v2 < 0;
+            nvs_flash_deinit_partition("nvs");
+            CHECK(nvs_flash_init_partition("nvs") == ESP_OK);
+            int v3 = classify(a, len_a, b, len_b);
+            r.unstable += v3 != v2;
+            nvs_flash_deinit_partition("nvs");
+        }
+    }
+    pw_tear_mode = 0;
+    nvs_up();
+    return r;
+}
+
+static void section_6_7(void)
+{
+    const size_t sizes[][2] = {{2504, 3160}, {3160, 3160}, {3160, 2504}, {100, 3160},
+                               {2504, 2504}, {1000, 2000}, {32, 64}};
+    for (int tear = 0; tear < 2; tear++) {
+        two_cut_t t;
+        memset(&t, 0, sizeof t);
+        for (int aged = 0; aged < 2; aged++) {
+            for (size_t i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
+                two_cut_t r = two_cut(sizes[i][0], sizes[i][1], aged != 0, tear);
+                printf("  %s %4zu -> %4zu%s: cuts %ld (+%ld in recovery): lost %ld / %ld, unstable %ld, "
+                       "follow-up lost %ld, boot failures %ld\n",
+                       tear ? "7. tear=first-word-erased" : "6. tear=prefix",
+                       sizes[i][0], sizes[i][1], aged ? " aged" : "     ", r.cuts1, r.cuts2, r.lost1,
+                       r.lost2, r.unstable, r.followup_lost, r.boots_failed);
+                t.cuts1 += r.cuts1; t.cuts2 += r.cuts2; t.lost1 += r.lost1; t.lost2 += r.lost2;
+                t.unstable += r.unstable; t.followup_lost += r.followup_lost; t.boots_failed += r.boots_failed;
+            }
+        }
+        printf("  %s TOTAL: %ld write cuts, %ld recovery cuts; lost after 1 cut %ld, after 2 cuts %ld, "
+               "unstable %ld, follow-up writes lost %ld, boot failures %ld\n",
+               tear ? "7." : "6.", t.cuts1, t.cuts2, t.lost1, t.lost2, t.unstable, t.followup_lost,
+               t.boots_failed);
+        CHECK(t.lost1 == 0 && t.lost2 == 0 && t.unstable == 0 && t.followup_lost == 0 && t.boots_failed == 0);
+    }
+}
+
+/* 8. #19213: 24-bit item hashes of every item this firmware's namespace can have. */
+static void section_8(void)
+{
+    static const char *keys[DATA_KEYS];
+    static char names[DATA_KEYS][8];
+    for (size_t i = 0; i < DATA_KEYS; i++) {
+        key_name(i, names[i]);
+        keys[i] = names[i];
+    }
+    const uint8_t chunks[] = {0, 1, 2, 3, 0x80, 0x81, 0x82, 0x83, 0xff};
+    long collisions = 0, items = 0;
+    for (uint8_t ns = 1; ns <= 16; ns++) {
+        static uint32_t h[DATA_KEYS * 9 + 1];
+        static char tag[DATA_KEYS * 9 + 1][24];
+        size_t n = 0;
+        for (size_t i = 0; i < DATA_KEYS; i++) {
+            for (size_t c = 0; c < sizeof chunks; c++) {
+                uint8_t key[16];
+                memset(key, 0, sizeof key);
+                strncpy((char *)key, keys[i], sizeof key);
+                uint32_t r = esp_rom_crc32_le(0xffffffff, &ns, 1);
+                r = esp_rom_crc32_le(r, key, sizeof key);
+                r = esp_rom_crc32_le(r, &chunks[c], 1);
+                h[n] = r & 0xffffff;
+                snprintf(tag[n], sizeof tag[n], "%s/0x%02x", keys[i], chunks[c]);
+                n++;
+            }
+        }
+        items += (long)n;
+        for (size_t x = 0; x < n; x++) {
+            for (size_t y = 0; y < x; y++) {
+                if (h[x] == h[y]) {
+                    collisions++;
+                    printf("  8. collision ns %u: %s and %s (0x%06" PRIx32 ")\n", ns, tag[x], tag[y], h[x]);
+                }
+            }
+        }
+    }
+    printf("  8. #19213 hash check: %ld item identities (38 keys x 9 chunk indexes x namespace "
+           "index 1..16), %ld colliding pairs within a namespace\n", items, collisions);
+}
+
+/* 9. Image dump / load (compatibility across implementations). */
+static void dump_image(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    CHECK(f != NULL);
+    if (f != NULL) {
+        snapshot();
+        CHECK(fwrite(snap, 1, part->size, f) == part->size);
+        fclose(f);
+    }
+}
+
+static bool load_image(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return false;
+    }
+    bool ok = fread(snap, 1, part->size, f) == part->size;
+    fclose(f);
+    return ok;
+}
+
+/* Deterministic workload: storage provisioning, maximum set, 300 updates, configuration,
+ * format 1 -> 2 upgrade, raw blobs and integers. */
+static void workload(void)
+{
+    CHECK(esp_partition_erase_range(part, 0, part->size) == ESP_OK);
+    nvs_up();
+    CHECK(open_storage() == DSP_STORAGE_OK);
+    fill_max();
+    for (int i = 0; i < 300; i++) {
+        CHECK(update_one(i, NULL) == DSP_STORAGE_OK);
+    }
+    add_cotenants();
+    static uint8_t blob[3000];
+    for (int i = 0; i < 40; i++) {
+        memset(blob, i, sizeof blob);
+        CHECK(raw_set("raw", "k", blob, (size_t)(100 + 70 * i)) == ESP_OK);
+    }
+    power_cycle();
+    CHECK(open_storage() == DSP_STORAGE_OK);
+}
+
+static void keys_file(const char *path, bool write)
+{
+    keyset_t *k = &now_keys;
+    read_keys(k);
+    static uint8_t blob[4096];
+    size_t blen = sizeof blob;
+    CHECK(raw_get("raw", "k", blob, &blen) == ESP_OK);
+    if (write) {
+        FILE *f = fopen(path, "wb");
+        CHECK(f != NULL && fwrite(k, sizeof *k, 1, f) == 1 && fwrite(&blen, sizeof blen, 1, f) == 1 &&
+              fwrite(blob, 1, blen, f) == blen);
+        if (f) fclose(f);
+        return;
+    }
+    static keyset_t ref;
+    static uint8_t rblob[4096];
+    size_t rlen = 0;
+    FILE *f = fopen(path, "rb");
+    CHECK(f != NULL && fread(&ref, sizeof ref, 1, f) == 1 && fread(&rlen, sizeof rlen, 1, f) == 1 &&
+          fread(rblob, 1, rlen, f) == rlen);
+    if (f) fclose(f);
+    int diff = 0;
+    for (size_t i = 0; i < DATA_KEYS; i++) {
+        diff += ref.len[i] != k->len[i] || memcmp(ref.v[i], k->v[i], k->len[i]) != 0;
+    }
+    diff += rlen != blen || memcmp(rblob, blob, blen) != 0;
+    printf("  9. loaded image: %zu keys compared, %d differ\n", (size_t)DATA_KEYS + 1, diff);
+    CHECK(diff == 0);
+}
+
+/* 10. Redundant records (A/B) over the given NVS: record = u32 seq | payload, written to the
+ * slot that does not hold the newest valid copy; read = newest valid copy. */
+static esp_err_t ab_read(uint32_t *seq, uint8_t *payload, size_t *len)
+{
+    static uint8_t x[4100], y[4100];
+    size_t lx = sizeof x, ly = sizeof y;
+    bool vx = raw_get("ab", "r.a", x, &lx) == ESP_OK && lx >= 4;
+    bool vy = raw_get("ab", "r.b", y, &ly) == ESP_OK && ly >= 4;
+    if (!vx && !vy) {
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+    uint32_t sx = 0, sy = 0;
+    if (vx) memcpy(&sx, x, 4);
+    if (vy) memcpy(&sy, y, 4);
+    bool use_x = vx && (!vy || sx > sy);
+    *seq = use_x ? sx : sy;
+    *len = (use_x ? lx : ly) - 4;
+    memcpy(payload, (use_x ? x : y) + 4, *len);
+    return ESP_OK;
+}
+static esp_err_t ab_write(const uint8_t *payload, size_t len)
+{
+    static uint8_t x[4100], y[4100];
+    size_t lx = sizeof x, ly = sizeof y;
+    bool vx = raw_get("ab", "r.a", x, &lx) == ESP_OK && lx >= 4;
+    bool vy = raw_get("ab", "r.b", y, &ly) == ESP_OK && ly >= 4;
+    uint32_t sx = 0, sy = 0;
+    if (vx) memcpy(&sx, x, 4);
+    if (vy) memcpy(&sy, y, 4);
+    uint32_t newest = sx > sy ? sx : sy;
+    const char *slot = (vx && (!vy || sx > sy)) ? "r.b" : "r.a"; /* overwrite the older slot */
+    static uint8_t rec[4100];
+    uint32_t seq = newest + 1;
+    memcpy(rec, &seq, 4);
+    memcpy(rec + 4, payload, len);
+    return raw_set("ab", slot, rec, len + 4);
+}
+static void section_10(void)
+{
+    const size_t sizes[][2] = {{2504, 3160}, {3160, 3160}, {3160, 2504}, {100, 3160},
+                               {2504, 2504}, {1000, 2000}, {32, 64}};
+    static uint8_t a[4096], b[4096], back[4096];
+    for (int tear = 0; tear < 2; tear++) {
+        long cuts = 0, lost_prev = 0;
+        for (size_t i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
+            size_t la = sizes[i][0], lb = sizes[i][1];
+            memset(a, 0x11, sizeof a);
+            memset(b, 0x22, sizeof b);
+            pw_restore_power();
+            dsp_nvs_kv_close(&nvs);
+            nvs_flash_deinit_partition("nvs");
+            CHECK(esp_partition_erase_range(part, 0, part->size) == ESP_OK);
+            CHECK(nvs_flash_init_partition("nvs") == ESP_OK);
+            for (int w = 0; w < 5; w++) { /* both slots populated */
+                a[0] = (uint8_t)w;
+                CHECK(ab_write(a, la) == ESP_OK);
+            }
+            nvs_flash_deinit_partition("nvs");
+            snapshot();
+            CHECK(nvs_flash_init_partition("nvs") == ESP_OK);
+            pw_cycles = 0;
+            CHECK(ab_write(b, lb) == ESP_OK);
+            size_t n = pw_cycles;
+            nvs_flash_deinit_partition("nvs");
+            pw_tear_mode = tear;
+            for (size_t k = 1; k <= n; k++) {
+                flash_put(snap);
+                CHECK(nvs_flash_init_partition("nvs") == ESP_OK);
+                pw_arm(k);
+                (void)ab_write(b, lb);
+                nvs_flash_deinit_partition("nvs");
+                pw_restore_power();
+                CHECK(nvs_flash_init_partition("nvs") == ESP_OK);
+                uint32_t seq = 0;
+                size_t len = 0;
+                bool ok = ab_read(&seq, back, &len) == ESP_OK &&
+                          ((len == la && memcmp(back, a, la) == 0) || (len == lb && memcmp(back, b, lb) == 0));
+                lost_prev += !ok;
+                cuts++;
+                nvs_flash_deinit_partition("nvs");
+            }
+            pw_tear_mode = 0;
+        }
+        printf("  10. A/B records, tear=%s: %ld cuts, previous-or-new value lost %ld\n",
+               tear ? "first-word-erased" : "prefix", cuts, lost_prev);
+    }
+    nvs_up();
+}
+
+int main(void)
+{
+    const char *mode = getenv("MODE");
+    const char *img = getenv("IMG");
+    if (mode != NULL && strcmp(mode, "dump") == 0) {
+        part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+        workload();
+        dump_image(img);
+        char kp[512];
+        snprintf(kp, sizeof kp, "%s.keys", img);
+        keys_file(kp, true);
+        /* a recoverable mid-write cut state (unrecovered) for cross-loading */
+        snapshot();
+        pw_arm(400);
+        (void)update_one(5, "Cut");
+        dsp_nvs_kv_close(&nvs);
+        nvs_flash_deinit_partition("nvs");
+        pw_restore_power();
+        snprintf(kp, sizeof kp, "%s.cut", img);
+        dump_image(kp);
+    } else if (mode != NULL && strcmp(mode, "load") == 0) {
+        part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+        CHECK(load_image(img));
+        flash_put(snap);
+        nvs_up();
+        CHECK(open_storage() == DSP_STORAGE_OK);
+        char kp[512];
+        snprintf(kp, sizeof kp, "%s.keys", img);
+        keys_file(kp, false);
+        /* the other implementation's unrecovered cut state */
+        snprintf(kp, sizeof kp, "%s.cut", img);
+        dsp_nvs_kv_close(&nvs);
+        nvs_flash_deinit_partition("nvs");
+        CHECK(load_image(kp));
+        flash_put(snap);
+        nvs_up();
+        dsp_storage_status_t so = open_storage();
+        printf("  9. other implementation's unrecovered cut state: storage open %d\n", (int)so);
+        CHECK(so == DSP_STORAGE_OK);
+        /* and it keeps working */
+        CHECK(update_one(2, "After") == DSP_STORAGE_OK);
+        power_cycle();
+        CHECK(open_storage() == DSP_STORAGE_OK);
+    } else if (mode != NULL && strcmp(mode, "ab") == 0) {
+        part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+        CHECK(esp_partition_erase_range(part, 0, part->size) == ESP_OK);
+        nvs_up();
+        section_10();
+    } else if (mode != NULL && strcmp(mode, "matrix") == 0) {
+        part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_NVS, "nvs");
+        CHECK(esp_partition_erase_range(part, 0, part->size) == ESP_OK);
+        nvs_up();
+        section_8();
+        section_6_7();
+    } else {
+        (void)sections_1_to_5();
+    }
     printf("%d checks, %d failed\n", checks, failures);
     return failures == 0 && checks > 0 ? 0 : 1;
 }
