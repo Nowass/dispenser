@@ -136,6 +136,12 @@ android {
     }
 }
 
+// The shared test vectors (repository root test-vectors/: recurrence, BLE protocol) live outside
+// this Gradle project; declare them as test inputs so that a changed vector reruns the tests.
+tasks.withType<Test>().configureEach {
+    inputs.dir(rootProject.file("../test-vectors")).withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)

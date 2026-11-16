@@ -1,0 +1,91 @@
+diff --git a/src/protocol/patterns.c b/src/protocol/patterns.c
+index 8750ba2..f13ec5d 100644
+--- a/src/protocol/patterns.c
++++ b/src/protocol/patterns.c
+@@ -452,26 +452,37 @@ static uint8_t const noise_pattern_IX[] = {
+  * The remaining bytes are the token for the pattern, terminated by
+  * NOISE_TOKEN_END.
+  */
+-const uint8_t *noise_pattern_lookup(int id)
++/* Looks up a pattern and reports the size of its table, so that callers
++   never scan beyond the end of the static array. */
++static const uint8_t *noise_pattern_lookup_sized(int id, size_t *size)
+ {
++#define NOISE_PATTERN_ENTRY(pid, table) \
++    case pid: *size = sizeof(table); return table
+     switch (id) {
+-    case NOISE_PATTERN_N:               return noise_pattern_N;
+-    case NOISE_PATTERN_K:               return noise_pattern_K;
+-    case NOISE_PATTERN_X:               return noise_pattern_X;
+-    case NOISE_PATTERN_NN:              return noise_pattern_NN;
+-    case NOISE_PATTERN_NK:              return noise_pattern_NK;
+-    case NOISE_PATTERN_NX:              return noise_pattern_NX;
+-    case NOISE_PATTERN_XN:              return noise_pattern_XN;
+-    case NOISE_PATTERN_XK:              return noise_pattern_XK;
+-    case NOISE_PATTERN_XX:              return noise_pattern_XX;
+-    case NOISE_PATTERN_KN:              return noise_pattern_KN;
+-    case NOISE_PATTERN_KK:              return noise_pattern_KK;
+-    case NOISE_PATTERN_KX:              return noise_pattern_KX;
+-    case NOISE_PATTERN_IN:              return noise_pattern_IN;
+-    case NOISE_PATTERN_IK:              return noise_pattern_IK;
+-    case NOISE_PATTERN_IX:              return noise_pattern_IX;
+-    default:                            return 0;
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_N, noise_pattern_N);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_K, noise_pattern_K);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_X, noise_pattern_X);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_NN, noise_pattern_NN);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_NK, noise_pattern_NK);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_NX, noise_pattern_NX);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_XN, noise_pattern_XN);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_XK, noise_pattern_XK);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_XX, noise_pattern_XX);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_KN, noise_pattern_KN);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_KK, noise_pattern_KK);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_KX, noise_pattern_KX);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_IN, noise_pattern_IN);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_IK, noise_pattern_IK);
++    NOISE_PATTERN_ENTRY(NOISE_PATTERN_IX, noise_pattern_IX);
++    default: *size = 0; return 0;
+     }
++#undef NOISE_PATTERN_ENTRY
++}
++
++const uint8_t *noise_pattern_lookup(int id)
++{
++    size_t size;
++    return noise_pattern_lookup_sized(id, &size);
+ }
+ 
+ /**
+@@ -677,20 +688,27 @@ int noise_pattern_expand
+     const uint8_t *base_pattern;
+     const uint8_t *pattern_end;
+     size_t pattern_len;
++    size_t table_size;
++    size_t search_len;
+     NoisePatternFlags_t flags;
+     uint8_t temp[NOISE_MAX_TOKENS];
+     size_t index;
+     int err;
+ 
+     /* Look up the base pattern */
+-    base_pattern = noise_pattern_lookup(pattern_id);
++    base_pattern = noise_pattern_lookup_sized(pattern_id, &table_size);
+     if (!base_pattern)
+         return NOISE_ERROR_UNKNOWN_NAME;
++    if (table_size <= NOISE_PATTERN_HEADER_LEN)
++        return NOISE_ERROR_INVALID_LENGTH;
+ 
+-    /* Copy the base pattern into the return buffer */
++    /* Copy the base pattern into the return buffer: search for the end
++       token only within the table (and within NOISE_MAX_TOKENS) */
++    search_len = table_size - NOISE_PATTERN_HEADER_LEN;
++    if (search_len > NOISE_MAX_TOKENS - NOISE_PATTERN_HEADER_LEN)
++        search_len = NOISE_MAX_TOKENS - NOISE_PATTERN_HEADER_LEN;
+     pattern_end = (const uint8_t *)memchr
+-        (base_pattern + 2, NOISE_TOKEN_END,
+-         NOISE_MAX_TOKENS - NOISE_PATTERN_HEADER_LEN);
++        (base_pattern + NOISE_PATTERN_HEADER_LEN, NOISE_TOKEN_END, search_len);
+     if (!pattern_end)
+         return NOISE_ERROR_INVALID_LENGTH;
+     pattern_len = pattern_end + 1 - base_pattern;

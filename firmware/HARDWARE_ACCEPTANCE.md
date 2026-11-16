@@ -96,3 +96,15 @@ without `CONFIG_DSP_APP_ALLOW_PRODUCTION`; leave that off during bring-up).
 | 7.9 | Power cycle and brownout: retained block discarded, clock untrusted until a sync | logs | |
 | 7.10 | Deep-sleep current with the runtime image | power analyzer | |
 | 7.11 | Pin map from the board schematic: button on GPIO3–5 (not GPIO2), battery ADC on ADC1, pump gate not on strapping/USB/UART0 pins | hardware review record | |
+
+## 8. BLE security (M1.10; needs the M1.10c/d integration)
+
+The M1.10a gate measured noise-c on the host and estimated the stack from the RISC-V call graph;
+these figures are **not** target measurements.
+
+| # | Measure | How | Result |
+|---|---|---|---|
+| 8.1 | Peak heap of one Noise `XXpsk3` and one `IK` handshake (device side) | `heap_caps_get_minimum_free_size` around the handshake (the gate's `esp32c3` probe prints it) | |
+| 8.2 | Stack high-water mark of the task running the handshake | `uxTaskGetStackHighWaterMark` | |
+| 8.3 | Handshake duration (X25519 in software) for XXpsk3 and IK, and per-frame encrypt/decrypt time | timestamps (`esp_timer_get_time`) | |
+| 8.4 | Hardware RNG quality with the radio on during a BLE session (ephemeral keys) | ESP-IDF RNG notes; entropy check | |

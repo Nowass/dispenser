@@ -9,6 +9,7 @@
 # Keep the source list here only.
 set(DSP_DOMAIN_SRCS
     "src/dsp_app.c"
+    "src/dsp_bleproto.c"
     "src/dsp_codec.c"
     "src/dsp_config.c"
     "src/dsp_connectivity.c"

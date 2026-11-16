@@ -1,0 +1,26 @@
+dependencies:
+  esphome/libsodium:
+    component_hash: 39bee6f58d2d7fb8f2d30e04133afe60d0b642792196d36cde3a6dd07738fb08
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.10021.12
+  esphome/noise-c:
+    dependencies:
+    - name: esphome/libsodium
+      version: 1.10021.12
+    source:
+      path: ../build/esp-deps/esphome__noise-c
+      type: local
+    version: 0.1.31
+  idf:
+    source:
+      type: idf
+    version: 6.1.0
+direct_dependencies:
+- esphome/libsodium
+- esphome/noise-c
+manifest_hash: 7c4e35062884d623413a6520a9b841db26d8b76f9621d4a377c39bbaaad40918
+target: esp32c3
+version: 3.0.0

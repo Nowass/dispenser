@@ -69,6 +69,9 @@ target_compile_definitions(test_recurrence_vectors PRIVATE DSP_VECTORS_DIR="${DS
 # Shared notification protocol v1 vectors (M1.8), also consumed by the backend Vitest suite.
 dsp_add_host_test(test_proto_vectors test_proto_vectors.c)
 target_compile_definitions(test_proto_vectors PRIVATE DSP_VECTORS_DIR="${DSP_VECTORS_DIR}")
+# M1.10a: BLE protocol v1 codec against the shared vectors, plus property and fuzz tests.
+dsp_add_host_test(test_bleproto test_bleproto.c)
+target_compile_definitions(test_bleproto PRIVATE DSP_VECTORS_DIR="${DSP_VECTORS_DIR}")
 dsp_add_host_test(test_recurrence test_recurrence.c)
 dsp_add_host_test(test_exec test_exec.c support/fake_store.c)
 dsp_add_host_test(test_storage test_storage.c support/fake_kv.c)

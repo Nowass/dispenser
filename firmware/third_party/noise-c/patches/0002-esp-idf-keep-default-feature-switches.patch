@@ -1,0 +1,17 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e26ac47..00ab0b3 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -45,9 +45,9 @@ if(ESP_PLATFORM)
+     INCLUDE_DIRS "include" "src"
+     REQUIRES esphome__libsodium
+   )
+-  # The same three switches library.json turns off for PlatformIO builds
+-  target_compile_definitions(${COMPONENT_LIB} PRIVATE
+-    NOISE_USE_PROTOCOL_NAME_TABLE=0 NOISE_USE_FALLBACK=0 NOISE_USE_HFS=0)
++  # Dispenser V2: keep the upstream default feature switches (name table, fallback,
++  # hfs) so that Noise_XXpsk3 and Noise_IK are available; this is the configuration
++  # the full upstream test suite validates.
+ else()
+   cmake_minimum_required(VERSION 3.13)
+   if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

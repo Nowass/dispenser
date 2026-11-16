@@ -275,6 +275,12 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - **Shutdown:** pump OFF confirmed, HTTPS ended, Wi-Fi `DISABLED`, BLE stopped (3 attempts), retained block saved; sleep only if all are confirmed, otherwise `fail_safe` (platform: actuators off, SoC reset). 3 consecutive fail-safes inhibit dosing until a confirmed shutdown. **Hardware integration risk:** an OFF confirmation that never succeeds gives a reset loop (pump OFF by hardware, battery drain); no recovery mechanism before the gate and reset behavior are verified.
 - **Hardware-unverified:** deep sleep, wake sources, RTC memory per reset type, the fail-safe reset and gate level, BLE stop/resume latency (M1.9c adapters and the board).
 
+### BLE protocol (M1.10a: codec and Noise gate; design revision 3)
+
+- **Protocol:** one GATT service (Info, Request, Response), binary v1 frames (8-byte header, ≤ 520 bytes, fragments for any ATT MTU), normative `docs/BLE_PROTOCOL.md`; codecs `dsp_bleproto` (C) and `cz.nowass.dispenser.ble.protocol` (Kotlin) share `test-vectors/ble_protocol_v1.txt`.
+- **Security (approved design, `docs/BLE_PROTOCOL_DESIGN.md`):** no BLE pairing/bonding; Noise `XXpsk3` (enrollment with the per-device setup code, owner invites for further phones) and `IK` (sessions), 25519/ChaChaPoly/SHA256, through the pinned `esphome/noise-c` 0.1.31 + `esphome/libsodium` on both platforms (Android via NDK/JNI), with two temporary local patches (`firmware/third_party/noise-c`). Four independent, revocable phone identities; physical recovery procedure; durable per-phone manual-dose anti-replay.
+- **Status:** codec and feasibility gate done (M1.10a); session security, domain commands, NimBLE and Android integration are M1.10b–f.
+
 ### Platform adapters and runtime (firmware M1.9c, compiled; not run on hardware)
 
 - **Adapters (`dispenser_platform`):** power port (reset reason + wake sources → wake cause, 48-byte retained block in `RTC_NOINIT` behind a length header, RTC timer wake, button wake only for a reviewed GPIO0–5 non-strapping pin, deep sleep, fail-safe reset), `portMUX` queue lock, **simulated pump without any GPIO**, time-continuity port. Pure rules in `dsp_platform_logic.c`, host-tested.

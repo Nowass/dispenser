@@ -1,0 +1,7 @@
+# Same patched noise-c tree as the host/Android gate builds (prepared by run_gate.sh from the
+# pinned commit + ../../../patches); libsodium from the registry at the version noise-c pins.
+dependencies:
+  esphome/noise-c:
+    version: "==0.1.31"
+    override_path: "../../build/esp-deps/esphome__noise-c"
+  esphome/libsodium: "==1.10021.12"
