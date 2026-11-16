@@ -1,12 +1,14 @@
 # Shared test vectors
 
-Machine-readable test cases that the Android app and the ESP32 firmware both run, so that the two
-implementations of the same product rule cannot drift apart.
+Machine-readable test cases that two implementations of the same rule both run, so that they
+cannot drift apart: the Android app and the ESP32 firmware (scheduling), and the ESP32 firmware
+and the Cloudflare backend (notification protocol).
 
 | File | Content | Consumers |
 |---|---|---|
 | `recurrence_v1.txt` | Schedules and expected occurrences (ONCE/DAILY/WEEKLY, DST, boundaries, validation, identity) | `firmware/test/host/test_recurrence_vectors.c`, `android/app/src/test/.../domain/RecurrenceVectorTest.kt` |
 | `europe_prague_dst_v1.txt` | Europe/Prague DST transition instants 2000–2099 | same two tests |
+| `notification_protocol_v1.txt` | Notification protocol v1 (M1.8): firmware notes → exact request bodies, canonical payloads and SHA-256; notes the firmware must refuse; raw requests → the backend's exact responses; responses → the firmware's classification | `firmware/test/host/test_proto_vectors.c`, `cloudflare/dispenser-notify/test/protocol-vectors.test.ts` |
 
 Expected values are written by hand from the Android unit tests and the IANA rules (the DST table
 was generated from IANA tzdata 2026e with Python `zoneinfo`). They are **never** produced by
@@ -42,3 +44,19 @@ Disabled schedules have no occurrences in any query (Android applies `enabled` i
 consumer of `RecurrenceEngine`; the firmware engine applies it itself).
 
 Adding a record type or changing the meaning of a key requires a new format version (`_v2`).
+
+## Notification protocol vectors (`notification_protocol_v1.txt`)
+
+Same line format. Expected values were produced from the `PROTOCOL.md` rules by a standalone
+Python script (compact `json.dumps` and `hashlib` SHA-256), never by the firmware or the
+backend. The file header documents the record types:
+
+| Record | Firmware test | Backend test |
+|---|---|---|
+| `encode` | the encoder produces exactly `body`; `canonical` = body without `schema_version`/`attempt` | validator accepts `body`; canonical payload = `canonical`; hash = `sha256`; POST answers 201 then 200 with the exact acknowledgement bodies; D1 stores `canonical` |
+| `noencode` | the encoder refuses the note | — |
+| `request` | classifies the backend's `response` as `result`/`diag`/`error`/`field` | POST `body` answers exactly `status` + `response` |
+| `response` | classifies `status` + `body` for the sent ID | for `scenario != -`: the backend produces exactly this status and body |
+
+A changed protocol needs a new file (`notification_protocol_v2.txt`); v1 vectors stay valid for
+as long as v1 is accepted.

@@ -259,6 +259,16 @@ npx wrangler dev --test-scheduled     # alternative: GET /__scheduled fires the 
 The tests never use the Cloudflare account, the production database, Google, or a real
 secret.
 
+- **Shared protocol vectors (M1.8):** `test/protocol-vectors.test.ts` runs
+  `../../test-vectors/notification_protocol_v1.txt`, the same file as the firmware host test
+  `test_proto_vectors.c`: every firmware request body is accepted with exactly the expected
+  canonical payload and hash, answered with the exact acknowledgement bodies, and every
+  backend-produced response (400 variants, 401, 404, 405, 409, 413, 415) is byte-exact.
+- **Firmware end to end (M1.8):** `firmware/test/integration/notify_e2e.mjs` runs the real
+  firmware domain code over real TLS through a fault-injection proxy against this Worker
+  under `wrangler dev --local` (throwaway D1, fake Gmail). It uses this package's `wrangler`
+  but is run from the firmware side (see `firmware/test/integration/README.md`).
+
 - **Delivery coverage:**
   - successful sending; priority order and the per-run limit;
   - authentication failure, an expired access token, refresh-token failure (revoked or

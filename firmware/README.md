@@ -4,9 +4,9 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: M1.1–M1.5 (recurrence, execution history, persistent storage, time management,
-notification engine) committed; M1.7 (HTTPS notification transport) implemented, awaiting
-review.**
+**Status: M1.1–M1.5 and M1.7 (recurrence, execution history, persistent storage, time
+management, notification engine, HTTPS notification transport) committed; M1.8 (integration
+and robustness tests) implemented, awaiting review.**
 At run time the firmware still only logs its identification. The domain and platform
 components are compiled into the image's component libraries but not called by
 `app_main` (optional diagnostics exist, off by default), Wi-Fi is never started, and
@@ -48,6 +48,10 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   ESP-IDF `esp_http_client` adapter (full certificate bundle), factory-MAC device ID,
   read-only credential providers, developer provisioning tool, off-by-default diagnostic.
   See [HTTPS notification transport](#https-notification-transport-and-connectivity-session-m17).
+- (M1.8) **Integration and robustness:** shared protocol vectors with the backend, and a local
+  end-to-end harness (real domain code, real TLS, the committed Worker under `wrangler dev`,
+  local D1, fake Gmail, fault-injection proxy, 1,000 randomized sessions). See
+  [Verification levels](#verification-levels-m18).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
@@ -145,6 +149,7 @@ firmware/
 ├── sdkconfig.defaults          committed Kconfig defaults (target, flash size, partition table, TLS bundle)
 ├── partitions.csv              4 MB partition table (M1.7)
 ├── tools/provision_dev_secrets.py  developer-only nvs_sec image builder (+ its test, M1.7)
+├── HARDWARE_ACCEPTANCE.md      on-device acceptance checklist (M1.8; not run yet)
 ├── main/                       composition root: the only code calling ESP-IDF APIs
 │   ├── CMakeLists.txt          REQUIRES dispenser_domain dispenser_platform esp_app_format log
 │   ├── Kconfig.projbuild       DSP_STORAGE_SMOKE_TEST, DSP_TIME_SYNC_DIAGNOSTIC,
@@ -194,7 +199,12 @@ firmware/
 │   ├── test_time.c                time management tests (M1.4)
 │   ├── test_notify.c              notification engine and reservoir tests (M1.5, + M1.7 rejections)
 │   ├── test_proto.c               protocol encoder and response classifier (M1.7)
-│   └── test_https.c               HTTPS transport and connectivity session (M1.7)
+│   ├── test_https.c               HTTPS transport and connectivity session (M1.7)
+│   └── test_proto_vectors.c       runs ../../test-vectors/notification_protocol_v1.txt (M1.8)
+├── test/integration/           local end-to-end harness (M1.8, see its README)
+│   ├── notify_harness.c           real domain code driven over stdin
+│   ├── posix_https_port.[ch]      host HTTP port: real TLS (OpenSSL), test CA, timeouts
+│   └── notify_e2e.mjs             TLS fault proxy, wrangler dev + local D1, fake Gmail, scenarios
 └── .devcontainer/              optional pinned ESP-IDF v6.1 build container
 
 ../test-vectors/                shared C/Kotlin test vectors (see its README)
@@ -1273,6 +1283,23 @@ bundle; zero compiler warnings). The slot is 1.75 MiB = 1,835,008 B.
 - Energy: no measurement. Estimates from the design review (about 1–2 s of extra radio and
   CPU time when HTTPS rides on a sync session) are not results.
 
+## Verification levels (M1.8)
+
+| Behavior | Host-verified (CTest, fakes, ASan/UBSan) | Locally integrated (`test/integration`) | Hardware |
+|---|---|---|---|
+| Notification engine, queue, freeze, rejection log, diagnostics | yes | yes (with the real Worker, power cuts at every write) | not run |
+| Protocol encoder / response classifier | yes, plus shared vectors with the backend | yes (real Worker responses) | not run |
+| HTTPS transport (domain) and session budget | yes | yes (real monotonic clock) | not run |
+| TLS | — | OpenSSL with certificate-chain and host-name verification (untrusted CA, wrong host, TLS black hole) | **mbedTLS + certificate bundle unverified** |
+| `esp_http_client` adapter, keep-alive, phase mapping | — | — (host port instead) | **unverified** |
+| Backend contract (201/200/400/401/404/405/409/413/415, idempotency, D1, scheduled e-mail) | shared vectors | yes (committed Worker, local D1, fake Gmail) | staging (needs approval) |
+| Connectivity session (D1-B, D4, guards) | yes | yes (fake Wi-Fi/NTP/clock) | **real Wi-Fi/SNTP unverified** |
+| `nvs_sec` credentials, NVS on flash, partitions | provisioning tool tested with dummy values | — | **unverified** |
+| Energy, TLS heap and timing | — | — | **not measured** |
+
+Hardware behavior is listed, with pass criteria, in
+[`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md).
+
 ## Build (ESP32-C3, native)
 
 ```sh
@@ -1337,7 +1364,16 @@ Current host tests (CTest names):
 
 | `test_notify` | notification engine (M1.5, extended in M1.7): reservoir threshold, hysteresis, refill, battery, dosing and device errors, deduplication without writes, payload freshness (latest value until the first attempt, frozen afterwards), freeze surviving power loss after the receiver accepted (same ID, same payload, nothing lost) and zero transport calls when the freeze write fails, Wi-Fi failure, ACK, uncertain delivery and retry with the identical ID, durable before sent, restarts, power loss during queue updates and after an ACK, weekly reminders, backward/forward clock corrections, unknown clock, capacity exhaustion and overflow report, priority and no CRITICAL eviction, 120-day outage, manual dose consumption, single-use dose permits, uncertainty set by dosing errors and cleared by refill, golden bytes and strict decoding of `notify`, and a randomized 4000-step run with faults and restarts (one content per ID); M1.7: permanent rejection logged and removed in one write (also with the write failing outright, landing without confirmation, and a power cut at every write position: never lost, never both queued and logged), at most 2 rejections per session, log overflow with `lost_unread` and acknowledgement, diagnostic flags surviving restarts and their clearing conditions, a rejection without a 4xx treated as FAILED, the session budget leaving unstarted entries untouched, `notify` format-2 golden bytes and strict decoding, format-1 records read and upgraded |
 | `test_proto` | protocol v1 (M1.7): golden request bodies (incl. the PROTOCOL.md example, every code name, extreme values, 48-bit device ID), refusal of invalid notes and too-small buffers, every response rule (strict 200/201 acknowledgement with the exact production bodies, R1 rules for 400/401/404/405/409/413/415/3xx/429/5xx, connect/TLS/send/no-response phases), and 20,000 fuzzed bodies (no crash, no ACK/REJECTED without the confirming body) |
+| `test_proto_vectors` | the shared protocol v1 vectors (M1.8, also run by the backend's Vitest): exact request bodies and canonical payloads, notes the encoder must refuse, the firmware classification of every backend response (byte-exact bodies) and of synthetic responses |
 | `test_https` | HTTPS transport and connectivity session (M1.7) over fakes: exact body and token handed to the port, token wiped after every request, token validation (length, spaces, control characters); **systemic 401/404/405/413/415, ambiguous 400, mismatched 409, redirects, 429 and 5xx never drain the queue** (20 sessions each, then recovery); event-specific 409/400 removed and logged; mismatched acknowledgement UNCERTAIN, then duplicate ACK with an identical payload; timeout after the backend accepted plus power loss; connect/TLS failures; the 60 s budget with a monotonic clock; session gating: dosing/permit/BLE guard, next-dose distance, regular sync vs CRITICAL on an existing wake, the 1-hour limit, the Wi-Fi backoff, untrusted time (nothing sent) vs trusted HOLDOVER, missing token, Wi-Fi always shut down |
+
+Python tool test (no ESP-IDF needed; the real-generator case runs inside an ESP-IDF shell):
+`python3 tools/test_provision_dev_secrets.py`.
+
+Local end-to-end integration (M1.8; local services and synthetic credentials only): one
+command, `test/integration/run.sh` (prerequisites: Node.js ≥ 22.12, OpenSSL, CMake, `npm ci`
+in `cloudflare/dispenser-notify`; non-zero exit on failure; cleans up all processes and
+temporary data). See [`test/integration/README.md`](test/integration/README.md).
 
 Planned host coverage (later milestones): dose limits, service-mode transitions, event journal, NVS adapter (on target). The Android domain
 (`android/app/src/main/java/cz/nowass/dispenser/domain/`) is the behavioral reference.
@@ -1391,6 +1427,7 @@ alternative to the native setup, not a requirement.
 | Protocol encoder/classifier, HTTPS transport, connectivity session (M1.7) | implemented, tested with fakes (port, token, Wi-Fi, NTP, clock, storage) | compiled; linked with the optional diagnostic | not run |
 | ESP-IDF HTTP port, device ID, `nvs_sec` credential providers (M1.7) | n/a (ESP-IDF only) | compiled; linked with the optional diagnostic | **not run** (no TLS on a real network yet) |
 | Developer credential provisioning tool | tested with dummy values (stub and real `nvs_partition_gen`) | n/a | image never flashed |
+| Integration: domain + real TLS + committed Worker + local D1 + fake Gmail (M1.8) | locally integrated (`test/integration`, 1,000 randomized sessions) | n/a | not run |
 | Battery monitor | not started | — | — |
 | Dosing service, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
@@ -1418,6 +1455,6 @@ alternative to the native setup, not a requirement.
 
 ## Next milestone
 
-After the M1.7 review: M1.8 (integration and robustness: shared protocol vectors, local
-end-to-end harness against a local Worker, fault matrix) is designed and approved in
-principle; its implementation is not authorized yet.
+After the M1.8 review: next milestone to be agreed. The on-device acceptance
+([`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md)) waits for the board and an approved
+staging backend.

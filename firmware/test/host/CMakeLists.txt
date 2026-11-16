@@ -65,6 +65,10 @@ set(DSP_VECTORS_DIR "${FW_ROOT}/../test-vectors")
 get_filename_component(DSP_VECTORS_DIR "${DSP_VECTORS_DIR}" ABSOLUTE)
 dsp_add_host_test(test_recurrence_vectors test_recurrence_vectors.c)
 target_compile_definitions(test_recurrence_vectors PRIVATE DSP_VECTORS_DIR="${DSP_VECTORS_DIR}")
+
+# Shared notification protocol v1 vectors (M1.8), also consumed by the backend Vitest suite.
+dsp_add_host_test(test_proto_vectors test_proto_vectors.c)
+target_compile_definitions(test_proto_vectors PRIVATE DSP_VECTORS_DIR="${DSP_VECTORS_DIR}")
 dsp_add_host_test(test_recurrence test_recurrence.c)
 dsp_add_host_test(test_exec test_exec.c support/fake_store.c)
 dsp_add_host_test(test_storage test_storage.c support/fake_kv.c)
@@ -80,3 +84,18 @@ foreach(tz "America/New_York" "Asia/Kathmandu")
     set_tests_properties(test_recurrence_vectors_TZ_${tz_name} PROPERTIES
                          ENVIRONMENT "TZ=${tz}" TIMEOUT 30)
 endforeach()
+
+# M1.8 integration harness (not a CTest: needs Node.js, OpenSSL and the local Worker; run
+# by firmware/test/integration/notify_e2e.mjs). Built only when OpenSSL is available.
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+    add_executable(notify_harness
+        ${CMAKE_CURRENT_LIST_DIR}/../integration/notify_harness.c
+        ${CMAKE_CURRENT_LIST_DIR}/../integration/posix_https_port.c
+        ${CMAKE_CURRENT_LIST_DIR}/support/fake_kv.c)
+    target_include_directories(notify_harness PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/support" "${CMAKE_CURRENT_LIST_DIR}/../integration")
+    target_link_libraries(notify_harness PRIVATE dispenser_domain OpenSSL::SSL OpenSSL::Crypto)
+else()
+    message(STATUS "OpenSSL not found: the M1.8 integration harness is not built")
+endif()
