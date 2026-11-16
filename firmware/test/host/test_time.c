@@ -812,31 +812,27 @@ static void test_wifi_manager_lifecycle(void)
 static void test_wake_plan(void)
 {
     dsp_utc_t now = T0;
-    dsp_wake_inputs_t in = {true, now + 3 * H, true, now + 5 * H, false, 0, false, 0};
+    dsp_wake_inputs_t in = {true, now + 3 * H, true, now + 5 * H, false, 0};
     dsp_wake_plan_t p = dsp_wake_plan(&in, now, 24 * H);
     DSP_CHECK_EQ_INT(DSP_WAKE_DOSE, p.reason);
     DSP_CHECK_EQ_INT(3 * H, p.sleep_s);
     in.sync_at = now + H;
     p = dsp_wake_plan(&in, now, 24 * H);
     DSP_CHECK_EQ_INT(DSP_WAKE_TIME_SYNC, p.reason);
-    in.has_notification = true;
-    in.notification_at = now + 30 * 60;
-    p = dsp_wake_plan(&in, now, 24 * H);
-    DSP_CHECK_EQ_INT(DSP_WAKE_NOTIFICATION, p.reason);
     in.has_other = true;
     in.other_at = now - 5; /* already due */
     p = dsp_wake_plan(&in, now, 24 * H);
     DSP_CHECK_EQ_INT(DSP_WAKE_OTHER, p.reason);
     DSP_CHECK_EQ_INT(0, p.sleep_s);
     /* Tie: dose wins. */
-    dsp_wake_inputs_t tie = {true, now + H, true, now + H, false, 0, false, 0};
+    dsp_wake_inputs_t tie = {true, now + H, true, now + H, false, 0};
     DSP_CHECK_EQ_INT(DSP_WAKE_DOSE, dsp_wake_plan(&tie, now, 24 * H).reason);
     /* Nothing pending / far future: capped. */
-    dsp_wake_inputs_t none = {false, 0, false, 0, false, 0, false, 0};
+    dsp_wake_inputs_t none = {false, 0, false, 0, false, 0};
     p = dsp_wake_plan(&none, now, 12 * H);
     DSP_CHECK_EQ_INT(DSP_WAKE_MAX_SLEEP, p.reason);
     DSP_CHECK_EQ_INT(12 * H, p.sleep_s);
-    dsp_wake_inputs_t far = {true, INT64_MAX, false, 0, false, 0, false, 0};
+    dsp_wake_inputs_t far = {true, INT64_MAX, false, 0, false, 0};
     p = dsp_wake_plan(&far, now, 12 * H);
     DSP_CHECK_EQ_INT(DSP_WAKE_MAX_SLEEP, p.reason);
     DSP_CHECK_EQ_INT(0, dsp_wake_plan(NULL, now, 10).sleep_s);
@@ -844,7 +840,7 @@ static void test_wake_plan(void)
     dsp_clock_t invalid = {1000, false, 0};
     dsp_utc_t at = 0;
     DSP_CHECK(!dsp_wake_next_dose(&S, 1, TZ, invalid, &at));
-    dsp_wake_inputs_t boot_in = {false, 0, true, 1000 + 15 * 60, false, 0, false, 0};
+    dsp_wake_inputs_t boot_in = {false, 0, true, 1000 + 15 * 60, false, 0};
     p = dsp_wake_plan(&boot_in, 1000, 24 * H);
     DSP_CHECK_EQ_INT(DSP_WAKE_TIME_SYNC, p.reason);
     DSP_CHECK_EQ_INT(15 * 60, p.sleep_s);

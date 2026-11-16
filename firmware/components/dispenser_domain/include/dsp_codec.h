@@ -53,9 +53,20 @@ enum {
 #define DSP_NOTIFY_HEADER_BYTES 14
 #define DSP_NOTIFY_COND_BYTES 26
 #define DSP_NOTIFY_ENTRY_BYTES 32
-#define DSP_NOTIFY_RECORD_BYTES                                                              \
+/* Format 1 (M1.5, 682 B): still decoded (as "no diagnostics"), never written. */
+#define DSP_NOTIFY_RECORD_V1_BYTES                                                           \
     (DSP_NOTIFY_HEADER_BYTES + DSP_COND_COUNT * DSP_NOTIFY_COND_BYTES +                      \
      DSP_NOTIFY_QUEUE_CAPACITY * DSP_NOTIFY_ENTRY_BYTES)
+/* Format 2 (M1.7, 758 B) = format 1 + diagnostics (4 B) + rejection log header (8 B) +
+ * 4 rejection entries x 16 B. The only format written. */
+#define DSP_NOTIFY_FORMAT_V1 1
+#define DSP_NOTIFY_FORMAT_V2 2
+#define DSP_NOTIFY_DIAG_BYTES 4
+#define DSP_NOTIFY_REJLOG_HEADER_BYTES 8
+#define DSP_NOTIFY_REJECTION_BYTES 16
+#define DSP_NOTIFY_RECORD_BYTES                                                              \
+    (DSP_NOTIFY_RECORD_V1_BYTES + DSP_NOTIFY_DIAG_BYTES + DSP_NOTIFY_REJLOG_HEADER_BYTES +   \
+     DSP_REJECTION_LOG_CAPACITY * DSP_NOTIFY_REJECTION_BYTES)
 #define DSP_RECORD_MAX_BYTES DSP_SCHEDULE_SET_MAX_BYTES
 
 typedef enum {
@@ -100,11 +111,18 @@ dsp_codec_status_t dsp_codec_decode_config(const uint8_t *buf, size_t len, dsp_c
 size_t dsp_codec_encode_time(const dsp_time_meta_t *meta, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_time(const uint8_t *buf, size_t len, dsp_time_meta_t *out);
 
-/* notify (682 B): header 0 type | 1 version | 2..5 epoch | 6..9 next_seq | 10..11 dropped |
+/* notify, format 2 (758 B; format 1 = the first 682 B with version byte 1):
+ * header 0 type | 1 version | 2..5 epoch | 6..9 next_seq | 10..11 dropped |
  * 12 flags | 13 zero; then 6 conditions x 26 B (flags, reminders, opened_at i64,
  * next_reminder_at i64, value u32, value2 u32); then 16 entries x 32 B (0..3 seq | 4 type | 5 severity |
  * 6 condition | 7 flags | 8 reminder_no | 9 zero | 10..11 attempts | 12..19 created_at |
- * 20..21 code | 22..25 value | 26..29 value2 | 30..31 zero). */
+ * 20..21 code | 22..25 value | 26..29 value2 | 30..31 zero);
+ * format 2 only, at 682: diagnostics 0 tx_diag | 1 zero | 2..3 tx_diag_status;
+ * at 686: rejection log 0..3 total | 4..5 lost_unread | 6 unread | 7 count;
+ * at 694: 4 rejections x 16 B (0..3 seq | 4 type | 5 flags | 6..7 code | 8..9 http_status |
+ * 10 error | 11 field | 12..13 attempts | 14..15 zero).
+ * The decoder accepts format 1 (diagnostics and log zero) and 2; the encoder writes 2.
+ * Forward-only: firmware that knows only format 1 reports format 2 as unsupported. */
 size_t dsp_codec_encode_notify(const dsp_notify_state_t *s, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_notify(const uint8_t *buf, size_t len, dsp_notify_state_t *out);
 

@@ -87,3 +87,9 @@ Desktop.ini
 # Machine-specific editor settings (absolute paths to the local ESP-IDF install,
 # clangd binary and build directory). Generic .vscode files may be committed.
 .vscode/settings.json
+
+# Developer credential provisioning (M1.7): never committed. The secrets JSON and the
+# generated NVS image live outside the repository; these patterns are a safety net.
+*nvs_sec*.bin
+*dev-secrets*.json
+*dev_secrets*.json

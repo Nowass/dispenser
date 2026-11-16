@@ -506,7 +506,8 @@ static void test_unsupported_versions(void)
         uint8_t v[FAKE_KV_MAX_VALUE];
         size_t len = e->len;
         memcpy(v, e->value, len);
-        v[1] = 2; /* format version from a newer firmware */
+        /* Format version from a newer firmware ("notify" is at format 2 since M1.7). */
+        v[1] = strcmp(keys[k], "notify") == 0 ? 3 : 2;
         fake_kv_put_raw(&kv, keys[k], v, len);
         expect_open(DSP_STORAGE_ERR_UNSUPPORTED);
     }

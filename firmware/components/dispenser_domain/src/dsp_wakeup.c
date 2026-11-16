@@ -17,7 +17,6 @@ dsp_wake_plan_t dsp_wake_plan(const dsp_wake_inputs_t *in, dsp_utc_t now, int64_
     }
     consider(&p, in->has_dose, in->dose_at, DSP_WAKE_DOSE);
     consider(&p, in->has_sync, in->sync_at, DSP_WAKE_TIME_SYNC);
-    consider(&p, in->has_notification, in->notification_at, DSP_WAKE_NOTIFICATION);
     consider(&p, in->has_other, in->other_at, DSP_WAKE_OTHER);
     /* Overflow-safe cap: compare differences, never add to an arbitrary instant. */
     if (p.reason == DSP_WAKE_NONE || (p.wake_at > now && p.wake_at - now > max_sleep_s)) {

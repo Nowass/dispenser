@@ -443,10 +443,49 @@ bool dsp_notify_delivery_requested(const dsp_notify_t *n)
     return dsp_notify_pending_count(n) > 0;
 }
 
+/* Appends a rejection to the log (oldest dropped when full; an unread drop is counted). */
+static void log_rejection(dsp_notify_state_t *s, const dsp_note_t *e, const dsp_tx_detail_t *d)
+{
+    dsp_rejection_log_t *log = &s->rejections;
+    if (log->count == DSP_REJECTION_LOG_CAPACITY) {
+        if (log->unread == DSP_REJECTION_LOG_CAPACITY && log->lost_unread < UINT16_MAX) {
+            log->lost_unread++; /* the dropped oldest entry had not been read */
+        }
+        memmove(&log->entry[0], &log->entry[1],
+                (DSP_REJECTION_LOG_CAPACITY - 1) * sizeof log->entry[0]);
+        log->count--;
+        if (log->unread > log->count) {
+            log->unread = log->count;
+        }
+    }
+    dsp_rejection_t *r = &log->entry[log->count++];
+    memset(r, 0, sizeof *r);
+    r->seq = e->seq;
+    r->type = e->type;
+    r->flags = e->flags;
+    r->code = e->code;
+    r->http_status = d->http_status;
+    r->error = d->error <= DSP_TXERR_MAX ? d->error : DSP_TXERR_OTHER;
+    r->field = d->field <= DSP_TXFIELD_MAX ? d->field : DSP_TXFIELD_OTHER;
+    r->attempts = e->attempts;
+    if (log->unread < log->count) {
+        log->unread++;
+    }
+    if (log->total < UINT32_MAX) {
+        log->total++;
+    }
+}
+
+/* A rejection must describe a 4xx response; anything else is treated as FAILED. */
+static bool rejection_detail_ok(const dsp_tx_detail_t *d)
+{
+    return d->http_status >= 400 && d->http_status <= 499;
+}
+
 dsp_notify_delivery_report_t dsp_notify_deliver(dsp_notify_t *n, const dsp_notify_transport_t *tx,
                                                 size_t max_sends, dsp_notify_clock_t clock)
 {
-    dsp_notify_delivery_report_t r = {0, 0, false, DSP_NOTIFY_OK};
+    dsp_notify_delivery_report_t r = {0, 0, 0, false, false, DSP_NOTIFY_OK};
     if (n == NULL || !n->loaded || tx == NULL || tx->send == NULL) {
         r.status = DSP_NOTIFY_ERR_ARG;
         return r;
@@ -474,6 +513,10 @@ dsp_notify_delivery_report_t dsp_notify_deliver(dsp_notify_t *n, const dsp_notif
         if (pick < 0) {
             break;
         }
+        if (tx->can_send != NULL && !tx->can_send(tx->ctx)) {
+            r.budget_exhausted = true; /* the entry is not touched: no attempt, no freeze */
+            break;
+        }
         sent[pick] = true;
         dsp_note_t *e = &n->s.queue[pick];
         bool first = e->attempts == 0;
@@ -490,21 +533,94 @@ dsp_notify_delivery_report_t dsp_notify_deliver(dsp_notify_t *n, const dsp_notif
             return r;
         }
         r.attempted++;
-        dsp_tx_result_t res = tx->send(tx->ctx, e, n->s.epoch);
+        dsp_tx_detail_t detail;
+        memset(&detail, 0, sizeof detail);
+        dsp_tx_result_t res = tx->send(tx->ctx, e, n->s.epoch, &detail);
         if (res == DSP_TX_ACK) {
             memset(e, 0, sizeof *e);
             r.acked++;
+            n->s.tx_diag = 0; /* end-to-end success: credentials, endpoint, protocol work */
+            n->s.tx_diag_status = 0;
             continue;
         }
-        r.stopped_early = true; /* same entry, same id, retried next session */
+        if (res == DSP_TX_REJECTED && rejection_detail_ok(&detail)) {
+            /* Never silent: log + removal in ONE write, before anything else. On failure
+             * the entry stays queued exactly as before (RAM restored) and we stop. */
+            dsp_note_t saved_entry = *e;
+            dsp_rejection_log_t saved_log = n->s.rejections;
+            log_rejection(&n->s, e, &detail);
+            memset(e, 0, sizeof *e);
+            if (!persist(n)) {
+                *e = saved_entry;
+                n->s.rejections = saved_log;
+                r.stopped_early = true;
+                r.status = DSP_NOTIFY_ERR_STORAGE;
+                return r;
+            }
+            changed = false; /* that write persisted the whole RAM state */
+            r.rejected++;
+            if (r.rejected >= DSP_NOTIFY_MAX_REJECTIONS_PER_SESSION) {
+                r.stopped_early = true; /* safeguard: the rest waits for the next session */
+                break;
+            }
+            continue;
+        }
+        /* FAILED / UNCERTAIN (or an inconsistent rejection): same entry, same id, retried
+         * next session. Systemic causes leave a persistent diagnostic. */
+        uint8_t diag = (uint8_t)(detail.diag & DSP_TXDIAG_ALL);
+        if (res == DSP_TX_REJECTED) {
+            diag |= DSP_TXDIAG_PROTOCOL; /* transport bug: REJECTED without a 4xx */
+        }
+        if (diag != 0) {
+            n->s.tx_diag |= diag;
+            n->s.tx_diag_status = detail.http_status >= 100 && detail.http_status <= 599
+                                      ? detail.http_status
+                                      : 0;
+        }
+        r.stopped_early = true;
         break;
     }
     bool full = false;
-    if (r.acked > 0) {
+    if (r.acked > 0 || r.rejected > 0) {
         changed |= raise_deferred(n, clock, &full);
     }
     r.status = finish(n, changed, DSP_NOTIFY_OK);
     return r;
+}
+
+uint8_t dsp_notify_tx_diag(const dsp_notify_t *n, uint16_t *status)
+{
+    if (status != NULL) {
+        *status = n != NULL ? n->s.tx_diag_status : 0;
+    }
+    return n != NULL ? n->s.tx_diag : 0;
+}
+
+dsp_notify_status_t dsp_notify_clear_tx_diag(dsp_notify_t *n)
+{
+    if (n == NULL || !n->loaded) {
+        return DSP_NOTIFY_ERR_ARG;
+    }
+    bool changed = n->s.tx_diag != 0 || n->s.tx_diag_status != 0;
+    n->s.tx_diag = 0;
+    n->s.tx_diag_status = 0;
+    return finish(n, changed, DSP_NOTIFY_OK);
+}
+
+const dsp_rejection_log_t *dsp_notify_rejections(const dsp_notify_t *n)
+{
+    return n != NULL ? &n->s.rejections : NULL;
+}
+
+dsp_notify_status_t dsp_notify_ack_rejections(dsp_notify_t *n)
+{
+    if (n == NULL || !n->loaded) {
+        return DSP_NOTIFY_ERR_ARG;
+    }
+    bool changed = n->s.rejections.unread != 0 || n->s.rejections.lost_unread != 0;
+    n->s.rejections.unread = 0;
+    n->s.rejections.lost_unread = 0;
+    return finish(n, changed, DSP_NOTIFY_OK);
 }
 
 bool dsp_notify_format_id(uint64_t device_id, uint32_t epoch, uint32_t seq, char *buf, size_t len)

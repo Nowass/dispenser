@@ -211,7 +211,7 @@ The actual binary/wire format must be versioned; no schema above should be imple
   - **The firmware never requests an NVS erase**, not even on `ESP_ERR_NVS_NO_FREE_PAGES` or `NEW_VERSION_FOUND`. ESP-IDF's own init may still write or erase pages as part of its internal recovery; that is library behavior.
   - Multi-record atomicity is avoided by design: the whole schedule set is **one record** (approved), so create, edit, delete and a future full sync are atomic (acceptance test 8). Configuration is one record too. Claim and reservoir consumption span two keys: the history claim first, then the consumption (since M1.5 **before** the pump runs), so a cut can only under-estimate the stock.
   - Schedule IDs (approved: "UUID + bounded tombstones"): refused if active, among the 16 most recently deleted IDs, or present in the history. Beyond that, non-reuse relies on Android UUIDs.
-  - Partition: unchanged (2 MB, single app, NVS 24 KB is sufficient). Recommended final layout for a confirmed 4 MB board: NVS 64 KB plus two OTA slots, decided before field data exists.
+  - Partition (M1.3): 2 MB, single app, NVS 24 KB. **Replaced in M1.7** by the approved 4 MB table: table at 0x10000, `nvs` 80 KiB, `otadata`, `phy_init`, `nvs_sec` 24 KiB (credentials), reserved `nvs_keys`, two 1.75 MiB OTA slots, `coredump` 64 KiB, 256 KiB raw reserve (`firmware/partitions.csv`). The table cannot change over the air, so it is permanent for field devices; the first flash with it must write the full image set.
 
 ## Wireless APIs
 
@@ -224,8 +224,8 @@ The actual binary/wire format must be versioned; no schema above should be imple
 
 ### Wi-Fi
 
-- STA only, connect for SNTP when due or HTTPS alert when queued; connect/TLS/HTTP each with strict timeouts and backoff.
-- Endpoint should be minimal and credential-scoped per device; send immutable `event_id` and no sensitive personal data beyond what is necessary.
+- STA only. **Approved D1-B (M1.7):** Wi-Fi opens only on an existing wake, for the regular SNTP session (all pending notifications ride along) or for a pending CRITICAL notification (at most once per hour, only while the Wi-Fi backoff allows it). Never an extra wake-up, never during dosing, a dose permit or BLE, never close to the next dose. Connect/TLS/HTTP each with strict timeouts and backoff.
+- Endpoint minimal; send immutable `event_id` and no sensitive personal data beyond what is necessary. v1 uses one shared bearer token for all devices (documented limitation); per-device credentials are future work.
 - No periodic heartbeat or status email per user decision. A time-sync-only connection remains allowed at infrequent configurable cadence.
 - Failed alerts cannot cause an infinite Wi-Fi retry loop; preserve pending status until a bounded future retry opportunity or BLE maintenance.
 
@@ -250,9 +250,9 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - **Wi-Fi credentials (approved: interface only).** A provider interface with an explicit "unavailable" result; no credentials exist until BLE provisioning. The driver keeps them in RAM (`WIFI_STORAGE_RAM`), and they are never logged. A connected session can be shared with future HTTPS notifications.
 - **Persistent time metadata (approved: storage layout v2, now part of v3).** A `time` record holds last sync, high-water time, rollback hold and last correction. It is written only when it changes (≤ once per interval). Layout v1 is migrated by adding the key and rewriting the marker last.
 - **Wake planning.** `dsp_wake_plan()` picks the earliest of dose, sync, notification and other, as a relative sleep duration. No timing guarantee until RTC drift and wake latency are measured.
-- **Flash budget.** Linking Wi-Fi brings the image to about 824 KiB (20 % of the 1 MB app partition left), so the OTA partition recommendation is needed before BLE/TLS.
+- **Flash budget.** Linking Wi-Fi brought the image to about 824 KiB (20 % of the old 1 MB app partition left); M1.7 introduced the 4 MB table with 1.75 MiB OTA slots before TLS and BLE.
 
-### Notification engine (firmware M1.5, implemented and host-tested; no transport yet)
+### Notification engine (firmware M1.5, implemented and host-tested; transport since M1.7)
 
 - **Events:** `RESERVOIR_LOW` and `BATTERY_LOW` (WARNING, conditions), `RESERVOIR_BLOCKED` (CRITICAL, condition), `DEVICE_ERROR` (CRITICAL; conditions for storage, sync overdue and clock UNKNOWN after 4 failed syncs (a trusted HOLDOVER clock never raises it and stays usable for dosing), plus a one-shot queue-overflow report), and `DOSING_ERROR` (CRITICAL, one-shot, MANUAL flag for manual doses).
 - **Deduplication and reminders (approved):** a condition creates one event per episode, then a reminder every 7 days while unresolved (trusted clock only; one reminder after a forward jump, pulled in after a backward correction). Resolution withdraws undelivered notifications of the episode. Repeated observations write nothing.
@@ -260,8 +260,19 @@ The actual binary/wire format must be versioned; no schema above should be imple
 - **Delivery (approved):** at-least-once over an injected transport (`ACK` / `FAILED` / `UNCERTAIN`), highest severity first, then oldest. An entry is removed only on ACK, keeps its stable ID `dsp-<device>-<epoch>-<seq>` across retries, and is never sent before it is durable. Delivery happens only in the next regular Wi-Fi session: **no extra wake-ups for any notification**.
 - **Payload freshness (M1.5 review):** an entry reports the latest known value until its first transmission attempt (RAM-only refresh). Its final payload and the freeze marker are persisted in one write before the first send (nothing is sent if that write fails), so retries with the same ID are identical even after a power cut.
 - **Storage failures:** a failed `notify` write never leads to transmitting a non-durable event. Every call returns `ERR_STORAGE`, and `dsp_notify_storage_degraded()` stays true until a write succeeds. The BLE diagnostics milestone must expose it.
-- **Transport (M1.6a):** HTTPS `POST /api/v1/events` to the Cloudflare backend, protocol v1 in `cloudflare/dispenser-notify/PROTOCOL.md`. 201/200 → ACK, 503 or a network failure → FAILED, timeout after sending → UNCERTAIN. **Approved (integration requirement for the HTTPS transport milestone):** 400/404/405/409/413/415 → `DSP_TX_REJECTED`. The entry leaves the queue only after a persistent local diagnostic (event, reason) is written, exposed through future BLE diagnostics; it never blocks later notifications and is never silently discarded. 401 and retryable server failures keep the event pending.
+- **Transport (M1.6a):** HTTPS `POST /api/v1/events` to the Cloudflare backend, protocol v1 in `cloudflare/dispenser-notify/PROTOCOL.md`. 201/200 → ACK, 503 or a network failure → FAILED, timeout after sending → UNCERTAIN. The 2026-11-15 rejection list (400/404/405/409/413/415 → REJECTED) is **superseded by the M1.7 classification below** (R1), so that systemic problems cannot drain the queue.
 - **Reservoir estimate (approved: conservative):** consumption-based, no level sensor. Every authorized dose (automatic or manual) subtracts its full requested volume before the pump runs. This is enforced by a single-use `dsp_dose_permit_t` that only a durable consumption issues, and the future actuator must require it. Start/pump failures and interruptions set the persistent uncertainty flag in the same write as the dosing error; a refill (`dsp_notify_on_refill`) clears it. The estimate stays in the `config` record (revision + 1 per dose).
+
+### HTTPS notification transport (firmware M1.7, implemented and host-tested; not run on hardware)
+
+- **Layers:** pure domain modules `dsp_notify_proto` (exact protocol-v1 body, strict response classifier), `dsp_https_transport` (implements the M1.5 transport over an injected HTTP port, token provider and monotonic clock) and `dsp_connectivity` (one session: guard → reason → Wi-Fi + SNTP → trusted-time check → delivery → Wi-Fi off). ESP-IDF adapters: `esp_http_client` port, factory-MAC device ID, read-only `nvs_sec` credential providers. The domain stays free of ESP-IDF.
+- **TLS (D3):** full ESP-IDF certificate bundle, no pinning, verification and certificate dates never disabled, no redirects, only `https://` URLs.
+- **Trusted time (D4):** no HTTPS without a trusted clock (timekeeper not UNKNOWN, plausible time); the queue is kept. A CLOCK episode may never produce an e-mail (R2, accepted); BLE diagnostics will expose clock problems.
+- **Classification (D8, R1):** ACK only with the strict confirmation body and the sent event ID (else UNCERTAIN). REJECTED only for 409 conflict and a 400 `invalid_field` naming an event-content field. 401 (AUTH), 404/405/3xx (ENDPOINT), 413/415 and ambiguous 400 (PROTOCOL), 429 and 5xx are FAILED and keep the queue; the flags persist and are cleared by the next ACK or a future BLE command. At most 2 rejections per session.
+- **Rejection log (D7):** in the `notify` record (format 2, same layout v3): 4 most recent rejections, total, unread and lost-unread counters; log entry and queue removal in one write. Formats are forward-only (R3): a future OTA must not roll back across a format change.
+- **Budget:** 60 s HTTPS per session; an entry starts only if its 20 s worst case fits, unsent entries stay untouched. Worst-case session (default) 115 s, used for the dose guard (+2 min).
+- **Credentials (D5, development):** `nvs_sec` partition (Wi-Fi + `DEVICE_API_TOKEN`), developer-provisioned from an owner-only file outside the repository; not encrypted (physical-access risk) and one shared token (documented). No eFuse is burned; per-device credentials and authenticated BLE provisioning are future work.
+- **Pending hardware measurements (R4):** flash capacity check, TLS heap peak and handshake time, energy per session, Wi-Fi/BLE runtime memory.
 
 ### Notification backend (Cloudflare: M1.6a ingestion and M1.6b Gmail delivery deployed and verified)
 
@@ -309,5 +320,5 @@ Host-side deterministic tests must cover missed dose, multiple daily schedules, 
 - ~~Behavior of interrupted dose against estimated reservoir volume.~~ Decided in M1.5: full requested volume is subtracted, estimate marked uncertain until refill.
 - Clock synchronization frequency and fallback for full power loss.
 - BLE authentication mechanism and GATT payload protocol.
-- Storage partition sizing, alert backend/provider and OTA strategy.
+- ~~Storage partition sizing, alert backend/provider.~~ Decided: 4 MB table (M1.7), Cloudflare Worker + Gmail (M1.6). Open: OTA strategy (update client, rollback, image signing; record formats are forward-only).
 - Battery voltage measurement hardware and protective cutoff design.

@@ -82,9 +82,52 @@ static bool note_valid(const dsp_note_t *e, uint32_t next_seq)
     return true;
 }
 
+static bool rejection_empty(const dsp_rejection_t *r)
+{
+    return r->seq == 0 && r->type == 0 && r->flags == 0 && r->code == 0 && r->http_status == 0 &&
+           r->error == 0 && r->field == 0 && r->attempts == 0;
+}
+
+static bool rejection_valid(const dsp_rejection_t *r)
+{
+    return r->seq != 0 && severity_of(r->type) > 0 && condition_of(r->type, r->code) != -1 &&
+           (r->flags & ~DSP_NOTE_F_ALL) == 0 && r->http_status >= 400 && r->http_status <= 499 &&
+           r->error <= DSP_TXERR_MAX && r->field <= DSP_TXFIELD_MAX && r->attempts >= 1;
+}
+
+/* Format-2 additions: diagnostic flags and the rejection log invariants (see header). */
+static bool diagnostics_valid(const dsp_notify_state_t *s)
+{
+    if ((s->tx_diag & ~DSP_TXDIAG_ALL) != 0) {
+        return false;
+    }
+    if (s->tx_diag == 0 && s->tx_diag_status != 0) {
+        return false; /* a status is only kept together with a flag */
+    }
+    if (s->tx_diag_status != 0 && (s->tx_diag_status < 100 || s->tx_diag_status > 599)) {
+        return false;
+    }
+    const dsp_rejection_log_t *log = &s->rejections;
+    if (log->count > DSP_REJECTION_LOG_CAPACITY || log->unread > log->count ||
+        log->total < log->count) {
+        return false;
+    }
+    /* Unread entries are only lost when the log was full of unread entries. */
+    if (log->lost_unread != 0 &&
+        (log->count != DSP_REJECTION_LOG_CAPACITY || log->unread != DSP_REJECTION_LOG_CAPACITY)) {
+        return false;
+    }
+    for (size_t i = 0; i < DSP_REJECTION_LOG_CAPACITY; i++) {
+        if (i < log->count ? !rejection_valid(&log->entry[i]) : !rejection_empty(&log->entry[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool dsp_notify_state_is_valid(const dsp_notify_state_t *s)
 {
-    if (s == NULL || (s->flags & ~DSP_NOTIFY_F_ESTIMATE_UNCERTAIN) != 0) {
+    if (s == NULL || (s->flags & ~DSP_NOTIFY_F_ESTIMATE_UNCERTAIN) != 0 || !diagnostics_valid(s)) {
         return false;
     }
     for (size_t c = 0; c < DSP_COND_COUNT; c++) {

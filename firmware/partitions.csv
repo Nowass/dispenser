@@ -1,0 +1,18 @@
+# Dispenser V2 partition table (approved M1.7, P1): Seeed Studio XIAO ESP32-C3, 4 MB flash.
+# Partition table at 0x10000 (CONFIG_PARTITION_TABLE_OFFSET), leaving room for a larger
+# future bootloader (secure boot / flash encryption) without changing this table, which
+# cannot be updated over the air. App slots are 64 KiB aligned; data partitions 4 KiB.
+# Verify the board's flash size (esptool flash-id) before the first flash, and flash the
+# complete image set (bootloader, table, otadata, app) once: NVS moves from 0x9000.
+# OTA itself is NOT implemented yet (no update client, no rollback).
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x11000,  0x14000,
+otadata,    data, ota,      0x25000,  0x2000,
+phy_init,   data, phy,      0x27000,  0x1000,
+nvs_sec,    data, nvs,      0x28000,  0x6000,
+nvs_keys,   data, nvs_keys, 0x2E000,  0x1000,   encrypted
+ota_0,      app,  ota_0,    0x30000,  0x1C0000,
+ota_1,      app,  ota_1,    0x1F0000, 0x1C0000,
+coredump,   data, coredump, 0x3B0000, 0x10000,
+reserve,    data, 0x40,     0x3C0000, 0x40000,

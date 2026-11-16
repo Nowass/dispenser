@@ -24,7 +24,9 @@ typedef enum {
     DSP_WAKE_NONE = 0,
     DSP_WAKE_DOSE,
     DSP_WAKE_TIME_SYNC,
-    DSP_WAKE_NOTIFICATION, /* future: pending alert delivery */
+    /* No notification reason (approved D1-B, M1.7): a wake-up is NEVER scheduled for a
+     * notification. Pending notifications travel in a session on an existing wake (see
+     * dsp_connectivity.h). */
     DSP_WAKE_OTHER,        /* future: any further reason */
     DSP_WAKE_MAX_SLEEP,    /* nothing earlier: periodic re-evaluation */
 } dsp_wake_reason_t;
@@ -34,8 +36,6 @@ typedef struct {
     dsp_utc_t dose_at;
     bool has_sync;
     dsp_utc_t sync_at;
-    bool has_notification;
-    dsp_utc_t notification_at;
     bool has_other;
     dsp_utc_t other_at;
 } dsp_wake_inputs_t;
@@ -48,7 +48,7 @@ typedef struct {
 
 /*
  * Earliest pending reason; past or current instants give sleep_s = 0. Ties: dose first,
- * then sync, notification, other. max_sleep_s (> 0) caps the sleep (reason MAX_SLEEP).
+ * then sync, other. max_sleep_s (> 0) caps the sleep (reason MAX_SLEEP).
  */
 dsp_wake_plan_t dsp_wake_plan(const dsp_wake_inputs_t *in, dsp_utc_t now, int64_t max_sleep_s);
 

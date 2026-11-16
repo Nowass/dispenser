@@ -2,11 +2,12 @@
 
 Contract between the firmware notification engine (M1.5,
 `firmware/components/dispenser_domain/include/dsp_notify.h`) and the Cloudflare backend
-(`cloudflare/dispenser-notify`, M1.6a). The future ESP-IDF HTTPS transport implements the
+(`cloudflare/dispenser-notify`, M1.6a). The firmware HTTPS transport (M1.7,
+`dsp_notify_proto.h`, `dsp_https_transport.h`) implements the
 `dsp_notify_transport_t.send()` callback with exactly this request and response handling.
 
-**Status:** implemented and tested in the backend (M1.6a). The firmware HTTPS transport does
-not exist yet.
+**Status:** backend implemented, deployed and verified (M1.6a/M1.6b). Firmware transport
+implemented and host-tested (M1.7); not yet run on hardware or against a real network.
 
 ## 1. Request
 
@@ -101,53 +102,64 @@ created_at, uncertain, manual, value, value2`. Example:
 
 Every response is JSON with `Cache-Control: no-store`.
 
-| Status    | Body                                                            | Meaning                                                                                                            | Firmware transport result (required for the HTTPS milestone)         |
-| --------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
-| **201**   | `{"status":"accepted","event_id":…}`                            | Durably stored as `PENDING`. The backend is now responsible for delivery.                                          | `DSP_TX_ACK`                                                         |
-| **200**   | `{"status":"duplicate","event_id":…}`                           | Already stored with an identical payload (an earlier attempt succeeded)                                            | `DSP_TX_ACK`                                                         |
-| 400       | `{"status":"invalid","error":…,"field"?:…}`                     | Malformed JSON, unsupported `schema_version`, missing, unknown or invalid field                                    | `DSP_TX_REJECTED` (see below)                                        |
-| 401       | `{"status":"unauthorized"}` + `WWW-Authenticate: Bearer`        | Missing or wrong token                                                                                             | `DSP_TX_FAILED` (keep pending; credentials may be fixed)             |
-| 404 / 405 | `{"status":"invalid","error":"not_found"/"method_not_allowed"}` | Wrong path or method                                                                                               | `DSP_TX_REJECTED`                                                    |
-| 409       | `{"status":"conflict","event_id":…}`                            | Same ID, different payload                                                                                         | `DSP_TX_REJECTED`                                                    |
-| 413       | `{"status":"invalid","error":"payload_too_large"}`              | Body over 4096 bytes                                                                                               | `DSP_TX_REJECTED`                                                    |
-| 415       | `{"status":"invalid","error":"unsupported_media_type"}`         | Wrong `Content-Type`                                                                                               | `DSP_TX_REJECTED`                                                    |
-| **503**   | `{"status":"retry"}` + `Retry-After: 60`                        | Storage unavailable, server misconfigured (secret missing) or unexpected error. **Nothing may be assumed stored.** | `DSP_TX_FAILED`                                                      |
-| —         | timeout or connection loss after the request was sent           | the event may have been stored                                                                                     | `DSP_TX_UNCERTAIN` (retry with the same ID; the backend answers 200) |
-| —         | connection failure before sending                               | not stored                                                                                                         | `DSP_TX_FAILED`                                                      |
+| Status    | Body                                                            | Meaning                                                                                                            | Firmware transport result (M1.7, see below)                                                                           |
+| --------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| **201**   | `{"status":"accepted","event_id":…}`                            | Durably stored as `PENDING`. The backend is now responsible for delivery.                                          | `DSP_TX_ACK` only with this exact body and the sent `event_id`, else `DSP_TX_UNCERTAIN`                               |
+| **200**   | `{"status":"duplicate","event_id":…}`                           | Already stored with an identical payload (an earlier attempt succeeded)                                            | `DSP_TX_ACK` only with this exact body and the sent `event_id`, else `DSP_TX_UNCERTAIN`                               |
+| 400       | `{"status":"invalid","error":…,"field"?:…}`                     | Malformed JSON, unsupported `schema_version`, missing, unknown or invalid field                                    | `DSP_TX_REJECTED` only for `invalid_field` on an event-content field; otherwise `DSP_TX_FAILED` (PROTOCOL diagnostic) |
+| 401       | `{"status":"unauthorized"}` + `WWW-Authenticate: Bearer`        | Missing or wrong token                                                                                             | `DSP_TX_FAILED` (keep pending; AUTH diagnostic)                                                                       |
+| 404 / 405 | `{"status":"invalid","error":"not_found"/"method_not_allowed"}` | Wrong path or method                                                                                               | `DSP_TX_FAILED` (keep pending; ENDPOINT diagnostic)                                                                   |
+| 409       | `{"status":"conflict","event_id":…}`                            | Same ID, different payload                                                                                         | `DSP_TX_REJECTED` (with this body and the sent `event_id`; otherwise `DSP_TX_FAILED`)                                 |
+| 413       | `{"status":"invalid","error":"payload_too_large"}`              | Body over 4096 bytes                                                                                               | `DSP_TX_FAILED` (keep pending; PROTOCOL diagnostic)                                                                   |
+| 415       | `{"status":"invalid","error":"unsupported_media_type"}`         | Wrong `Content-Type`                                                                                               | `DSP_TX_FAILED` (keep pending; PROTOCOL diagnostic)                                                                   |
+| **503**   | `{"status":"retry"}` + `Retry-After: 60`                        | Storage unavailable, server misconfigured (secret missing) or unexpected error. **Nothing may be assumed stored.** | `DSP_TX_FAILED`                                                                                                       |
+| —         | timeout or connection loss after the request was sent           | the event may have been stored                                                                                     | `DSP_TX_UNCERTAIN` (retry with the same ID; the backend answers 200)                                                  |
+| —         | connection failure before sending                               | not stored                                                                                                         | `DSP_TX_FAILED`                                                                                                       |
 
 - `error` values: `malformed_json`, `unsupported_schema_version`, `missing_field`,
   `unknown_field`, `invalid_field`, `payload_too_large`, `unsupported_media_type`,
   `not_found`, `method_not_allowed`.
 - Validation details are returned only after successful authentication.
-- **A 2xx response means durable acceptance, not e-mail delivery.** E-mail sending is a
-  later milestone. Its progress lives in `delivery_status`, `delivery_attempts`,
-  `delivered_at` and `last_error`, which the device never sees.
+- **A 2xx response means durable acceptance, not e-mail delivery.** E-mail delivery
+  (M1.6b) happens later in the backend. Its progress lives in `delivery_status`,
+  `delivery_attempts`, `delivered_at` and `last_error`, which the device never sees.
 - Any other status, including unexpected 5xx: treat as `DSP_TX_FAILED` (keep pending).
 
-### Integration requirement: permanent rejection (approved 2026-11-15)
+### Firmware classification (approved 2026-11-16, M1.7 decisions D8 and R1)
 
-The firmware HTTPS transport milestone adds the transport result **`DSP_TX_REJECTED`**. The
-firmware is **not** changed in M1.6a; this is a requirement for that milestone.
+The priority is that a **systemic** configuration or protocol problem (one that every
+request would hit) can never drain the device queue. Only responses that unambiguously
+concern **this** event are permanent rejections.
 
-- **Which statuses:** HTTP **400, 404, 405, 409, 413 and 415** mean the backend permanently
-  rejected this submission.
-- **Never blocking:** M1.5 delivery stops at the first non-acknowledged entry. A rejected
-  entry therefore must not stay at the head of the queue, or it would block every later
-  notification forever.
-- **Never silent:** the entry leaves the queue only after a **persistent local diagnostic**
-  recording the rejected event (at least its event ID, type and code, the HTTP status and
-  the backend `error`/`field` if present) has been written to flash.
-- **BLE diagnostics:** the diagnostic stays available until it has been read, and the
-  future BLE diagnostics expose it.
-- **Kept pending (unchanged):** HTTP **401**, **503**, any other 5xx and connection failures
-  before sending are `DSP_TX_FAILED`. The event keeps its ID and payload and is retried in a
-  later regular session.
-- **Timeouts:** a timeout or connection loss after sending stays **`DSP_TX_UNCERTAIN`**. The
-  event keeps its original ID and frozen payload, and the retry is answered with 200
-  (duplicate) if the first attempt was stored.
+| Response                                                                                                                                                                                               | Firmware result                                                 | Persistent device diagnostic |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------- | ---------------------------- |
+| 201 with `{"status":"accepted","event_id":<sent ID>}`, or 200 with `{"status":"duplicate","event_id":<sent ID>}`                                                                                       | `DSP_TX_ACK`                                                    | clears all flags             |
+| 200/201 with a missing, malformed or mismatched body (never `ACK` without strict confirmation)                                                                                                         | `DSP_TX_UNCERTAIN` (kept)                                       | PROTOCOL                     |
+| 409 with `{"status":"conflict","event_id":<sent ID>}`                                                                                                                                                  | `DSP_TX_REJECTED`                                               | rejection log                |
+| 400 with `{"status":"invalid","error":"invalid_field","field":F}` where F is an event-content field: `type`, `severity`, `code`, `reminder_no`, `created_at`, `uncertain`, `manual`, `value`, `value2` | `DSP_TX_REJECTED`                                               | rejection log                |
+| Any other 400 (ambiguous: `malformed_json`, `unsupported_schema_version`, `missing_field`, `unknown_field`, or `invalid_field` for `event_id`, `device_id`, `attempt`, `body` or an unknown name)      | `DSP_TX_FAILED` (kept)                                          | PROTOCOL                     |
+| 401                                                                                                                                                                                                    | `DSP_TX_FAILED` (kept)                                          | AUTH                         |
+| 404, 405; any 3xx (redirects are never followed)                                                                                                                                                       | `DSP_TX_FAILED` (kept)                                          | ENDPOINT                     |
+| 413, 415; 409 without the confirming body                                                                                                                                                              | `DSP_TX_FAILED` (kept)                                          | PROTOCOL                     |
+| 429, 503 and other 5xx, any other status                                                                                                                                                               | `DSP_TX_FAILED` (kept)                                          | —                            |
+| DNS, TCP or TLS failure (certificate verification included) before any byte was sent                                                                                                                   | `DSP_TX_FAILED` (kept)                                          | —                            |
+| Request (partly) sent, then timeout or connection loss                                                                                                                                                 | `DSP_TX_UNCERTAIN` (same ID next time; the backend answers 200) | —                            |
 
-These statuses can only result from a firmware bug, a protocol mismatch, or a storage-epoch
-collision after a storage reset.
+- **Never silent:** a rejected entry leaves the queue only in the same atomic flash write
+  that records it in the device's rejection log (event sequence number, type, code, HTTP
+  status, closed `error`/`field` enums, attempts). The log keeps the 4 most recent
+  rejections, a total counter and an unread count; entries dropped unread by overflow are
+  counted (`lost_unread`). Future BLE diagnostics expose it.
+- **Never blocking:** a rejection does not end the session; the next entry is delivered.
+  At most 2 rejections per session (an extra safeguard, not the main protection).
+- **Systemic problems keep the queue:** FAILED entries keep their ID and frozen payload and
+  are retried in a later session. The persistent AUTH / ENDPOINT / PROTOCOL flags survive
+  restarts and are cleared by the next acknowledged delivery (or by a future BLE command).
+- `Retry-After` is ignored by the device: the next attempt is a later regular session
+  anyway.
+
+These rejections can only result from a firmware bug, a protocol mismatch, or a
+storage-epoch collision after a storage reset.
 
 ## 4. Authentication
 
@@ -156,8 +168,12 @@ collision after a storage reset.
 - It is compared in constant time (SHA-256 of both values, `crypto.subtle.timingSafeEqual`).
 - The secret must be 32–512 characters. If it is missing or shorter, the backend **fails
   closed** with 503 for every ingestion request.
-- On the device the token belongs in the future credential store (provisioned over BLE,
-  never logged, never in the `config` record).
+- On the device the token lives in the dedicated `nvs_sec` partition (M1.7; developer
+  provisioning from a local file for now, authenticated BLE provisioning later), never in
+  the `config` record, never logged, wiped from RAM after each request.
+- TLS: the device verifies the server certificate against the full ESP-IDF certificate
+  bundle (no pinning), with certificate dates checked against a trusted clock; it sends
+  nothing without trusted time.
 
 ## 5. Other endpoints
 

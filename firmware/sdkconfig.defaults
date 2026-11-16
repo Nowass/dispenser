@@ -2,7 +2,22 @@
 # `sdkconfig` is generated from these defaults (plus ESP-IDF defaults) and is not
 # committed. Add an option here only together with a reviewed reason.
 #
-# Not set on purpose (pending hardware review): flash size, power management,
+# Not set on purpose (pending hardware review): power management,
 # GPIO-related options, Bluetooth and Wi-Fi.
 
 CONFIG_IDF_TARGET="esp32c3"
+
+# M1.7 (approved P1/D3): Seeed Studio XIAO ESP32-C3 with 4 MB flash, custom partition
+# table with two 1.75 MiB OTA slots and the "nvs_sec" credentials partition (see
+# partitions.csv). Check the real board with `esptool flash-id` before the first flash.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x10000
+# TLS: the full ESP-IDF certificate bundle (no pinning; verification and certificate
+# date checks stay enabled, never disabled).
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+# Logging stays at the ESP-IDF default maximum (INFO): debug-level header dumps of
+# esp_http_client are compiled out. Never raise it on a provisioned device.

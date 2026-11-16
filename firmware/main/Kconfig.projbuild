@@ -27,4 +27,16 @@ config DSP_TIME_SYNC_DIAGNOSTIC
         Purpose: build/link verification of the Wi-Fi, SNTP and clock
         adapters. Off by default.
 
+config DSP_NOTIFY_HTTPS_DIAGNOSTIC
+    bool "HTTPS notification transport diagnostic at boot (no event is sent)"
+    default n
+    help
+        Reads the developer-provisioned "nvs_sec" partition (read-only), runs one
+        forced time-sync session with those Wi-Fi credentials and, only with a
+        trusted clock, one unauthenticated TLS GET of DSP_NOTIFY_HEALTH_URL
+        (full certificate bundle, date checks on). Logs only outcomes: never
+        credentials, SSIDs or tokens. Never posts a notification, never writes
+        the dispenser NVS namespace, never doses. Without provisioned
+        credentials the radio is never started. Off by default.
+
 endmenu

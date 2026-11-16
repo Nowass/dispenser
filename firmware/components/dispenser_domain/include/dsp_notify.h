@@ -32,6 +32,14 @@
  *    sequence number can never be reused for a different notification after a restart.
  *    Every persistence failure is returned as DSP_NOTIFY_ERR_STORAGE and stays visible via
  *    dsp_notify_storage_degraded() (to be exposed through BLE diagnostics later).
+ *  - Permanent rejection (M1.7, approved): DSP_TX_REJECTED removes the entry and records it
+ *    in the rejection log in ONE write, before anything else happens; if that write fails
+ *    the entry stays queued (unchanged in RAM) and the session stops. A rejection never
+ *    blocks later entries; at most DSP_NOTIFY_MAX_REJECTIONS_PER_SESSION rejections per
+ *    session (an extra safeguard; systemic problems are classified FAILED by the transport,
+ *    so they cannot drain the queue).
+ *  - Systemic transport problems (FAILED with a diagnostic) set persistent DSP_TXDIAG_*
+ *    flags; any acknowledgement clears them (see dsp_notify_state.h).
  *
  * Caller-owned state, single owner (the future dosing/connectivity service), no allocation.
  */
@@ -86,22 +94,42 @@ typedef struct {
     uint32_t requested_ul;
 } dsp_dosing_error_t;
 
+#define DSP_NOTIFY_MAX_REJECTIONS_PER_SESSION 2 /* approved safeguard (M1.7) */
+
 typedef enum {
     DSP_TX_ACK = 0,   /* the receiver confirmed acceptance */
     DSP_TX_FAILED,    /* not accepted (or not sent): retry later */
     DSP_TX_UNCERTAIN, /* may have been accepted (e.g. timeout after sending): retry later
                          with the SAME id; the receiver deduplicates */
+    DSP_TX_REJECTED,  /* the receiver permanently rejected THIS event (M1.7): it is logged
+                         and removed; detail must describe the rejection */
 } dsp_tx_result_t;
+
+/* Structured outcome of one attempt (filled by the transport; zeroed by the engine before
+ * every send). Closed enums only, never text received from the network. */
+typedef struct {
+    uint16_t http_status; /* 0 = no HTTP response */
+    uint8_t error;        /* dsp_txerr_t */
+    uint8_t field;        /* dsp_txfield_t */
+    uint8_t diag;         /* DSP_TXDIAG_* to set (systemic FAILED / UNCERTAIN causes) */
+    uint8_t phase;        /* transport-specific progress (dsp_http_phase_t for HTTPS) */
+} dsp_tx_detail_t;
 
 typedef struct {
     void *ctx;
-    dsp_tx_result_t (*send)(void *ctx, const dsp_note_t *note, uint32_t epoch);
+    dsp_tx_result_t (*send)(void *ctx, const dsp_note_t *note, uint32_t epoch,
+                            dsp_tx_detail_t *detail);
+    /* Optional (NULL = always): asked before an entry is started. false ends the session
+     * (e.g. time budget) BEFORE the entry is touched: no attempt counted, no freeze. */
+    bool (*can_send)(void *ctx);
 } dsp_notify_transport_t;
 
 typedef struct {
     size_t attempted;
     size_t acked;
-    bool stopped_early; /* first non-acknowledged attempt ended the session */
+    size_t rejected;
+    bool stopped_early;     /* a non-acknowledged attempt (or the rejection limit) ended it */
+    bool budget_exhausted;  /* can_send() refused: remaining entries untouched */
     dsp_notify_status_t status;
 } dsp_notify_delivery_report_t;
 
@@ -169,11 +197,28 @@ int dsp_notify_highest_pending_severity(const dsp_notify_t *n); /* 0 = none */
 bool dsp_notify_delivery_requested(const dsp_notify_t *n);
 
 /* Sends up to max_sends pending entries (severity first, then oldest), over an already
- * open session. Stops at the first non-acknowledged attempt. Writes once before each
- * entry's first transmission (freeze) and once at the end (ACK removals, attempts).
- * Sends nothing that is not durable: a failed write stops the session (ERR_STORAGE). */
+ * open session. Stops at the first FAILED/UNCERTAIN attempt, after
+ * DSP_NOTIFY_MAX_REJECTIONS_PER_SESSION rejections, or when can_send() refuses. Writes once
+ * before each entry's first transmission (freeze), once per rejection (log + removal) and
+ * once at the end (ACK removals, attempts, diagnostic flags). Sends nothing that is not
+ * durable: a failed write stops the session (ERR_STORAGE). */
 dsp_notify_delivery_report_t dsp_notify_deliver(dsp_notify_t *n, const dsp_notify_transport_t *tx,
                                                 size_t max_sends, dsp_notify_clock_t clock);
+
+/* ---- Transport diagnostics (M1.7; read by future BLE diagnostics) ------------------ */
+
+/* Persistent DSP_TXDIAG_* flags and the HTTP status that last set one (0 = local cause). */
+uint8_t dsp_notify_tx_diag(const dsp_notify_t *n, uint16_t *status);
+
+/* Explicit clear (future authenticated BLE command); persists. */
+dsp_notify_status_t dsp_notify_clear_tx_diag(dsp_notify_t *n);
+
+/* The rejection log (oldest first). NULL if n is NULL. */
+const dsp_rejection_log_t *dsp_notify_rejections(const dsp_notify_t *n);
+
+/* Marks every logged rejection as read: clears unread and lost_unread (entries and total
+ * stay); persists. */
+dsp_notify_status_t dsp_notify_ack_rejections(dsp_notify_t *n);
 
 /* Stable event identity for the receiver: "dsp-<device 12 hex>-<epoch 8 hex>-<seq>". */
 bool dsp_notify_format_id(uint64_t device_id, uint32_t epoch, uint32_t seq, char *buf, size_t len);

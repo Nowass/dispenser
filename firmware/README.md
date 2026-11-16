@@ -4,8 +4,9 @@ ESP-IDF firmware for the Dispenser V2 battery-powered aquarium liquid-carbon dos
 Product rules: [`../docs/REQUIREMENTS_DRAFT.md`](../docs/REQUIREMENTS_DRAFT.md),
 architecture: [`../docs/ARCHITECTURE.md`](../docs/ARCHITECTURE.md).
 
-**Status: M1.1–M1.4 (recurrence, execution history, persistent storage, time management)
-committed; M1.5 (notification engine) implemented, awaiting review.**
+**Status: M1.1–M1.5 (recurrence, execution history, persistent storage, time management,
+notification engine) committed; M1.7 (HTTPS notification transport) implemented, awaiting
+review.**
 At run time the firmware still only logs its identification. The domain and platform
 components are compiled into the image's component libraries but not called by
 `app_main` (optional diagnostics exist, off by default), Wi-Fi is never started, and
@@ -40,16 +41,25 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   persistent queue (`notify` record, layout v3 with migration), at-least-once delivery over
   a transport interface, and reservoir consumption accounting. No real transport. See
   [Notification engine](#notification-engine-m15).
+- (M1.7) **HTTPS notification transport**: protocol-v1 encoder and strict response
+  classifier, permanent-rejection log and transport diagnostics in the `notify` record
+  (format 2), HTTPS transport over an injected HTTP port, connectivity session (D1-B: Wi-Fi
+  only on existing wakes, never during dosing), 4 MB partition table with `nvs_sec`;
+  ESP-IDF `esp_http_client` adapter (full certificate bundle), factory-MAC device ID,
+  read-only credential providers, developer provisioning tool, off-by-default diagnostic.
+  See [HTTPS notification transport](#https-notification-transport-and-connectivity-session-m17).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
 ### Not implemented
 
 Dosing service task (wiring of recurrence, coordinator, storage, time, stock, limits and
-pump), power manager and deep-sleep lifecycle, credential store and BLE provisioning,
-the HTTPS/Cloudflare notification transport, battery measurement, MONTHLY recurrence, event
-journal, BLE, GPIO and motor control, service mode, OTA, a storage maintenance/repair tool. The domain code decides and records; nothing drives
-hardware yet.
+pump) and the application service that calls the M1.7 connectivity session, power manager
+and deep-sleep lifecycle, production credential provisioning (authenticated BLE,
+per-device credentials), battery measurement, MONTHLY recurrence, event journal, BLE, GPIO
+and motor control, service mode, OTA (update client and rollback; only the partitions
+exist), a storage maintenance/repair tool. The domain code decides and records; nothing
+drives hardware yet.
 
 ### Not verified
 
@@ -63,7 +73,8 @@ hardware-validated.**
 |---|---|
 | Board | Seeed Studio XIAO ESP32-C3 |
 | SoC / IDF target | ESP32-C3 (RISC-V) / `esp32c3` |
-| Flash size in build | 2 MB (ESP-IDF default, unchanged). The XIAO module is specified with 4 MB; switch only after checking a real board (`esptool flash-id`). |
+| Flash size in build | **4 MB** (M1.7; the manufacturer's documentation confirms 4 MB). Check the actual board with `esptool flash-id` before the first flash. |
+| Partition table | custom [`partitions.csv`](partitions.csv): two 1.75 MiB OTA slots, `nvs` 80 KiB, `nvs_sec` 24 KiB, reserved `nvs_keys`, `coredump`, 256 KiB reserve (see [Partition table](#partition-table-4-mb-m17)) |
 | GPIO assignments | **None defined.** Pump, button and indicator pins come from the hardware review. |
 
 ## Versioning
@@ -131,10 +142,13 @@ repository root) are not committed. The committed `.vscode/c_cpp_properties.json
 firmware/
 ├── CMakeLists.txt              ESP-IDF project (name "dispenser")
 ├── version.txt                 firmware version, single source for both builds
-├── sdkconfig.defaults          committed Kconfig defaults (target only); sdkconfig is generated
+├── sdkconfig.defaults          committed Kconfig defaults (target, flash size, partition table, TLS bundle)
+├── partitions.csv              4 MB partition table (M1.7)
+├── tools/provision_dev_secrets.py  developer-only nvs_sec image builder (+ its test, M1.7)
 ├── main/                       composition root: the only code calling ESP-IDF APIs
 │   ├── CMakeLists.txt          REQUIRES dispenser_domain dispenser_platform esp_app_format log
-│   ├── Kconfig.projbuild       DSP_STORAGE_SMOKE_TEST, DSP_TIME_SYNC_DIAGNOSTIC (default off)
+│   ├── Kconfig.projbuild       DSP_STORAGE_SMOKE_TEST, DSP_TIME_SYNC_DIAGNOSTIC,
+│   │                           DSP_NOTIFY_HTTPS_DIAGNOSTIC (all default off)
 │   └── main.c                  app_main(): logs identification (+ optional read-only storage check)
 ├── components/
 │   ├── dispenser_domain/       pure C11 business logic, no ESP-IDF dependency
@@ -156,12 +170,17 @@ firmware/
 │   │   ├── include/dsp_notify_state.h  notification state and queue model (M1.5)
 │   │   ├── include/dsp_notify.h      notification engine, transport interface (M1.5)
 │   │   ├── include/dsp_reservoir.h   reservoir consumption accounting (M1.5)
+│   │   ├── include/dsp_notify_proto.h  protocol-v1 encoder and response classifier (M1.7)
+│   │   ├── include/dsp_https_transport.h  HTTPS transport over an injected HTTP port (M1.7)
+│   │   ├── include/dsp_connectivity.h  connectivity session: sync, then delivery (M1.7)
 │   │   └── src/                      matching .c files
 │   └── dispenser_platform/     ESP-IDF adapters (never in the host build)
-│       ├── Kconfig                   DSP_SNTP_SERVER (M1.4)
+│       ├── Kconfig                   DSP_SNTP_SERVER (M1.4), DSP_NOTIFY_URL, DSP_NOTIFY_HEALTH_URL (M1.7)
 │       ├── include/dsp_nvs_kv.h      NVS implementation of dsp_kv_t (M1.3)
 │       ├── include/dsp_esp_time.h    clock port, Wi-Fi driver, SNTP source (M1.4)
-│       └── src/                      dsp_nvs_kv.c, dsp_esp_clock.c, dsp_esp_wifi.c, dsp_esp_sntp.c
+│       ├── include/dsp_esp_notify.h  HTTP port, device ID, monotonic clock, nvs_sec credentials (M1.7)
+│       └── src/                      dsp_nvs_kv.c, dsp_esp_clock.c, dsp_esp_wifi.c, dsp_esp_sntp.c,
+│                                     dsp_esp_http.c, dsp_esp_device.c
 ├── test/host/                  host unit tests (CMake + CTest, no ESP-IDF)
 │   ├── CMakeLists.txt
 │   ├── support/dsp_test.h      minimal header-only test harness
@@ -173,7 +192,9 @@ firmware/
 │   ├── test_exec.c                coordinator/history tests (M1.2)
 │   ├── test_storage.c             persistent storage tests (M1.3, + v2/v3 migrations)
 │   ├── test_time.c                time management tests (M1.4)
-│   └── test_notify.c              notification engine and reservoir tests (M1.5)
+│   ├── test_notify.c              notification engine and reservoir tests (M1.5, + M1.7 rejections)
+│   ├── test_proto.c               protocol encoder and response classifier (M1.7)
+│   └── test_https.c               HTTPS transport and connectivity session (M1.7)
 └── .devcontainer/              optional pinned ESP-IDF v6.1 build container
 
 ../test-vectors/                shared C/Kotlin test vectors (see its README)
@@ -603,7 +624,7 @@ dosing service (future) ──► dsp_exec ──► dsp_history_store_t ─┐
 | `sched` | the whole schedule set (schedules + deleted-ID tombstones + set revision) | 8 … 2,504 B |
 | `config` | device configuration | 18 B |
 | `time` | time metadata (M1.4): last sync, high-water time, rollback hold, last correction, dosing floor | 42 B |
-| `notify` | notification state (M1.5): ID epoch and sequence, condition latches, 16-entry queue | 682 B |
+| `notify` | notification state (M1.5): ID epoch and sequence, condition latches, 16-entry queue; since M1.7 (format 2) also the transport diagnostics and the 4-entry rejection log | 758 B (format 1: 682 B) |
 
 **Explicit presence (approved):** on first boot every key is written with its
 provisioning value (EMPTY slots, empty set, default configuration), then the marker.
@@ -628,7 +649,7 @@ in place for maintenance (no repair tool exists yet).
 
 Every record: byte 0 = type (1 layout, 2 history, 3 schedule set, 4 config, 5 time,
 6 notify), byte 1 =
-format version (1). Decoders require the exact length, a known type and version, valid
+format version (1; `notify` is at format 2 since M1.7 and still reads format 1). Decoders require the exact length, a known type and version, valid
 fields and zero padding. Encoders never produce an invalid record.
 
 ```text
@@ -650,14 +671,21 @@ layout (7 B):         0 type | 1 ver | 2..3 layout version | 4 history slots |
                       5 schedule capacity | 6 tombstone capacity
 time (42 B):          0 type | 1 ver | 2..9 last_sync | 10..17 high_water | 18..25 hold_until |
                       26..33 last_correction_s | 34..41 not_before (all i64; instants 0 or in range)
-notify (682 B):       0 type | 1 ver | 2..5 epoch | 6..9 next_seq | 10..11 dropped |
-                      12 flags (1 = estimate uncertain) | 13 zero | 6 x condition | 16 x entry
+notify (758 B, format 2; format 1 = the first 682 B with version byte 1):
+                      0 type | 1 ver | 2..5 epoch | 6..9 next_seq | 10..11 dropped |
+                      12 flags (1 = estimate uncertain) | 13 zero | 6 x condition | 16 x entry |
+                      diagnostics (4 B) | rejection log header (8 B) | 4 x rejection
   condition (26 B):   0 flags (1 active, 2 raise pending) | 1 reminders | 2..9 opened_at |
                       10..17 next_reminder_at (i64) | 18..21 value | 22..25 value2
   entry (32 B):       0..3 seq (0 = empty, then all zero) | 4 type | 5 severity |
                       6 condition (0xFF = one-shot) | 7 flags | 8 reminder_no | 9 zero |
                       10..11 attempts | 12..19 created_at (i64, 0 = clock unknown) | 20..21 code |
                       22..25 value | 26..29 value2 | 30..31 zero
+  diagnostics (4 B):  0 tx_diag (1 AUTH, 2 ENDPOINT, 4 PROTOCOL) | 1 zero |
+                      2..3 HTTP status that last set a flag (0 = none / local cause)
+  log header (8 B):   0..3 total (saturating) | 4..5 lost_unread | 6 unread | 7 count (<= 4)
+  rejection (16 B):   0..3 seq | 4 type | 5 entry flags | 6..7 code | 8..9 HTTP status (400..499) |
+                      10 error | 11 field | 12..13 attempts | 14..15 zero (unused slots all zero)
 ```
 
 Golden byte vectors for history, configuration and schedule set (computed independently
@@ -679,6 +707,7 @@ extra CRC would only re-check what NVS already checks.
 | Provisioning | all keys, marker last | resumable: a cut before the marker is completed at the next boot |
 | Automatic dose: claim + reservoir consumption (M1.5 order) | `hNN` (claim), then `config`, then pump | **no**: two keys, ordered so that a cut is safe. The claim comes first (dedup safety). The full requested volume is subtracted **before** the pump runs, so a cut after the claim leaves the pump off and the estimate correct, and a cut after the consumption can only make the estimate too low, never too high. |
 | Notification event: latch + enqueue + sequence (M1.5) | `notify` | yes: one record |
+| Permanent rejection: log entry + queue removal (M1.7) | `notify` | yes: one record, written before anything else happens |
 
 Every write is: encode → `set` → `commit` → read back → compare bytes. Any failure
 returns an error; the schedule repository then refuses changes until it re-reads the
@@ -719,41 +748,27 @@ with a new schema version):
 - device identity (e.g. a device UUID for the notification relay);
 - Wi-Fi SSID, the notification endpoint and alert policy.
 
-**No secrets** are stored: Wi-Fi passwords and relay tokens belong to a separate
-credential store (NVS encryption or a protected namespace) in the BLE provisioning and
-notification milestones, never in `config` and never in logs.
+**No secrets** are stored here: since M1.7 the Wi-Fi credentials and the device API token
+live in the separate `nvs_sec` partition (developer-provisioned, read-only for the
+firmware, see M1.7), never in `config`, this namespace or logs.
 
 ### Capacity, flash layout and wear
 
 NVS entries are 32 B and blobs cost 2 entries plus 1 per 32 data bytes. History
-32 × 5 = 160 entries, schedule set ≤ 81, config 3, time 4 (M1.4, 42 B), notify 24 (M1.5, 682 B),
-marker 3, namespace 1: **≤ about 279 entries (9 KB)**, plus up to 81 free entries while the
-largest record is rewritten.
-The current partition table (ESP-IDF default `partitions_singleapp.csv`: `nvs` 24 KB =
-6 pages, about 630 usable entries) fits this with about half left for ESP-IDF's own
-Wi-Fi/PHY/BLE data later. Wear: about 10 entries per automatic dose (plus 3 for the
-reservoir estimate since M1.5). Each notification change or delivery session costs 24 entries,
-plus 24 more for every notification's first transmission (freeze write). Even at 16 doses a
-day each NVS sector is erased only every few days, far inside flash endurance.
+32 × 5 = 160 entries, schedule set ≤ 81, config 3, time 4 (M1.4, 42 B), notify 26 (M1.7,
+758 B), marker 3, namespace 1: **≤ about 281 entries (9 KB)**, plus up to 81 free entries
+while the largest record is rewritten.
+The M1.7 partition table gives `nvs` 80 KiB (20 pages, about 2,500 usable entries): the
+live data uses about 11 %, which leaves room for ESP-IDF's own Wi-Fi/PHY/BLE data and
+spreads wear. Wear: about 10 entries per automatic dose (plus 3 for the reservoir estimate
+since M1.5). Each notification change or delivery session costs 26 entries, plus 26 more for
+every notification's first transmission (freeze write) and for every permanent rejection.
+Even at 16 doses a day each NVS sector is erased only rarely, far inside flash endurance.
 
-**Unchanged in M1.3:** flash size 2 MB (ESP-IDF default) and the single-app partition
-table. The XIAO ESP32-C3 is specified with 4 MB, but no board has been checked.
-**Recommendation for the final layout** (to apply once a real board confirms 4 MB, and
-before any device holds field data, because moving or shrinking `nvs` requires erasing
-it):
-
-```text
-# Name,   Type, SubType, Offset,  Size
-nvs,      data, nvs,     0x9000,  64K     # more pages: headroom for Wi-Fi/BLE/PHY data, less wear
-otadata,  data, ota,     ,        8K
-phy_init, data, phy,     ,        4K
-ota_0,    app,  ota_0,   ,        1856K   # two OTA slots for the future OTA milestone
-ota_1,    app,  ota_1,   ,        1856K
-coredump, data, coredump,,        64K     # optional, crash diagnostics
-```
-
-The present image is about 145 KB; Wi-Fi, BLE and TLS will grow it substantially, which
-1.8 MB slots accommodate.
+**Since M1.7** the flash size is 4 MB and the custom partition table described in
+[Partition table (4 MB, M1.7)](#partition-table-4-mb-m17) applies. The `nvs` partition moved
+from 0x9000 to 0x11000 and grew from 24 KiB to 80 KiB. Existing bench data is lost with the
+first full flash; no field device exists.
 
 ### Schema migration strategy
 
@@ -912,8 +927,9 @@ session, and dosing continues. The volatile retry state lives in RTC memory, not
 
 ### Wake-up planning (interface for the future power manager)
 
-`dsp_wake_plan()` returns the earliest of next dose, next sync, future notification and
-"other", as a sleep duration relative to the raw clock, capped by `max_sleep_s`. Ties go
+`dsp_wake_plan()` returns the earliest of next dose, next sync and "other" (there is no
+notification reason: approved D1-B, M1.7 — a wake-up is never scheduled for a
+notification), as a sleep duration relative to the raw clock, capped by `max_sleep_s`. Ties go
 to the dose. `dsp_wake_next_dose()` uses the recurrence engine only while the clock is
 valid. While it is unknown, only the sync is scheduled (the RTC still counts since
 power-on). **No timing guarantee** is made: wake-up latency and RTC drift in deep sleep
@@ -925,10 +941,9 @@ early wake simply sleeps again.
 - Domain M1.4 code: about 3.1 KB (`-Os`). RAM: timekeeper 80 B, Wi-Fi manager 28 B,
   service 24 B, RTC block 40 B. Largest stack frames 128 B.
 - Platform adapters: about 2.3 KB. The ESP-IDF Wi-Fi/LwIP stack dominates. With the
-  diagnostic enabled (Wi-Fi + SNTP linked) the image is **0xce010 bytes (about 824 KiB),
-  only 20 % free in the current 1 MB app partition**. Adding BLE and TLS will not fit, so the
-  M1.3 partition recommendation (about 1.8 MB OTA slots, on a confirmed 4 MB board) is
-  needed before those milestones.
+  diagnostic enabled (Wi-Fi + SNTP linked) the image was 0xce010 bytes (about 824 KiB) in
+  M1.4, which no longer fitted BLE and TLS in the old 1 MB partition; M1.7 introduced the
+  4 MB table with 1.75 MiB slots (current sizes: see the M1.7 section).
 - Wi-Fi heap is used only while a session is active (`esp_wifi_init` / `deinit` per session).
   Energy per sync (connect plus SNTP, typically a few seconds at Wi-Fi current) must be
   measured; at one sync per 24–48 h it should be small next to deep-sleep current. This
@@ -949,9 +964,9 @@ early wake simply sleeps again.
 
 Pure domain code (`dsp_notify`, `dsp_notify_state`, `dsp_reservoir`): it detects
 conditions, creates deduplicated events, schedules reminders, keeps the bounded persistent
-queue and hands pending notifications to an injected transport. **There is no real
-transport yet** (no HTTPS, no Cloudflare relay, no e-mail), no Wi-Fi activity and no
-battery measurement. Nothing calls the engine from `app_main`.
+queue and hands pending notifications to an injected transport. Since M1.7 the HTTPS
+transport and the connectivity session exist (see the M1.7 section); there is still no
+battery measurement, and nothing calls the engine from `app_main`.
 
 ### Events
 
@@ -984,7 +999,8 @@ Entry flags: `REMINDER`, `TIME_VALID` (created_at is trusted UTC; otherwise 0),
     content, also after a power cut between the receiver accepting the event and the
     result being saved. Newer values reach the receiver with the next reminder, which is
     a new event with a new ID.
-  - Cost: one extra 682 B write per notification, at its first transmission.
+  - Cost: one extra `notify` write (758 B since M1.7) per notification, at its first
+    transmission.
   - A restart before the first attempt loses the RAM-only refresh. The entry then carries
     its last persisted value until the caller's next observation refreshes it.
   - Flags (`UNCERTAIN`) are fixed when the entry is created.
@@ -1005,17 +1021,19 @@ Entry flags: `REMINDER`, `TIME_VALID` (created_at is trusted UTC; otherwise 0),
   "raise pending" (raised when space frees, with its reminder number). One-shot events are
   counted and reported later as one `DEVICE_ERROR/QUEUE_OVERFLOW` with the count. Nothing
   is lost silently.
-- **Delivery (at-least-once):** `dsp_notify_deliver()` runs over an already open regular
-  Wi-Fi session. It sends the highest severity first, then the oldest, and removes an entry
-  **only on explicit ACK**. `FAILED` or `UNCERTAIN` (for example a timeout after sending)
+- **Delivery (at-least-once):** `dsp_notify_deliver()` runs over an already open Wi-Fi
+  session. It sends the highest severity first, then the oldest, and removes an entry
+  **only on explicit ACK** (or, since M1.7, after a permanent rejection has been logged in
+  the same write). `FAILED` or `UNCERTAIN` (for example a timeout after sending)
   keeps the entry with the **same ID** and `attempts + 1`, and ends the session. The
   receiver deduplicates by ID.
 - **Durable before sent:** nothing is transmitted unless the queue state is in flash, so a
   sequence number can never be reused for different content after a restart. An ACK
   whose removal is lost (power cut) causes a re-send with the same ID.
-- **No extra wake-ups:** `dsp_notify_delivery_requested()` only says "deliver in the next
-  regular Wi-Fi session". No severity triggers an additional Wi-Fi wake-up, so the M1.4
-  wake planner's `has_notification` input is to stay unused for notifications.
+- **No extra wake-ups:** `dsp_notify_delivery_requested()` never causes a wake-up. Since
+  M1.7 (approved D1-B) a pending CRITICAL notification may open Wi-Fi during an existing
+  wake (at most once per hour, respecting the Wi-Fi backoff); WARNING notifications wait
+  for the regular sync session. The wake planner has no notification input any more.
 
 ### Stable event IDs
 
@@ -1057,8 +1075,8 @@ The remaining volume is an **estimate from dosing consumption**; there is no lev
 ### Persistence and failures
 
 All engine state (epoch, next sequence, drop counter, uncertainty flag, 6 condition latches
-with reminder schedules, 16 entries) is the `notify` record (682 B), written only when
-something changes.
+with reminder schedules, 16 entries; since M1.7 also the transport diagnostics and the
+rejection log) is the `notify` record (758 B), written only when something changes.
 - **A failed write never leads to transmitting a non-durable event.**
   - The state stays in RAM, marked dirty.
   - `dsp_notify_deliver()` first writes any dirty state, then freezes each entry durably
@@ -1081,14 +1099,179 @@ something changes.
 
 ### Resources
 
-- Code (`-Os`, RISC-V): `dsp_notify` 4.2 KB, `dsp_notify_state` 0.9 KB, `dsp_reservoir` 0.4 KB.
-  None of it is linked into the default image yet (0x24400 bytes, unchanged), because
-  nothing calls it.
-- With the diagnostics enabled the image is 0xce970 bytes (19 % of the 1 MB app partition
-  free), so the partition change is still needed before BLE/TLS.
-- RAM (32-bit): `dsp_notify_t` is 864 B, caller-owned. The storage context grew by an 848 B
-  scratch buffer (8.5 KB in total). No heap, no globals; every loop is bounded by
-  16 entries × 6 conditions.
+- Code (`-Os`, RISC-V): `dsp_notify` 4.2 KB (M1.5), `dsp_notify_state` 0.9 KB,
+  `dsp_reservoir` 0.4 KB. None of it is linked into the default image yet, because nothing
+  calls it (current sizes: see the M1.7 section).
+- RAM (32-bit): `dsp_notify_t` was 864 B in M1.5 and grows by the M1.7 diagnostics and
+  rejection log (about +76 B); caller-owned. No heap, no globals; every loop is bounded by
+  16 entries × 6 conditions (and 4 log entries).
+
+## HTTPS notification transport and connectivity session (M1.7)
+
+Pure domain code (`dsp_notify_proto`, `dsp_https_transport`, `dsp_connectivity`, extensions
+of `dsp_notify`) plus ESP-IDF adapters (`dsp_esp_http`, `dsp_esp_device`). Contract with the
+backend: [`../cloudflare/dispenser-notify/PROTOCOL.md`](../cloudflare/dispenser-notify/PROTOCOL.md).
+Compiled and cross-built; **not run on hardware and never against a real network yet.**
+Nothing calls the session from `app_main` except the off-by-default diagnostic; the
+dosing/connectivity application service is a later milestone.
+
+### Connectivity session (approved D1-B, D4)
+
+`dsp_connectivity_run()` runs at most one bounded session **on an existing wake**:
+1. **Guard:** nothing while a dose runs, a dose permit is outstanding or BLE is active, or if
+   the next dose is closer than the worst-case session duration (Wi-Fi attempts × timeout +
+   SNTP timeout + HTTPS budget; 115 s by default) plus 2 minutes.
+2. **Reason:** the regular time sync is due (M1.4 schedule, including its backoff), **or** a
+   CRITICAL notification is pending, the last notification-initiated attempt was at least
+   1 hour ago (RTC-retained; a backward clock step allows one attempt) and no failed sync
+   is waiting for its backoff. WARNING notifications only travel with regular sessions.
+   **No wake-up is ever scheduled for a notification** and no delivery latency is promised.
+3. **Wi-Fi + time sync** (M1.4 time service; a CRITICAL session also synchronizes, and a
+   failure feeds the normal backoff). Conditions are re-observed with the new time state.
+4. **Trusted time (D4):** HTTPS only if the timekeeper is not UNKNOWN and the time is
+   plausible. Otherwise nothing is sent and the queue is untouched. Certificate date
+   validation is never disabled. Consequence (approved R2): a `DEVICE_ERROR/CLOCK` episode
+   may never produce an e-mail, because regaining trusted time closes it and withdraws its
+   undelivered notification; BLE diagnostics will expose clock problems.
+5. **Delivery:** all pending notifications, CRITICAL first, within a **60 s budget**. An
+   entry is started only if its worst case (20 s) still fits; entries that are not started
+   stay untouched (no attempt counted, no freeze) for the next session. The budget does
+   not guarantee that all 16 queued entries go in one session.
+6. **Wi-Fi is always shut down** before returning.
+
+### Request and response handling (approved D8, R1)
+
+The body is the exact protocol-v1 JSON (≤ 512 B; the token is never in it). The response
+is classified strictly; the priority is that a **systemic** configuration or protocol
+problem can never drain the queue:
+
+| Response | Result | Persistent diagnostic |
+|---|---|---|
+| 201 + `{"status":"accepted","event_id":<sent ID>}`, 200 + `{"status":"duplicate",…}` | ACK | all flags cleared |
+| 200/201 with a missing, malformed or mismatched body | UNCERTAIN (kept) | PROTOCOL |
+| 409 + `{"status":"conflict","event_id":<sent ID>}` | REJECTED | — (rejection log) |
+| 400 + `{"status":"invalid","error":"invalid_field","field":F}`, F an event-content field (`type`, `severity`, `code`, `reminder_no`, `created_at`, `uncertain`, `manual`, `value`, `value2`) | REJECTED | — (rejection log) |
+| any other 400 (ambiguous: malformed JSON, schema, missing/unknown field, `event_id`/`device_id`/`attempt`/`body`) | FAILED (kept) | PROTOCOL |
+| 401 | FAILED | AUTH |
+| 404, 405, 3xx (redirects are never followed) | FAILED | ENDPOINT |
+| 413, 415, 409 without the confirming body | FAILED | PROTOCOL |
+| 429, 5xx, anything else | FAILED | — |
+| DNS/TCP or TLS/certificate failure (nothing sent) | FAILED | — |
+| request (partly) sent, then timeout or reset | UNCERTAIN | — |
+
+FAILED and UNCERTAIN keep the entry and end the session (M1.5, unchanged). At most **2
+REJECTED per session** (extra safeguard; the classification above is the real protection).
+
+### Rejection log and diagnostics (approved D7)
+
+Both live in the `notify` record (format 2), so they share its atomicity and durability.
+- **Rejection:** the log entry and the queue removal are written in **one** write before
+  anything else; if it fails, the entry stays queued exactly as it was and the session
+  stops. The log keeps the **4 most recent** rejections (sequence number, type, code, HTTP
+  status, closed `error`/`field` enums, attempts), a saturating `total`, an `unread` count
+  and `lost_unread`: when the log is full, the oldest entry is dropped, and if it was unread
+  `lost_unread` counts it. Acknowledging (`dsp_notify_ack_rejections`, future BLE) clears
+  `unread` and `lost_unread`; entries and `total` stay.
+- **Flags** AUTH / ENDPOINT / PROTOCOL (plus the HTTP status that last set one) survive
+  restarts. **Clearing conditions:** the next acknowledged delivery (proof that credentials,
+  endpoint and protocol work end to end) or `dsp_notify_clear_tx_diag()` (future BLE).
+- Format 1 records (M1.5) are read as "no diagnostics" and upgraded by the next write.
+  **Formats are forward-only** (approved R3): firmware that only knows format 1 reports
+  format 2 as unsupported and fails closed (no automatic dosing). A future OTA milestone
+  must therefore never roll back across a record-format change.
+
+### Credentials (approved D5: development only)
+
+- Wi-Fi SSID, passphrase and `DEVICE_API_TOKEN` live in the dedicated **`nvs_sec`**
+  partition (namespace `dsp_sec`, keys `wifi_ssid`, `wifi_pass`, `api_token`), separate from
+  the storage layout. The firmware opens it **read-only**, never writes or erases it, and
+  never logs a value. The token is fetched per request into a buffer that is wiped right
+  after; the platform deletes `esp_http_client`'s header copy after every request.
+- **Never** in source code, `sdkconfig`, build artifacts, test fixtures, logs or Git. Tests
+  use generated dummy values only.
+- **Developer provisioning** (outside the repository, inside an activated ESP-IDF shell):
+
+  ```sh
+  umask 077
+  mkdir -p ~/.config/dispenser-device
+  # create ~/.config/dispenser-device/dev-secrets.json (mode 0600) with an editor:
+  #   {"wifi_ssid": "...", "wifi_pass": "...", "api_token": "..."}
+  python firmware/tools/provision_dev_secrets.py \
+      --secrets ~/.config/dispenser-device/dev-secrets.json \
+      --out ~/.config/dispenser-device/nvs_sec.bin
+  python -m esptool --chip esp32c3 write-flash 0x28000 ~/.config/dispenser-device/nvs_sec.bin
+  ```
+
+  The tool refuses repository paths and a secrets file readable by group/others, never
+  prints a value, deletes its temporary CSV and writes the image with mode 0600. **The
+  image is not encrypted: treat it as sensitive and delete it after flashing.** `idf.py
+  flash` does not touch `nvs_sec`; `idf.py erase-flash` wipes it.
+- **Known limitations (documented, accepted for development):**
+  - **Physical access:** `nvs_sec` is not encrypted (no flash or NVS encryption, no eFuse
+    burned). Anyone with the device and a USB cable can read the Wi-Fi passphrase and the
+    token.
+  - **Shared token:** the backend has one `DEVICE_API_TOKEN` for all devices (v1). A token
+    read from one device lets an attacker submit events (and so cause e-mails) for any
+    device ID; there is no read API. Per-device credentials and authenticated BLE
+    provisioning are a future milestone; the reserved `nvs_keys` partition allows NVS
+    encryption later without changing the partition table.
+  - ESP-IDF does not wipe freed heap: the header copy may remain in freed memory until it
+    is reused.
+
+### Partition table (4 MB, M1.7)
+
+[`partitions.csv`](partitions.csv), partition table at **0x10000**
+(`CONFIG_PARTITION_TABLE_OFFSET`, room for a larger future secure-boot bootloader). Verified
+with ESP-IDF's `gen_esp32part.py` (fills exactly 4 MB; app slots 64 KiB aligned, data
+partitions 4 KiB aligned, `otadata` exactly 2 sectors).
+
+| Partition | Type / subtype | Offset | Size |
+|---|---|---|---|
+| (bootloader) | — | 0x000000 | ≤ 64 KiB (currently 21,152 B) |
+| (partition table) | — | 0x010000 | 4 KiB |
+| `nvs` | data / nvs | 0x011000 | 80 KiB (20 pages) |
+| `otadata` | data / ota | 0x025000 | 8 KiB |
+| `phy_init` | data / phy | 0x027000 | 4 KiB |
+| `nvs_sec` | data / nvs | 0x028000 | 24 KiB (6 pages) |
+| `nvs_keys` | data / nvs_keys, encrypted | 0x02E000 | 4 KiB (reserved, unused) |
+| `ota_0` | app / ota_0 | 0x030000 | 1.75 MiB |
+| `ota_1` | app / ota_1 | 0x1F0000 | 1.75 MiB |
+| `coredump` | data / coredump | 0x3B0000 | 64 KiB (reserved; core dumps not enabled) |
+| `reserve` | data / 0x40 | 0x3C0000 | 256 KiB (raw reserve, e.g. a future event log) |
+
+- **Initial transition:** NVS moves from 0x9000 to 0x11000. The first flash with this table
+  must write the complete image set (bootloader, partition table, `ota_data_initial`, app);
+  bench data in the old layout is lost. Run `esptool flash-id` first.
+- **OTA is not implemented** (no update client, no rollback, no signed images). The table
+  and the bootloader cannot be changed over the air, so this layout is permanent for any
+  device in the field; image size is bounded by the 1.75 MiB slot.
+
+### Resources
+
+Measured with ESP-IDF v6.1 for `esp32c3` (clean builds, the 4 MB table, the full certificate
+bundle; zero compiler warnings). The slot is 1.75 MiB = 1,835,008 B.
+
+| Configuration | App binary | Free in the slot |
+|---|---|---|
+| default (`sdkconfig.defaults`) | 148,480 B | 1,686,528 B (92 %) |
+| HTTPS diagnostic only (Wi-Fi, SNTP, TLS, `esp_http_client` linked) | 1,041,472 B | 793,536 B (43 %) |
+| all diagnostics (storage check, time sync, HTTPS) | 1,054,016 B | 781,000 B (43 %) |
+
+- Sizing builds during the design review (not part of the repository): NimBLE with its
+  default configuration (peripheral, one GATT service) added about **256 KB** of flash and
+  27 KB of static DRAM on top of HTTPS and the full bundle, which would leave about 29 % of
+  a 1.75 MiB slot. The full bundle costs about 51 KB more than the common subset.
+- Code (`-Os`, RISC-V, `.text` per object): `dsp_notify_proto` 3.9 KB, `dsp_https_transport`
+  0.9 KB, `dsp_connectivity` 1.3 KB, `dsp_notify` 5.2 KB (was 4.2 KB), `dsp_codec` 4.6 KB,
+  `dsp_notify_state` 1.4 KB; platform `dsp_esp_http` 1.6 KB (+720 B static: URL and header
+  buffer), `dsp_esp_device` 0.7 KB.
+- Static DRAM with all diagnostics: 117,152 B used, 204,144 B free at build time. RAM
+  (caller-owned): the `notify` state grows by 76 B; `dsp_https_transport_t` is about 1.3 KB
+  (request body, token buffer, response prefix). The TLS handshake heap peak (mbedTLS with
+  dynamic buffers) and its duration are **not measured** (no board); BLE and Wi-Fi/TLS are
+  never active at the same time by design.
+- Energy: no measurement. Estimates from the design review (about 1–2 s of extra radio and
+  CPU time when HTTPS rides on a sync session) are not results.
 
 ## Build (ESP32-C3, native)
 
@@ -1152,7 +1335,9 @@ Current host tests (CTest names):
 | `test_storage` | persistent storage (including the v1→v3 and v2→v3 migrations): first boot and provisioning (incl. power loss after every write), configuration save/reload and validation, schedule create/edit/delete with revision and ID rules, capacity and tombstone ring, power loss before/after commit (NVS-like and staged modes), marker loss, invalid/truncated/oversized/foreign records, unsupported versions, duplicate IDs, M1.2 coordinator on persistent history (missing slot = corruption, never empty), read/write/commit/no-space/read-back failures, golden bytes, maximum record sizes, randomized operation sequences with faults (always old or new set) |
 | `test_time` | clock trust (first boot, deep sleep vs power loss, anomalies), sync interval 24/48 h, Wi-Fi and NTP failures with bounded backoff, implausible NTP, long outage (60 days of dosing in holdover), small/large forward/backward corrections, rollback hold (persisted, lifted), jumped-over protection, DST, restarts around a dose, late wake, storage and clock-step failures, Wi-Fi session lifecycle, wake planning; two randomized multi-year runs (realistic RTC; RTC glitches) with end-to-end dosing: never the same occurrence twice, never twice on the same true day under the trust assumption |
 
-| `test_notify` | notification engine (M1.5): reservoir threshold, hysteresis, refill, battery, dosing and device errors, deduplication without writes, payload freshness (latest value until the first attempt, frozen afterwards), freeze surviving power loss after the receiver accepted (same ID, same payload, nothing lost) and zero transport calls when the freeze write fails, Wi-Fi failure, ACK, uncertain delivery and retry with the identical ID, durable before sent, restarts, power loss during queue updates and after an ACK, weekly reminders, backward/forward clock corrections, unknown clock, capacity exhaustion and overflow report, priority and no CRITICAL eviction, 120-day outage, manual dose consumption, single-use dose permits, uncertainty set by dosing errors and cleared by refill, golden bytes and strict decoding of `notify`, and a randomized 4000-step run with faults and restarts (one content per ID) |
+| `test_notify` | notification engine (M1.5, extended in M1.7): reservoir threshold, hysteresis, refill, battery, dosing and device errors, deduplication without writes, payload freshness (latest value until the first attempt, frozen afterwards), freeze surviving power loss after the receiver accepted (same ID, same payload, nothing lost) and zero transport calls when the freeze write fails, Wi-Fi failure, ACK, uncertain delivery and retry with the identical ID, durable before sent, restarts, power loss during queue updates and after an ACK, weekly reminders, backward/forward clock corrections, unknown clock, capacity exhaustion and overflow report, priority and no CRITICAL eviction, 120-day outage, manual dose consumption, single-use dose permits, uncertainty set by dosing errors and cleared by refill, golden bytes and strict decoding of `notify`, and a randomized 4000-step run with faults and restarts (one content per ID); M1.7: permanent rejection logged and removed in one write (also with the write failing outright, landing without confirmation, and a power cut at every write position: never lost, never both queued and logged), at most 2 rejections per session, log overflow with `lost_unread` and acknowledgement, diagnostic flags surviving restarts and their clearing conditions, a rejection without a 4xx treated as FAILED, the session budget leaving unstarted entries untouched, `notify` format-2 golden bytes and strict decoding, format-1 records read and upgraded |
+| `test_proto` | protocol v1 (M1.7): golden request bodies (incl. the PROTOCOL.md example, every code name, extreme values, 48-bit device ID), refusal of invalid notes and too-small buffers, every response rule (strict 200/201 acknowledgement with the exact production bodies, R1 rules for 400/401/404/405/409/413/415/3xx/429/5xx, connect/TLS/send/no-response phases), and 20,000 fuzzed bodies (no crash, no ACK/REJECTED without the confirming body) |
+| `test_https` | HTTPS transport and connectivity session (M1.7) over fakes: exact body and token handed to the port, token wiped after every request, token validation (length, spaces, control characters); **systemic 401/404/405/413/415, ambiguous 400, mismatched 409, redirects, 429 and 5xx never drain the queue** (20 sessions each, then recovery); event-specific 409/400 removed and logged; mismatched acknowledgement UNCERTAIN, then duplicate ACK with an identical payload; timeout after the backend accepted plus power loss; connect/TLS failures; the 60 s budget with a monotonic clock; session gating: dosing/permit/BLE guard, next-dose distance, regular sync vs CRITICAL on an existing wake, the 1-hour limit, the Wi-Fi backoff, untrusted time (nothing sent) vs trusted HOLDOVER, missing token, Wi-Fi always shut down |
 
 Planned host coverage (later milestones): dose limits, service-mode transitions, event journal, NVS adapter (on target). The Android domain
 (`android/app/src/main/java/cz/nowass/dispenser/domain/`) is the behavioral reference.
@@ -1203,16 +1388,20 @@ alternative to the native setup, not a requirement.
 | ESP-IDF clock / Wi-Fi / SNTP adapters | n/a (ESP-IDF only) | compiled; linked with the optional diagnostic | **not run** |
 | Host test infrastructure (CMake/CTest, sanitizers) | working | n/a | n/a |
 | Notification engine and reservoir accounting (`dsp_notify`, `dsp_reservoir`) | implemented, tested with fake key-value store and transport | compiled, not called | not run |
-| Notification transport (HTTPS/Cloudflare), battery monitor | not started | — | — |
+| Protocol encoder/classifier, HTTPS transport, connectivity session (M1.7) | implemented, tested with fakes (port, token, Wi-Fi, NTP, clock, storage) | compiled; linked with the optional diagnostic | not run |
+| ESP-IDF HTTP port, device ID, `nvs_sec` credential providers (M1.7) | n/a (ESP-IDF only) | compiled; linked with the optional diagnostic | **not run** (no TLS on a real network yet) |
+| Developer credential provisioning tool | tested with dummy values (stub and real `nvs_partition_gen`) | n/a | image never flashed |
+| Battery monitor | not started | — | — |
 | Dosing service, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
 | Deep sleep and wake-up | not started | — | — |
-| BLE, credential store, HTTPS notifications, OTA, deep sleep | not started | — | — |
+| BLE, production credential provisioning, OTA client, deep sleep | not started | — | — |
 
 ## Hardware verification still pending
 
 - First flash and boot log on a real XIAO ESP32-C3 (`idf.py flash monitor`).
-- Actual flash size (expected 4 MB; the build assumes 2 MB).
+- Actual flash size (4 MB per the manufacturer; the build assumes 4 MB): `esptool flash-id`
+  before the first flash, which must write the complete image set.
 - Reset-state level of every GPIO considered for the pump gate (strapping pins GPIO2,
   GPIO8, GPIO9 must be avoided or analysed), plus the external pull-down that keeps the
   pump OFF before firmware runs (FR-044).
@@ -1223,7 +1412,12 @@ alternative to the native setup, not a requirement.
   the final partition layout (see "Capacity, flash layout and wear").
 - Time: RTC continuity per reset type, deep-sleep drift, Wi-Fi/SNTP on a real network,
   energy per sync (see "Hardware validation still required" in the M1.4 section).
+- M1.7 (pending, not estimates): TLS heap peak, TLS handshake time (ECDSA P-256 in
+  software on the C3), energy per notification session, Wi-Fi/BLE runtime memory, the
+  `esp_http_client` keep-alive behavior, the HTTPS diagnostic against a staging backend.
 
 ## Next milestone
 
-After the M1.5 review: next milestone to be agreed. Not started.
+After the M1.7 review: M1.8 (integration and robustness: shared protocol vectors, local
+end-to-end harness against a local Worker, fault matrix) is designed and approved in
+principle; its implementation is not authorized yet.

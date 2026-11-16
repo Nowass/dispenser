@@ -130,11 +130,20 @@ static struct {
     dsp_note_t log[TX_LOG];
     uint32_t epochs[TX_LOG];
     bool fail_storage_after_send; /* simulate losing the post-delivery write */
+    dsp_tx_detail_t detail[64];   /* detail returned with script[i] (M1.7) */
+    int budget;                   /* can_send(): -1 = unlimited, else sends still allowed */
+    int can_send_calls;
 } tx;
 
-static dsp_tx_result_t tx_send(void *ctx, const dsp_note_t *note, uint32_t epoch)
+static dsp_tx_result_t tx_send(void *ctx, const dsp_note_t *note, uint32_t epoch,
+                               dsp_tx_detail_t *detail)
 {
     (void)ctx;
+    DSP_CHECK(detail != NULL);
+    if (detail != NULL) {
+        /* The engine hands over a zeroed detail for every attempt. */
+        DSP_CHECK_EQ_INT(0, detail->http_status + detail->error + detail->field + detail->diag);
+    }
     int i = tx.calls++;
     if (i < TX_LOG) {
         tx.log[i] = *note;
@@ -157,15 +166,33 @@ static dsp_tx_result_t tx_send(void *ctx, const dsp_note_t *note, uint32_t epoch
     if (tx.fail_storage_after_send) {
         kv.fail_sets = true;
     }
+    if (i < tx.script_len && detail != NULL) {
+        *detail = tx.detail[i];
+    }
     return i < tx.script_len ? tx.script[i] : tx.fallback;
 }
 
-static const dsp_notify_transport_t TX = {NULL, tx_send};
+static bool tx_can_send(void *ctx)
+{
+    (void)ctx;
+    tx.can_send_calls++;
+    if (tx.budget < 0) {
+        return true;
+    }
+    if (tx.budget == 0) {
+        return false;
+    }
+    tx.budget--;
+    return true;
+}
+
+static const dsp_notify_transport_t TX = {NULL, tx_send, tx_can_send};
 
 static void tx_reset(dsp_tx_result_t fallback)
 {
     memset(&tx, 0, sizeof tx);
     tx.fallback = fallback;
+    tx.budget = -1;
 }
 
 static dsp_notify_delivery_report_t deliver_all(dsp_tx_result_t result, dsp_notify_clock_t clock)
@@ -572,7 +599,7 @@ static void test_ack_removes_entry(void)
     DSP_CHECK_EQ_INT(2, dsp_notify_pending_count(&n));
     tx_reset(DSP_TX_ACK);
     DSP_CHECK_EQ_INT(DSP_NOTIFY_ERR_ARG, dsp_notify_deliver(&n, NULL, 3, at(T0)).status);
-    dsp_notify_transport_t no_send = {NULL, NULL};
+    dsp_notify_transport_t no_send = {NULL, NULL, NULL};
     DSP_CHECK_EQ_INT(DSP_NOTIFY_ERR_ARG, dsp_notify_deliver(&n, &no_send, 3, at(T0)).status);
 }
 
@@ -1383,13 +1410,14 @@ static dsp_notify_state_t sample_state(void)
 
 static void test_notify_codec(void)
 {
-    DSP_CHECK_EQ_INT(682, DSP_NOTIFY_RECORD_BYTES);
+    DSP_CHECK_EQ_INT(758, DSP_NOTIFY_RECORD_BYTES); /* format 2 (M1.7) */
+    DSP_CHECK_EQ_INT(682, DSP_NOTIFY_RECORD_V1_BYTES);
     dsp_notify_state_t s = sample_state();
     DSP_CHECK(dsp_notify_state_is_valid(&s));
     uint8_t b[DSP_NOTIFY_RECORD_BYTES];
     DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, dsp_codec_encode_notify(&s, b, sizeof b));
     /* Golden bytes of the header, one condition and one entry (little-endian). */
-    const uint8_t header[14] = {6, 1, 0x44, 0x33, 0x22, 0x11, 0x10, 0, 0, 0, 0x02, 0x01, 1, 0};
+    const uint8_t header[14] = {6, 2, 0x44, 0x33, 0x22, 0x11, 0x10, 0, 0, 0, 0x02, 0x01, 1, 0};
     DSP_CHECK(memcmp(b, header, sizeof header) == 0);
     const uint8_t cond0[26] = {1,    2,    0xF0, 0xEF, 0xFF, 0x6A, 0, 0, 0, 0, /* T0 */
                                0x70, 0x2A, 0x09, 0x6B, 0,    0,    0, 0,       /* T0 + 7 d */
@@ -1425,7 +1453,7 @@ static void test_notify_codec(void)
         dsp_codec_status_t expect;
     } bad[] = {
         {0, 5, DSP_CODEC_ERR_TYPE},
-        {1, 2, DSP_CODEC_ERR_VERSION},
+        {1, 3, DSP_CODEC_ERR_VERSION},                         /* newer format */
         {12, 2, DSP_CODEC_ERR_FIELD},                          /* unknown header flag */
         {13, 1, DSP_CODEC_ERR_FIELD},                          /* header padding */
         {14 + 26 + 18, 1, DSP_CODEC_ERR_FIELD},                /* inactive cond with payload */
@@ -1517,8 +1545,10 @@ static struct {
 } sent_content[MAX_SEQ];
 static bool acked_seq[MAX_SEQ];
 
-static dsp_tx_result_t rnd_send(void *ctx, const dsp_note_t *note, uint32_t epoch)
+static dsp_tx_result_t rnd_send(void *ctx, const dsp_note_t *note, uint32_t epoch,
+                                dsp_tx_detail_t *detail)
 {
+    (void)detail;
     (void)ctx;
     DSP_CHECK_EQ_INT(RANDOM_EPOCH, epoch);
     DSP_CHECK(note->seq > 0 && note->seq < MAX_SEQ);
@@ -1556,7 +1586,7 @@ static void test_randomized(void)
     memset(sent_content, 0, sizeof sent_content);
     memset(acked_seq, 0, sizeof acked_seq);
     fresh();
-    const dsp_notify_transport_t rtx = {NULL, rnd_send};
+    const dsp_notify_transport_t rtx = {NULL, rnd_send, NULL};
     dsp_utc_t now = T0;
     uint32_t last_next_seq = 0;
     for (int step = 0; step < 4000; step++) {
@@ -1630,6 +1660,466 @@ static void test_randomized(void)
     DSP_CHECK(n.s.next_seq > 100);
 }
 
+/* ---- M1.7: permanent rejection, rejection log, diagnostics, budget ------------------ */
+
+static void add_dosing_errors(int count)
+{
+    for (int i = 0; i < count; i++) {
+        dsp_dosing_error_t e = {DSP_DOSEERR_PUMP_FAILED, false, (uint32_t)(1000 + i)};
+        DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error(&n, &e, at(T0)));
+    }
+}
+
+static dsp_tx_detail_t det(uint16_t status, uint8_t error, uint8_t field, uint8_t diag)
+{
+    dsp_tx_detail_t d = {status, error, field, diag, 5};
+    return d;
+}
+
+static void script(int i, dsp_tx_result_t res, dsp_tx_detail_t d)
+{
+    tx.script[i] = res;
+    tx.detail[i] = d;
+    if (tx.script_len < i + 1) {
+        tx.script_len = i + 1;
+    }
+}
+
+static bool queued(uint32_t seq)
+{
+    for (int i = 0; i < DSP_NOTIFY_QUEUE_CAPACITY; i++) {
+        if (n.s.queue[i].seq == seq) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool logged(uint32_t seq)
+{
+    for (int i = 0; i < n.s.rejections.count; i++) {
+        if (n.s.rejections.entry[i].seq == seq) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_rejected_logged_and_removed_atomically(void)
+{
+    fresh();
+    add_dosing_errors(3); /* seq 1..3, CRITICAL */
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_REJECTED, det(409, DSP_TXERR_CONFLICT, 0, 0));
+    dsp_notify_delivery_report_t r = dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, r.status);
+    DSP_CHECK_EQ_INT(3, r.attempted);
+    DSP_CHECK_EQ_INT(1, r.rejected);
+    DSP_CHECK_EQ_INT(2, r.acked); /* the rejection never blocks later entries */
+    DSP_CHECK(!r.stopped_early);
+    DSP_CHECK_EQ_INT(0, dsp_notify_pending_count(&n));
+    const dsp_rejection_log_t *log = dsp_notify_rejections(&n);
+    DSP_CHECK_EQ_INT(1, log->count);
+    DSP_CHECK_EQ_INT(1, log->unread);
+    DSP_CHECK_EQ_INT(1, log->total);
+    DSP_CHECK_EQ_INT(0, log->lost_unread);
+    DSP_CHECK_EQ_INT(1, log->entry[0].seq);
+    DSP_CHECK_EQ_INT(DSP_NOTE_DOSING_ERROR, log->entry[0].type);
+    DSP_CHECK_EQ_INT(DSP_DOSEERR_PUMP_FAILED, log->entry[0].code);
+    DSP_CHECK_EQ_INT(409, log->entry[0].http_status);
+    DSP_CHECK_EQ_INT(DSP_TXERR_CONFLICT, log->entry[0].error);
+    DSP_CHECK_EQ_INT(1, log->entry[0].attempts);
+    DSP_CHECK(in_sync());
+    boot(); /* survives a restart */
+    DSP_CHECK_EQ_INT(1, dsp_notify_rejections(&n)->count);
+    DSP_CHECK_EQ_INT(1, dsp_notify_rejections(&n)->entry[0].seq);
+    DSP_CHECK_EQ_INT(0, dsp_notify_pending_count(&n));
+}
+
+static void test_rejection_write_failure_keeps_entry(void)
+{
+    /* 1. The rejection write fails outright (every write fails from the send on). */
+    fresh();
+    add_dosing_errors(2);
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_REJECTED, det(409, DSP_TXERR_CONFLICT, 0, 0));
+    tx.fail_storage_after_send = true;
+    dsp_notify_delivery_report_t r = dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_ERR_STORAGE, r.status);
+    DSP_CHECK(r.stopped_early);
+    DSP_CHECK_EQ_INT(0, r.rejected);
+    DSP_CHECK_EQ_INT(1, tx.calls); /* nothing else was sent */
+    DSP_CHECK(queued(1));          /* still queued in RAM, unchanged */
+    DSP_CHECK_EQ_INT(0, n.s.rejections.count);
+    DSP_CHECK(dsp_notify_storage_degraded(&n));
+    boot();
+    DSP_CHECK(queued(1)); /* and in flash: frozen (attempt 1), not lost, not logged */
+    DSP_CHECK_EQ_INT(0, n.s.rejections.count);
+    for (int i = 0; i < DSP_NOTIFY_QUEUE_CAPACITY; i++) {
+        if (n.s.queue[i].seq == 1) {
+            DSP_CHECK_EQ_INT(1, n.s.queue[i].attempts);
+        }
+    }
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_REJECTED, det(409, DSP_TXERR_CONFLICT, 0, 0));
+    r = dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(1, r.rejected);
+    DSP_CHECK_EQ_INT(1, r.acked);
+    DSP_CHECK(logged(1));
+    DSP_CHECK_EQ_INT(2, n.s.rejections.entry[0].attempts);
+    DSP_CHECK(in_sync());
+
+    /* 2. The write lands but its confirmation fails (power cut right after the set, as
+     *    with ESP-IDF NVS where a set is durable at once): applied exactly once. */
+    fresh();
+    add_dosing_errors(2);
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_REJECTED, det(409, DSP_TXERR_CONFLICT, 0, 0));
+    kv.power_cut_after_sets = 2; /* set 1 = freeze, set 2 = rejection, then no commit */
+    r = dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_ERR_STORAGE, r.status);
+    DSP_CHECK(queued(1)); /* RAM conservatively keeps the entry */
+    boot();
+    DSP_CHECK(!queued(1)); /* flash holds the rejection: removed and logged together */
+    DSP_CHECK(logged(1));
+    DSP_CHECK_EQ_INT(1, dsp_notify_pending_count(&n));
+}
+
+/* A power cut at every possible write of a session with rejections and ACKs: no event is
+ * ever lost (it is queued, logged, or was acknowledged by the receiver), and never both
+ * queued and logged. */
+static void test_rejection_power_cut_every_position(void)
+{
+    for (int cut = 1; cut <= 10; cut++) {
+        fresh();
+        add_dosing_errors(5); /* seq 1..5 */
+        tx_reset(DSP_TX_ACK);
+        script(0, DSP_TX_REJECTED, det(409, DSP_TXERR_CONFLICT, 0, 0));
+        script(1, DSP_TX_ACK, det(0, 0, 0, 0));
+        script(2, DSP_TX_REJECTED, det(400, DSP_TXERR_INVALID_FIELD, DSP_TXFIELD_VALUE, 0));
+        kv.power_cut_after_sets = cut;
+        (void)dsp_notify_deliver(&n, &TX, 100, at(T0));
+        bool acked[6] = {false};
+        for (int i = 0; i < tx.calls && i < TX_LOG; i++) {
+            if ((i < tx.script_len ? tx.script[i] : tx.fallback) == DSP_TX_ACK) {
+                acked[tx.log[i].seq] = true;
+            }
+        }
+        boot();
+        for (uint32_t seq = 1; seq <= 5; seq++) {
+            bool q = queued(seq);
+            bool l = logged(seq);
+            if (!(q || l || acked[seq]) || (q && l)) {
+                fprintf(stderr, "cut %d: seq %u queued=%d logged=%d acked=%d\n", cut, seq, q, l,
+                        acked[seq]);
+            }
+            DSP_CHECK(q || l || acked[seq]);
+            DSP_CHECK(!(q && l));
+        }
+        DSP_CHECK(dsp_notify_state_is_valid(&n.s));
+    }
+}
+
+static void test_rejection_limit_per_session(void)
+{
+    fresh();
+    add_dosing_errors(5);
+    tx_reset(DSP_TX_ACK);
+    for (int i = 0; i < 5; i++) {
+        script(i, DSP_TX_REJECTED, det(409, DSP_TXERR_CONFLICT, 0, 0));
+    }
+    dsp_notify_delivery_report_t r = dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_MAX_REJECTIONS_PER_SESSION, r.rejected);
+    DSP_CHECK_EQ_INT(2, r.attempted);
+    DSP_CHECK(r.stopped_early);
+    DSP_CHECK_EQ_INT(3, dsp_notify_pending_count(&n));
+    for (int i = 0; i < DSP_NOTIFY_QUEUE_CAPACITY; i++) {
+        if (n.s.queue[i].seq != 0) {
+            DSP_CHECK_EQ_INT(0, n.s.queue[i].attempts); /* untouched */
+        }
+    }
+    DSP_CHECK(in_sync());
+}
+
+static void test_rejection_log_overflow_and_ack(void)
+{
+    fresh();
+    add_dosing_errors(7); /* seq 1..7 */
+    for (int session = 0; session < 3; session++) {
+        tx_reset(DSP_TX_ACK);
+        script(0, DSP_TX_REJECTED, det(409, DSP_TXERR_CONFLICT, 0, 0));
+        script(1, DSP_TX_REJECTED, det(400, DSP_TXERR_INVALID_FIELD, DSP_TXFIELD_CODE, 0));
+        DSP_CHECK_EQ_INT(2, dsp_notify_deliver(&n, &TX, 100, at(T0)).rejected);
+    }
+    const dsp_rejection_log_t *log = dsp_notify_rejections(&n);
+    DSP_CHECK_EQ_INT(4, log->count);
+    DSP_CHECK_EQ_INT(6, log->total);
+    DSP_CHECK_EQ_INT(4, log->unread);
+    DSP_CHECK_EQ_INT(2, log->lost_unread); /* seq 1 and 2 dropped unread: counted */
+    for (int i = 0; i < 4; i++) {
+        DSP_CHECK_EQ_INT(3 + i, log->entry[i].seq); /* oldest first */
+    }
+    DSP_CHECK_EQ_INT(DSP_TXFIELD_CODE, log->entry[3].field);
+    boot();
+    log = dsp_notify_rejections(&n);
+    DSP_CHECK_EQ_INT(2, log->lost_unread);
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_ack_rejections(&n));
+    DSP_CHECK_EQ_INT(0, log->unread);
+    DSP_CHECK_EQ_INT(0, log->lost_unread);
+    DSP_CHECK_EQ_INT(4, log->count); /* entries stay as history */
+    DSP_CHECK_EQ_INT(6, log->total); /* never cleared */
+    DSP_CHECK(in_sync());
+    kv.sets = 0;
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_ack_rejections(&n));
+    DSP_CHECK_EQ_INT(0, kv.sets); /* nothing to acknowledge: no write */
+    /* A read entry dropped by overflow is not a loss. */
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_REJECTED, det(409, DSP_TXERR_CONFLICT, 0, 0));
+    DSP_CHECK_EQ_INT(1, dsp_notify_deliver(&n, &TX, 1, at(T0)).rejected);
+    DSP_CHECK_EQ_INT(4, log->count);
+    DSP_CHECK_EQ_INT(7, log->total);
+    DSP_CHECK_EQ_INT(1, log->unread);
+    DSP_CHECK_EQ_INT(0, log->lost_unread);
+    DSP_CHECK_EQ_INT(4, log->entry[0].seq);
+    DSP_CHECK_EQ_INT(7, log->entry[3].seq);
+    DSP_CHECK(in_sync());
+}
+
+static void test_tx_diag_flags_persist_and_clear(void)
+{
+    fresh();
+    add_dosing_errors(1);
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_FAILED, det(401, 0, 0, DSP_TXDIAG_AUTH));
+    dsp_notify_delivery_report_t r = dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK(r.stopped_early);
+    DSP_CHECK_EQ_INT(1, dsp_notify_pending_count(&n));
+    uint16_t status = 0;
+    DSP_CHECK_EQ_INT(DSP_TXDIAG_AUTH, dsp_notify_tx_diag(&n, &status));
+    DSP_CHECK_EQ_INT(401, status);
+    DSP_CHECK(in_sync());
+    boot(); /* survives restarts */
+    DSP_CHECK_EQ_INT(DSP_TXDIAG_AUTH, dsp_notify_tx_diag(&n, &status));
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_FAILED, det(404, DSP_TXERR_NOT_FOUND, 0, DSP_TXDIAG_ENDPOINT));
+    (void)dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(DSP_TXDIAG_AUTH | DSP_TXDIAG_ENDPOINT, dsp_notify_tx_diag(&n, &status));
+    DSP_CHECK_EQ_INT(404, status);
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_UNCERTAIN, det(201, DSP_TXERR_OTHER, 0, DSP_TXDIAG_PROTOCOL));
+    (void)dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(DSP_TXDIAG_ALL, dsp_notify_tx_diag(&n, &status));
+    DSP_CHECK_EQ_INT(1, dsp_notify_pending_count(&n));
+    /* Clearing condition 1: an acknowledged delivery. */
+    tx_reset(DSP_TX_ACK);
+    DSP_CHECK_EQ_INT(1, dsp_notify_deliver(&n, &TX, 100, at(T0)).acked);
+    DSP_CHECK_EQ_INT(0, dsp_notify_tx_diag(&n, &status));
+    DSP_CHECK_EQ_INT(0, status);
+    DSP_CHECK(in_sync());
+    /* Clearing condition 2: the explicit clear (future BLE). */
+    add_dosing_errors(1);
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_FAILED, det(415, DSP_TXERR_UNSUPPORTED_MEDIA, 0, DSP_TXDIAG_PROTOCOL));
+    (void)dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(DSP_TXDIAG_PROTOCOL, dsp_notify_tx_diag(&n, NULL));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_clear_tx_diag(&n));
+    DSP_CHECK_EQ_INT(0, dsp_notify_tx_diag(&n, NULL));
+    DSP_CHECK(in_sync());
+    boot();
+    DSP_CHECK_EQ_INT(0, dsp_notify_tx_diag(&n, NULL));
+    DSP_CHECK_EQ_INT(1, dsp_notify_pending_count(&n)); /* the event itself is still queued */
+    /* Temporary failures leave no diagnostic. */
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_FAILED, det(503, 0, 0, 0));
+    (void)dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(0, dsp_notify_tx_diag(&n, NULL));
+}
+
+static void test_rejected_without_4xx_is_failed(void)
+{
+    fresh();
+    add_dosing_errors(2);
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_REJECTED, det(0, 0, 0, 0)); /* inconsistent transport result */
+    dsp_notify_delivery_report_t r = dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(0, r.rejected);
+    DSP_CHECK(r.stopped_early);
+    DSP_CHECK_EQ_INT(2, dsp_notify_pending_count(&n));
+    DSP_CHECK_EQ_INT(0, n.s.rejections.count);
+    DSP_CHECK_EQ_INT(DSP_TXDIAG_PROTOCOL, dsp_notify_tx_diag(&n, NULL));
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_REJECTED, det(503, 0, 0, 0));
+    DSP_CHECK_EQ_INT(0, dsp_notify_deliver(&n, &TX, 100, at(T0)).rejected);
+    DSP_CHECK_EQ_INT(2, dsp_notify_pending_count(&n));
+}
+
+static void test_budget_leaves_entries_untouched(void)
+{
+    fresh();
+    add_dosing_errors(5);
+    tx_reset(DSP_TX_ACK);
+    tx.budget = 2;
+    dsp_notify_delivery_report_t r = dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(2, r.attempted);
+    DSP_CHECK_EQ_INT(2, r.acked);
+    DSP_CHECK(r.budget_exhausted);
+    DSP_CHECK(!r.stopped_early);
+    DSP_CHECK_EQ_INT(3, dsp_notify_pending_count(&n));
+    DSP_CHECK(in_sync());
+    dsp_notify_state_t s = stored();
+    for (int i = 0; i < DSP_NOTIFY_QUEUE_CAPACITY; i++) {
+        if (s.queue[i].seq != 0) {
+            DSP_CHECK_EQ_INT(0, s.queue[i].attempts); /* not started: not frozen, not counted */
+        }
+    }
+    /* No budget at all: nothing touched, nothing written. */
+    tx_reset(DSP_TX_ACK);
+    tx.budget = 0;
+    kv.sets = 0;
+    r = dsp_notify_deliver(&n, &TX, 100, at(T0));
+    DSP_CHECK_EQ_INT(0, r.attempted);
+    DSP_CHECK(r.budget_exhausted);
+    DSP_CHECK_EQ_INT(0, kv.sets);
+    DSP_CHECK_EQ_INT(0, tx.calls);
+    /* The rest goes in the next session, oldest first. */
+    tx_reset(DSP_TX_ACK);
+    DSP_CHECK_EQ_INT(3, dsp_notify_deliver(&n, &TX, 100, at(T0)).acked);
+    DSP_CHECK_EQ_INT(3, tx.log[0].seq);
+}
+
+static dsp_notify_state_t sample_state_v2(void)
+{
+    dsp_notify_state_t s = sample_state();
+    s.tx_diag = DSP_TXDIAG_AUTH;
+    s.tx_diag_status = 401;
+    s.rejections.total = 5;
+    s.rejections.unread = 1;
+    s.rejections.count = 2;
+    dsp_rejection_t *a = &s.rejections.entry[0];
+    a->seq = 3;
+    a->type = DSP_NOTE_DOSING_ERROR;
+    a->flags = DSP_NOTE_F_MANUAL | DSP_NOTE_F_TIME_VALID;
+    a->code = DSP_DOSEERR_PUMP_FAILED;
+    a->http_status = 409;
+    a->error = DSP_TXERR_CONFLICT;
+    a->attempts = 1;
+    dsp_rejection_t *b = &s.rejections.entry[1];
+    b->seq = 0x0A0B0C0D;
+    b->type = DSP_NOTE_RESERVOIR_LOW;
+    b->flags = DSP_NOTE_F_TIME_VALID;
+    b->http_status = 400;
+    b->error = DSP_TXERR_INVALID_FIELD;
+    b->field = DSP_TXFIELD_VALUE;
+    b->attempts = 0x0102;
+    return s;
+}
+
+static void test_notify_codec_v2(void)
+{
+    dsp_notify_state_t s = sample_state_v2();
+    DSP_CHECK(dsp_notify_state_is_valid(&s));
+    uint8_t b[DSP_NOTIFY_RECORD_BYTES];
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, dsp_codec_encode_notify(&s, b, sizeof b));
+    /* Golden bytes of the format-2 tail. */
+    const uint8_t diag[4] = {1, 0, 0x91, 0x01};
+    DSP_CHECK(memcmp(b + 682, diag, sizeof diag) == 0);
+    const uint8_t hdr[8] = {5, 0, 0, 0, 0, 0, 1, 2};
+    DSP_CHECK(memcmp(b + 686, hdr, sizeof hdr) == 0);
+    const uint8_t e1[16] = {0x0D, 0x0C, 0x0B, 0x0A, 1, 2, 0, 0, 0x90, 0x01, 5, 11, 0x02, 0x01, 0, 0};
+    DSP_CHECK(memcmp(b + 694 + 16, e1, sizeof e1) == 0);
+    for (size_t i = 694 + 32; i < sizeof b; i++) {
+        DSP_CHECK(b[i] == 0); /* unused slots */
+    }
+    dsp_notify_state_t out;
+    DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_notify(b, sizeof b, &out));
+    DSP_CHECK(state_equal(&s, &out));
+    DSP_CHECK_EQ_INT(0x0A0B0C0D, out.rejections.entry[1].seq);
+    struct {
+        size_t off;
+        uint8_t val;
+    } bad[] = {
+        {682, 0x08},       /* unknown diagnostic flag */
+        {683, 1},          /* padding */
+        {682, 0},          /* status kept without a flag */
+        {685, 0x02},       /* status 0x0291 = 657 */
+        {693, 5},          /* count > capacity */
+        {692, 3},          /* unread > count */
+        {686, 1},          /* total < count */
+        {690, 1},          /* lost_unread although not full of unread */
+        {694 + 4, 9},      /* unknown type */
+        {694 + 6, 9},      /* invalid code for the type */
+        {694 + 5, 0x10},   /* unknown entry flag */
+        {694 + 8, 0x8F},   /* http status 399 */
+        {694 + 10, 12},    /* error out of range */
+        {694 + 11, 16},    /* field out of range */
+        {694 + 12, 0},     /* attempts 0 (low byte; high byte 0) */
+        {694 + 14, 1},     /* padding */
+        {694 + 15, 1},     /* padding */
+        {694 + 0, 0},      /* seq 0 in a used slot */
+        {694 + 32 + 4, 1}, /* unused slot not zero */
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        uint8_t m[DSP_NOTIFY_RECORD_BYTES];
+        memcpy(m, b, sizeof m);
+        m[bad[i].off] = bad[i].val;
+        dsp_codec_status_t got = dsp_codec_decode_notify(m, sizeof m, &out);
+        if (got != DSP_CODEC_ERR_FIELD) {
+            fprintf(stderr, "notify v2 case %zu (offset %zu): %d\n", i, bad[i].off, (int)got);
+        }
+        DSP_CHECK_EQ_INT(DSP_CODEC_ERR_FIELD, got);
+    }
+    /* A status with a flag but no HTTP status (local cause) is valid. */
+    s.tx_diag_status = 0;
+    DSP_CHECK(dsp_notify_state_is_valid(&s));
+    /* The encoder refuses inconsistent logs. */
+    s = sample_state_v2();
+    s.rejections.lost_unread = 1;
+    DSP_CHECK_EQ_INT(0, dsp_codec_encode_notify(&s, b, sizeof b));
+    s.rejections.count = 4;
+    s.rejections.unread = 4;
+    s.rejections.entry[2] = s.rejections.entry[0];
+    s.rejections.entry[3] = s.rejections.entry[1];
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, dsp_codec_encode_notify(&s, b, sizeof b));
+}
+
+/* Format 1 (M1.5) records stay readable; the next write upgrades them to format 2. */
+static void test_notify_format1_compat(void)
+{
+    dsp_notify_state_t s = sample_state();
+    uint8_t b[DSP_NOTIFY_RECORD_BYTES];
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, dsp_codec_encode_notify(&s, b, sizeof b));
+    b[1] = DSP_NOTIFY_FORMAT_V1;
+    dsp_notify_state_t out;
+    DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_notify(b, DSP_NOTIFY_RECORD_V1_BYTES, &out));
+    DSP_CHECK(state_equal(&s, &out));
+    DSP_CHECK_EQ_INT(0, out.tx_diag);
+    DSP_CHECK_EQ_INT(0, out.rejections.count);
+    DSP_CHECK_EQ_INT(DSP_CODEC_ERR_SIZE, dsp_codec_decode_notify(b, DSP_NOTIFY_RECORD_BYTES, &out));
+    b[1] = DSP_NOTIFY_FORMAT_V2;
+    DSP_CHECK_EQ_INT(DSP_CODEC_ERR_SIZE, dsp_codec_decode_notify(b, DSP_NOTIFY_RECORD_V1_BYTES, &out));
+
+    /* On "flash": an M1.5 device with a queued event and a format-1 record. */
+    fresh();
+    add_dosing_errors(2);
+    uint8_t v1[DSP_NOTIFY_RECORD_BYTES];
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, dsp_codec_encode_notify(&n.s, v1, sizeof v1));
+    v1[1] = DSP_NOTIFY_FORMAT_V1;
+    fake_kv_put_raw(&kv, "notify", v1, DSP_NOTIFY_RECORD_V1_BYTES);
+    boot();
+    DSP_CHECK_EQ_INT(2, dsp_notify_pending_count(&n));
+    DSP_CHECK_EQ_INT(0, n.s.rejections.count);
+    tx_reset(DSP_TX_ACK);
+    script(0, DSP_TX_REJECTED, det(409, DSP_TXERR_CONFLICT, 0, 0));
+    DSP_CHECK_EQ_INT(1, dsp_notify_deliver(&n, &TX, 100, at(T0)).rejected);
+    const fake_kv_entry_t *e = fake_kv_find(&kv, "notify");
+    DSP_CHECK(e != NULL);
+    if (e != NULL) {
+        DSP_CHECK_EQ_INT(DSP_NOTIFY_RECORD_BYTES, e->len);
+        DSP_CHECK_EQ_INT(DSP_NOTIFY_FORMAT_V2, e->value[1]);
+    }
+    DSP_CHECK(in_sync());
+}
+
 int main(void)
 {
     DSP_RUN(test_reservoir_threshold_crossing);
@@ -1663,5 +2153,15 @@ int main(void)
     DSP_RUN(test_format_id);
     DSP_RUN(test_notify_codec);
     DSP_RUN(test_randomized);
+    DSP_RUN(test_rejected_logged_and_removed_atomically);
+    DSP_RUN(test_rejection_write_failure_keeps_entry);
+    DSP_RUN(test_rejection_power_cut_every_position);
+    DSP_RUN(test_rejection_limit_per_session);
+    DSP_RUN(test_rejection_log_overflow_and_ack);
+    DSP_RUN(test_tx_diag_flags_persist_and_clear);
+    DSP_RUN(test_rejected_without_4xx_is_failed);
+    DSP_RUN(test_budget_leaves_entries_untouched);
+    DSP_RUN(test_notify_codec_v2);
+    DSP_RUN(test_notify_format1_compat);
     return dsp_test_finish();
 }

@@ -7,4 +7,20 @@ config DSP_SNTP_SERVER
         NTP server used for time synchronization (UTC). One server; the
         domain decides whether a received time is accepted.
 
+config DSP_NOTIFY_URL
+    string "Notification endpoint (HTTPS)"
+    default "https://dispenser-notify.nowassek.workers.dev/api/v1/events"
+    help
+        Protocol-v1 ingestion endpoint (cloudflare/dispenser-notify). Must start
+        with https://. Not a secret; the device token lives only in the
+        "nvs_sec" partition. Automated tests never use this URL.
+
+config DSP_NOTIFY_HEALTH_URL
+    string "Backend health URL (diagnostic TLS probe)"
+    default "https://dispenser-notify.nowassek.workers.dev/health"
+    help
+        Unauthenticated GET used only by the off-by-default HTTPS diagnostic to
+        verify Wi-Fi, trusted time and certificate validation without sending
+        an event or a credential.
+
 endmenu

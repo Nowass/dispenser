@@ -447,7 +447,7 @@ size_t dsp_codec_encode_notify(const dsp_notify_state_t *s, uint8_t *buf, size_t
     }
     memset(buf, 0, DSP_NOTIFY_RECORD_BYTES);
     buf[0] = DSP_REC_TYPE_NOTIFY;
-    buf[1] = DSP_CODEC_VERSION;
+    buf[1] = DSP_NOTIFY_FORMAT_V2;
     put_u32(buf + 2, s->epoch);
     put_u32(buf + 6, s->next_seq);
     put_u16(buf + 10, s->dropped);
@@ -475,16 +475,43 @@ size_t dsp_codec_encode_notify(const dsp_notify_state_t *s, uint8_t *buf, size_t
         put_u32(p + 22, e->value);
         put_u32(p + 26, e->value2);
     }
+    /* Format 2: diagnostics and rejection log. */
+    p[0] = s->tx_diag;
+    put_u16(p + 2, s->tx_diag_status);
+    p += DSP_NOTIFY_DIAG_BYTES;
+    const dsp_rejection_log_t *log = &s->rejections;
+    put_u32(p, log->total);
+    put_u16(p + 4, log->lost_unread);
+    p[6] = log->unread;
+    p[7] = log->count;
+    p += DSP_NOTIFY_REJLOG_HEADER_BYTES;
+    for (size_t i = 0; i < DSP_REJECTION_LOG_CAPACITY; i++, p += DSP_NOTIFY_REJECTION_BYTES) {
+        const dsp_rejection_t *r = &log->entry[i];
+        put_u32(p, r->seq);
+        p[4] = r->type;
+        p[5] = r->flags;
+        put_u16(p + 6, r->code);
+        put_u16(p + 8, r->http_status);
+        p[10] = r->error;
+        p[11] = r->field;
+        put_u16(p + 12, r->attempts);
+    }
     return DSP_NOTIFY_RECORD_BYTES;
 }
 
 dsp_codec_status_t dsp_codec_decode_notify(const uint8_t *buf, size_t len, dsp_notify_state_t *out)
 {
-    dsp_codec_status_t st = check_header(buf, len, DSP_REC_TYPE_NOTIFY);
-    if (st != DSP_CODEC_OK) {
-        return st;
+    if (buf == NULL || len < 2) {
+        return DSP_CODEC_ERR_SIZE;
     }
-    if (len != DSP_NOTIFY_RECORD_BYTES || out == NULL) {
+    if (buf[0] != DSP_REC_TYPE_NOTIFY) {
+        return DSP_CODEC_ERR_TYPE;
+    }
+    if (buf[1] != DSP_NOTIFY_FORMAT_V1 && buf[1] != DSP_NOTIFY_FORMAT_V2) {
+        return DSP_CODEC_ERR_VERSION; /* newer format: unsupported, never guessed */
+    }
+    bool v2 = buf[1] == DSP_NOTIFY_FORMAT_V2;
+    if (len != (v2 ? DSP_NOTIFY_RECORD_BYTES : DSP_NOTIFY_RECORD_V1_BYTES) || out == NULL) {
         return DSP_CODEC_ERR_SIZE;
     }
     if (buf[13] != 0) {
@@ -521,6 +548,34 @@ dsp_codec_status_t dsp_codec_decode_notify(const uint8_t *buf, size_t len, dsp_n
         e->code = get_u16(p + 20);
         e->value = get_u32(p + 22);
         e->value2 = get_u32(p + 26);
+    }
+    if (v2) {
+        if (p[1] != 0) {
+            return DSP_CODEC_ERR_FIELD;
+        }
+        s.tx_diag = p[0];
+        s.tx_diag_status = get_u16(p + 2);
+        p += DSP_NOTIFY_DIAG_BYTES;
+        dsp_rejection_log_t *log = &s.rejections;
+        log->total = get_u32(p);
+        log->lost_unread = get_u16(p + 4);
+        log->unread = p[6];
+        log->count = p[7];
+        p += DSP_NOTIFY_REJLOG_HEADER_BYTES;
+        for (size_t i = 0; i < DSP_REJECTION_LOG_CAPACITY; i++, p += DSP_NOTIFY_REJECTION_BYTES) {
+            if (p[14] != 0 || p[15] != 0) {
+                return DSP_CODEC_ERR_FIELD;
+            }
+            dsp_rejection_t *r = &log->entry[i];
+            r->seq = get_u32(p);
+            r->type = p[4];
+            r->flags = p[5];
+            r->code = get_u16(p + 6);
+            r->http_status = get_u16(p + 8);
+            r->error = p[10];
+            r->field = p[11];
+            r->attempts = get_u16(p + 12);
+        }
     }
     if (!dsp_notify_state_is_valid(&s)) {
         return DSP_CODEC_ERR_FIELD;
