@@ -142,6 +142,27 @@ tasks.withType<Test>().configureEach {
     inputs.dir(rootProject.file("../test-vectors")).withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
+// Robolectric's Android framework jar is resolved by Gradle (pinned in the version catalog;
+// Gradle's retries, checksums and the CI dependency cache apply) instead of being downloaded by
+// Robolectric at test time. The tests run Robolectric offline against build/robolectric-deps; a
+// Robolectric upgrade that needs another jar fails with "Unable to locate dependency".
+val robolectricRuntime: Configuration by configurations.creating {
+    isTransitive = false
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+val robolectricDepsDir = layout.buildDirectory.dir("robolectric-deps")
+val prepareRobolectricRuntime = tasks.register<Sync>("prepareRobolectricRuntime") {
+    from(robolectricRuntime)
+    into(robolectricDepsDir)
+}
+tasks.withType<Test>().configureEach {
+    inputs.files(prepareRobolectricRuntime).withPropertyName("robolectricRuntime")
+        .withPathSensitivity(PathSensitivity.NAME_ONLY)
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.dependency.dir", robolectricDepsDir.get().asFile.absolutePath)
+}
+
 dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
@@ -161,6 +182,7 @@ dependencies {
     ksp(libs.androidx.room.compiler)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
+    robolectricRuntime(libs.robolectric.android.all)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.kotlinx.coroutines.test)

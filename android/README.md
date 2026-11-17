@@ -217,9 +217,25 @@ ViewModels and domain models have no database dependencies; Room types live only
   Room persistence across database reopen ("restart"), fresh-install emptiness,
   real vs. simulated clock, calendar/dashboard updates from Room, editor ViewModel.
   Room tests run on the JVM via Robolectric (no emulator needed).
+  Robolectric runs **offline**: its Android framework jar
+  (`org.robolectric:android-all-instrumented`, version `robolectricAndroidAll` in
+  `gradle/libs.versions.toml`, the SDK 35 build Robolectric 4.17 expects) is resolved by Gradle
+  and synced to `app/build/robolectric-deps` by `prepareRobolectricRuntime`. Tests never download
+  at run time (a transient Maven Central failure in that download broke CI run 44070876851).
+  When upgrading Robolectric or the tests' SDK level, update `robolectricAndroidAll` too; a
+  mismatch fails with "Unable to locate dependency".
 - Instrumented Compose tests (`src/androidTest`): navigation smoke test, editor
   screen states (Save visibility/enablement, discard dialog), create/edit/discard flows.
   These compile in CI-style runs but need an emulator to execute.
+
+## Maintenance backlog
+
+- **Low priority:** `checkThirdPartyLicenses` is declared incompatible with the configuration
+  cache (it resolves POMs and parent POMs at execution time), so runs that include it discard
+  the configuration-cache entry. This is a warning, not a failure. Proposed refactor (deferred,
+  must not weaken the verification): `generateThirdPartyLicenses` also writes a non-shipped lock
+  file (every resolved module, including BOMs, plus the SHA-256 of `third_party_licenses.json`),
+  and the check compares the lazily resolved `releaseRuntimeClasspath` graph against it.
 
 ## Known limitations
 

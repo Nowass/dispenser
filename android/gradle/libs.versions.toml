@@ -14,6 +14,9 @@ coroutinesTest = "1.9.0"
 room = "2.8.5"
 ksp = "2.3.12"
 robolectric = "4.17"
+# Robolectric's instrumented Android framework jar for SDK 35 (the only sdk in the tests' @Config),
+# the exact artifact Robolectric 4.17 uses for that level. Update together with robolectric.
+robolectricAndroidAll = "15-robolectric-13954326-i7"
 androidxTestCore = "1.6.1"
 datastore = "1.2.1"
 # Same version Navigation already resolves (no upgrade); JSON tree API only, no compiler plugin.
@@ -46,6 +49,7 @@ okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver",
 androidx-room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+robolectric-android-all = { group = "org.robolectric", name = "android-all-instrumented", version.ref = "robolectricAndroidAll" }
 androidx-test-core = { group = "androidx.test", name = "core-ktx", version.ref = "androidxTestCore" }
 
 [plugins]
