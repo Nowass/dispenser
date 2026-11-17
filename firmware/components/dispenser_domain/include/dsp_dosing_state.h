@@ -88,6 +88,12 @@ typedef struct {
                              marker without request binding) */
     uint8_t ring_next;    /* index of the next ring entry to (over)write, 0..DSP_MANUAL_RING - 1 */
     dsp_manual_result_t ring[DSP_MANUAL_RING];
+    /* Format 3 (M1.10b.3): durable manual-dose admission counter (docs/OWNERSHIP_DESIGN.md
+     * 11.2). Updated only in the write that makes a fresh decision durable; formats 1 and 2
+     * decode with both zero. adm_date: the local date the count belongs to (all zero = none
+     * yet; restarted only by a trusted later date); adm_count: fresh decisions counted. */
+    dsp_date_t adm_date;
+    uint16_t adm_count;
 } dsp_dosing_state_t;
 
 /* Provisioning value of a new record: SERVICE_REQUIRED, everything else zero. */

@@ -35,11 +35,11 @@ static const dsp_tz_t *const TZ = &DSP_TZ_EUROPE_PRAGUE;
 #define CAP 100000u
 #define WINDOW DSP_EXEC_DUE_WINDOW_DEFAULT_S
 
-static const dsp_app_auth_t OWNER = {DSP_APP_ROLE_OWNER, 0};
-static const dsp_app_auth_t OWNER3 = {DSP_APP_ROLE_OWNER, 3};
-static const dsp_app_auth_t NOBODY = {DSP_APP_ROLE_NONE, 0};
-static const dsp_app_auth_t BAD_SLOT = {DSP_APP_ROLE_OWNER, 4};
-static const dsp_app_auth_t BAD_ROLE = {7, 0};
+static const dsp_app_auth_t OWNER = {DSP_APP_ROLE_OWNER, 0, 0, 0};
+static const dsp_app_auth_t OWNER3 = {DSP_APP_ROLE_OWNER, 3, 0, 0};
+static const dsp_app_auth_t NOBODY = {DSP_APP_ROLE_NONE, 0, 0, 0};
+static const dsp_app_auth_t BAD_SLOT = {DSP_APP_ROLE_OWNER, 4, 0, 0};
+static const dsp_app_auth_t BAD_ROLE = {7, 0, 0, 0};
 
 /* ---- Power cuts ------------------------------------------------------------------------ */
 
@@ -256,7 +256,7 @@ static int runs_of(const char *id)
 /* ---- Power port ----------------------------------------------------------------------------- */
 
 static dsp_wake_cause_t g_cause;
-static uint8_t rtc[64];
+static uint8_t rtc[DSP_POWER_RETAINED_BYTES];
 static size_t rtc_len;
 static int sleeps, fail_safes;
 
@@ -317,6 +317,7 @@ enum {
     OP_MANUAL,     /* M1.10b.2 */
     OP_GET_RESULT,
     OP_FLOOR,
+    OP_HOOK,       /* M1.10b.3: a test-specific call inside the session (hook(i)) */
 };
 
 typedef struct {
@@ -334,6 +335,8 @@ typedef struct {
     dsp_app_cmd_t cmd;
     uint64_t seq;
     uint32_t volume;
+    void (*hook)(int i); /* OP_HOOK */
+    int a, b;            /* OP_HOOK arguments */
 } op_t;
 
 typedef struct {
@@ -442,6 +445,11 @@ static void exec_op(int i)
         break;
     case OP_FLOOR:
         r->r = dsp_app_manual_floor(&app, auth, &r->floor);
+        break;
+    case OP_HOOK:
+        if (o->hook != NULL) {
+            o->hook(i);
+        }
         break;
     default:
         break;
@@ -653,6 +661,14 @@ static const dsp_ble_port_t BLE = {NULL,     ble_start,  ble_connected, ble_susp
 
 static dsp_app_config_t CFG;
 static dsp_app_report_t rep;
+
+/* M1.10b.3: tests that write in bulk within one session raise the session-local limits. */
+static void bulk_limits(void)
+{
+    CFG.session_writes_max = 1000;
+    CFG.writes_per_minute = 1000;
+    CFG.session_ops_max = 4000;
+}
 
 static void world(void)
 {
@@ -1338,6 +1354,7 @@ static void test_config_service_required_never_enables_dosing(void)
 static void test_config_field_boundaries(void)
 {
     provision(false);
+    bulk_limits(); /* more writes in one session than the M1.10b.3 defaults allow */
     typedef struct {
         uint16_t mask;
         dsp_config_t v;
@@ -1674,6 +1691,7 @@ static void test_d16_floor_under_rollback_hold(void)
 static void test_d16_same_id_recreated_after_tombstone_eviction(void)
 {
     provision(true);
+    bulk_limits(); /* more writes in one session than the M1.10b.3 defaults allow */
     clear_script();
     step(g_true, op_create(disabled("same", 8, 0))); /* never executed: not in the history */
     DSP_CHECK(session());
@@ -1936,6 +1954,7 @@ static void test_schedule_validation_and_revisions(void)
 static void test_schedule_capacity_and_paging(void)
 {
     provision(true);
+    bulk_limits(); /* more writes in one session than the M1.10b.3 defaults allow */
     clear_script();
     int empty = step(g_true, op_list(0));
     int empty1 = step(g_true, op_list(1));

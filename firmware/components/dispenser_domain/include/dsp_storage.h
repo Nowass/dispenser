@@ -13,6 +13,8 @@
  *   "notify"        notification state and queue (layout v3, M1.5)
  *   "dosing"        dosing state: readiness, BLOCKED latch, refill intent, manual marker,
  *                   daily ledger (layout v4, M1.9a)
+ *   "auth"          credential record: identity key pair, phone slots, ownership epoch
+ *                   (layout v5, M1.10b.3)
  *
  * Explicit presence (approved 2026-11-15): every key exists once provisioned and keys are
  * never deleted. Because ESP-IDF NVS drops items that fail its CRC checks, a missing key
@@ -35,12 +37,13 @@
 #include "dsp_notify_state.h"
 #include "dsp_time_meta.h"
 #include "dsp_dosing_state.h"
+#include "dsp_auth.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define DSP_STORAGE_LAYOUT_VERSION 4 /* v1/v2/v3 are migrated: new keys added, marker last */
+#define DSP_STORAGE_LAYOUT_VERSION 5 /* v1..v4 are migrated: new keys added, marker last */
 #define DSP_STORAGE_HISTORY_SLOTS DSP_HISTORY_DEFAULT_SLOTS /* 32, fixed in layout v1 */
 
 typedef enum {
@@ -77,18 +80,29 @@ typedef struct {
     uint8_t readback[DSP_RECORD_MAX_BYTES];
     dsp_schedule_set_t set_scratch;
     dsp_notify_state_t notify_scratch;
+    /* M1.10b.3: classification of "auth" at open (DSP_STORAGE_OK, ERR_CORRUPT or
+     * ERR_UNSUPPORTED). With a v5 marker a missing, malformed or newer "auth" does NOT fail the
+     * open (the other records stay usable so recovery can force SERVICE_REQUIRED), but the
+     * caller MUST treat it as CRED_DEGRADED: no dosing until recovery or maintenance. */
+    dsp_storage_status_t auth_status;
+    dsp_auth_t auth_scratch; /* transition copy (key material; wiped after use) */
 } dsp_storage_t;
 
 /*
  * Opens the layout.
- *  - Marker v1 (M1.3), v2 (M1.4) or v3 (M1.5): migrated to v4 if allow_provision (keys added
+ *  - Marker v4 (M1.9a..M1.10b.2): migrated to v5 if allow_provision: the "auth" record is
+ *    provisioned UNCLAIMED (a v4 device was never claimable) unless an interrupted migration
+ *    already wrote that value; any other "auth" content next to a v4 marker is CORRUPT. Then
+ *    the marker is rewritten last (resumable).
+ *  - Marker v1 (M1.3), v2 (M1.4) or v3 (M1.5): migrated to v5 if allow_provision (keys added
  *    since are provisioned, marker rewritten last; resumable), otherwise
  *    DSP_STORAGE_ERR_MIGRATION_REQUIRED. The new "dosing" record is provisioned
  *    SERVICE_REQUIRED (never enabling dosing), with the BLOCKED latch set when the existing
  *    notification state has an active RESERVOIR_BLOCKED condition (conservative).
  *  - Marker present and supported: every key is read and validated (history also through
  *    dsp_history_scan). Any missing or malformed key -> DSP_STORAGE_ERR_CORRUPT; a newer
- *    format -> DSP_STORAGE_ERR_UNSUPPORTED. Nothing is modified.
+ *    format -> DSP_STORAGE_ERR_UNSUPPORTED. Nothing is modified. Exception (v5): "auth" is
+ *    classified into st->auth_status instead of failing the open (see dsp_storage_t).
  *  - Marker absent: if every other key is absent or still holds its provisioning value
  *    (first boot, or provisioning interrupted by power loss), the missing keys are written,
  *    then the marker (if allow_provision; otherwise DSP_STORAGE_ERR_NOT_PROVISIONED).
@@ -122,6 +136,12 @@ dsp_storage_status_t dsp_storage_save_notify(dsp_storage_t *st, const dsp_notify
 /* Dosing state (M1.9a, layout v4): one atomic record; save validates and confirms. */
 dsp_storage_status_t dsp_storage_load_dosing(dsp_storage_t *st, dsp_dosing_state_t *out);
 dsp_storage_status_t dsp_storage_save_dosing(dsp_storage_t *st, const dsp_dosing_state_t *s);
+
+/* Credential record (M1.10b.3, layout v5). load: strict decode into *out (the caller wipes
+ * it); st->buf is wiped. save: validates, writes, reads back, compares; both buffers wiped.
+ * A successful save also sets st->auth_status = OK. */
+dsp_storage_status_t dsp_storage_load_auth(dsp_storage_t *st, dsp_auth_t *out);
+dsp_storage_status_t dsp_storage_save_auth(dsp_storage_t *st, const dsp_auth_t *a);
 
 /* ---- Internal helpers shared with the schedule repository ------------------------- */
 

@@ -21,7 +21,7 @@ static dsp_storage_t st;
 static dsp_schedule_repo_t repo;
 static dsp_history_store_t hist;
 
-#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 5) /* + sched, config, time, notify, dosing (v4) */
+#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 6) /* + sched, config, time, notify, dosing, auth (v5) */
 #define ALL_KEYS (DATA_KEYS + 1)
 
 static dsp_storage_status_t reopen(bool allow)
@@ -508,17 +508,17 @@ static void test_unsupported_versions(void)
         size_t len = e->len;
         memcpy(v, e->value, len);
         /* Format version from a newer firmware ("notify" is at format 3 since M1.9a, "h12"
-         * and "config" at format 2, "sched" at format 2 since M1.10b.1, "dosing" at format 2
-         * since M1.10b.2). */
+         * and "config" at format 2, "sched" at format 2 since M1.10b.1, "dosing" at format 3
+         * since M1.10b.3). */
         bool at2 = strcmp(keys[k], "h12") == 0 || strcmp(keys[k], "config") == 0 ||
-                   strcmp(keys[k], "sched") == 0 ||
-                   strcmp(keys[k], "dosing") == 0; /* dosing format 2 since M1.10b.2 */
-        v[1] = strcmp(keys[k], "notify") == 0 ? 4 : (at2 ? 3 : 2);
+                   strcmp(keys[k], "sched") == 0;
+        bool at3 = strcmp(keys[k], "notify") == 0 || strcmp(keys[k], "dosing") == 0;
+        v[1] = at3 ? 4 : (at2 ? 3 : 2);
         fake_kv_put_raw(&kv, keys[k], v, len);
         expect_open(DSP_STORAGE_ERR_UNSUPPORTED);
     }
     /* Layout marker of another layout version / slot count. */
-    const dsp_layout_t layouts[] = {{5, 32, 16, 16}, {0, 32, 16, 16}, {4, 16, 16, 16},
+    const dsp_layout_t layouts[] = {{6, 32, 16, 16}, {0, 32, 16, 16}, {4, 16, 16, 16},
                                     {3, 32, 8, 16},  {3, 32, 16, 4},  {1, 16, 16, 16},
                                     {2, 32, 16, 4}};
     for (size_t i = 0; i < sizeof layouts / sizeof layouts[0]; i++) {
@@ -1000,7 +1000,10 @@ static void make_old_storage(int version)
     if (version <= 2) {
         fake_kv_remove(&kv, "notify");
     }
-    fake_kv_remove(&kv, "dosing");
+    if (version <= 3) {
+        fake_kv_remove(&kv, "dosing");
+    }
+    fake_kv_remove(&kv, "auth"); /* layout v5 (M1.10b.3) */
     const dsp_layout_t old = {(uint16_t)version, 32, 16, 16};
     uint8_t m[DSP_LAYOUT_RECORD_BYTES];
     DSP_CHECK_EQ_INT(DSP_LAYOUT_RECORD_BYTES, dsp_codec_encode_layout(&old, m, sizeof m));
@@ -1029,23 +1032,25 @@ static void test_layout_migrations_to_v4(void)
     cfg.reservoir_remaining_ul = 120000;
     DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_config(&st, &cfg));
     make_v1_storage();
-    DSP_CHECK_EQ_INT(ALL_KEYS - 3, fake_kv_count(&kv));
+    DSP_CHECK_EQ_INT(ALL_KEYS - 4, fake_kv_count(&kv));
 
     /* Read-only open never migrates. */
     fake_kv_clear_faults(&kv);
     DSP_CHECK_EQ_INT(DSP_STORAGE_ERR_MIGRATION_REQUIRED, reopen(false));
     DSP_CHECK_EQ_INT(0, kv.sets);
 
-    /* Migration: "time", "notify", "dosing" provisioned, marker v4 last, data preserved. */
+    /* Migration: "time", "notify", "dosing", "auth" provisioned, marker v5 last, data
+     * preserved. */
     fake_kv_clear_faults(&kv);
     DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
     DSP_CHECK(st.migrated_now && !st.provisioned_now);
-    DSP_CHECK_EQ_INT(4, kv.sets); /* "time", "notify", "dosing", then "layout" */
+    DSP_CHECK_EQ_INT(5, kv.sets); /* "time", "notify", "dosing", "auth", then "layout" */
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, st.auth_status);
     DSP_CHECK_EQ_INT(ALL_KEYS, fake_kv_count(&kv));
     dsp_layout_t layout;
     const fake_kv_entry_t *m = fake_kv_find(&kv, "layout");
     DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_layout(m->value, m->len, &layout));
-    DSP_CHECK_EQ_INT(4, layout.layout_version);
+    DSP_CHECK_EQ_INT(5, layout.layout_version);
     dsp_dosing_state_t ds;
     DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_dosing(&st, &ds));
     DSP_CHECK_EQ_INT(DSP_READINESS_SERVICE_REQUIRED, ds.readiness); /* never enables dosing */
@@ -1063,9 +1068,9 @@ static void test_layout_migrations_to_v4(void)
     DSP_CHECK(!st.migrated_now);
     DSP_CHECK_EQ_INT(0, kv.sets);
 
-    /* Interrupted migration (power lost after 1, 2 or 3 new keys, before the marker):
+    /* Interrupted migration (power lost after 1, 2, 3 or 4 new keys, before the marker):
      * resumed, in both flash modes. */
-    for (int mode = 0; mode < 6; mode++) {
+    for (int mode = 0; mode < 8; mode++) {
         fresh(mode % 2 == 1);
         make_v1_storage();
         kv.power_cut_after_sets = 1 + mode / 2;
@@ -1101,14 +1106,14 @@ static void test_layout_migrations_to_v4(void)
     dsp_time_meta_t tm = {1795158000, 1795158000, 0, 12, 1795158001};
     DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_time(&st, &tm));
     make_old_storage(2);
-    DSP_CHECK_EQ_INT(ALL_KEYS - 2, fake_kv_count(&kv));
+    DSP_CHECK_EQ_INT(ALL_KEYS - 3, fake_kv_count(&kv));
     fake_kv_clear_faults(&kv);
     DSP_CHECK_EQ_INT(DSP_STORAGE_ERR_MIGRATION_REQUIRED, reopen(false));
     DSP_CHECK_EQ_INT(0, kv.sets);
     fake_kv_clear_faults(&kv);
     DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
     DSP_CHECK(st.migrated_now);
-    DSP_CHECK_EQ_INT(3, kv.sets); /* "notify", "dosing", then "layout" */
+    DSP_CHECK_EQ_INT(4, kv.sets); /* "notify", "dosing", "auth", then "layout" */
     DSP_CHECK_EQ_INT(ALL_KEYS, fake_kv_count(&kv));
     dsp_time_meta_t tm_back;
     DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_time(&st, &tm_back));
@@ -1151,14 +1156,14 @@ static void test_layout_v3_to_v4_dosing_record(void)
             DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_notify(&st, &ns));
         }
         make_old_storage(3);
-        DSP_CHECK_EQ_INT(ALL_KEYS - 1, fake_kv_count(&kv));
+        DSP_CHECK_EQ_INT(ALL_KEYS - 2, fake_kv_count(&kv));
         fake_kv_clear_faults(&kv);
         DSP_CHECK_EQ_INT(DSP_STORAGE_ERR_MIGRATION_REQUIRED, reopen(false));
         DSP_CHECK_EQ_INT(0, kv.sets);
         fake_kv_clear_faults(&kv);
         DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
         DSP_CHECK(st.migrated_now);
-        DSP_CHECK_EQ_INT(2, kv.sets); /* "dosing", then "layout" */
+        DSP_CHECK_EQ_INT(3, kv.sets); /* "dosing", "auth", then "layout" */
         dsp_dosing_state_t ds;
         DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_dosing(&st, &ds));
         DSP_CHECK_EQ_INT(DSP_READINESS_SERVICE_REQUIRED, ds.readiness);
@@ -1280,12 +1285,277 @@ static void test_schedule_set_format_upgrade_is_lazy_and_atomic(void)
         DSP_CHECK_EQ_STR("", dsp_schedule_repo_find(&repo, "legacy-a")->name);
         DSP_CHECK_EQ_STR("Evening", dsp_schedule_repo_find(&repo, "new-b")->name);
         DSP_CHECK_EQ_INT(2, dsp_schedule_repo_set(&repo)->revision);
-        /* The layout marker is unchanged: still layout v4. */
+        /* The layout marker is unchanged: still the current layout (v5). */
         e = fake_kv_find(&kv, "layout");
         dsp_layout_t lay;
         DSP_CHECK(e != NULL && dsp_codec_decode_layout(e->value, e->len, &lay) == DSP_CODEC_OK);
-        DSP_CHECK_EQ_INT(4, lay.layout_version);
+        DSP_CHECK_EQ_INT(5, lay.layout_version);
     }
+}
+
+
+/* ---- M1.10b.3: layout v5 ("auth") --------------------------------------------------------- */
+
+static void key32(uint8_t out[32], uint8_t v)
+{
+    memset(out, v, 32);
+}
+
+/* A claimed record (synthetic keys). */
+static dsp_auth_t claimed_auth(void)
+{
+    dsp_auth_t a;
+    dsp_auth_provisioned(&a);
+    uint8_t ip[32], iu[32], p0[32];
+    key32(ip, 0xA1);
+    key32(iu, 0xB1);
+    key32(p0, 0x11);
+    DSP_CHECK_EQ_INT(DSP_AUTH_OK, dsp_auth_claim(&a, ip, iu, p0, "A", 1, 0));
+    return a;
+}
+
+/* Snapshot of every key except the marker and "auth". */
+typedef struct {
+    int n;
+    char key[DATA_KEYS][8];
+    uint8_t len[DATA_KEYS];
+    size_t vlen[DATA_KEYS];
+    uint8_t v[DATA_KEYS][DSP_RECORD_MAX_BYTES];
+} snap_t;
+static snap_t snap_a, snap_b;
+
+static void snapshot(snap_t *sn)
+{
+    memset(sn, 0, sizeof *sn);
+    const char *named[] = {"sched", "config", "time", "notify", "dosing"};
+    for (int i = 0; i < DSP_STORAGE_HISTORY_SLOTS + 5; i++) {
+        char k[8];
+        if (i < DSP_STORAGE_HISTORY_SLOTS) {
+            (void)dsp_storage_history_key((size_t)i, k, sizeof k);
+        } else {
+            strcpy(k, named[i - DSP_STORAGE_HISTORY_SLOTS]);
+        }
+        const fake_kv_entry_t *e = fake_kv_find(&kv, k);
+        strcpy(sn->key[sn->n], k);
+        if (e != NULL) {
+            sn->vlen[sn->n] = e->len;
+            memcpy(sn->v[sn->n], e->value, e->len);
+        }
+        sn->n++;
+    }
+}
+
+static bool snapshots_equal(const snap_t *x, const snap_t *y)
+{
+    if (x->n != y->n) {
+        return false;
+    }
+    for (int i = 0; i < x->n; i++) {
+        if (strcmp(x->key[i], y->key[i]) != 0 || x->vlen[i] != y->vlen[i] ||
+            memcmp(x->v[i], y->v[i], x->vlen[i]) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* A populated v4 device (M1.10b.2 firmware): schedules, configuration, history, a format-2
+ * dosing record with anti-replay state, a v4 marker and no "auth". */
+static void make_populated_v4(bool durable)
+{
+    fresh(durable);
+    dsp_schedule_t a = sched("v4-a", 8);
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_schedule_repo_create(&repo, &a, &hist));
+    dsp_config_t cfg;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_config(&st, &cfg));
+    cfg.revision = 1;
+    cfg.reservoir_capacity_ul = 300000;
+    cfg.reservoir_remaining_ul = 123000;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_config(&st, &cfg));
+    dsp_dosing_state_t ds;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_dosing(&st, &ds));
+    ds.manual_hw[0] = 41;
+    ds.manual_hw[2] = DSP_MANUAL_SEQ_MAX;
+    ds.ring[0] = (dsp_manual_result_t){0, DSP_MRES_DONE, 41, 2000};
+    ds.ring_next = 1;
+    ds.flags = DSP_DOSING_F_BLOCKED;
+    ds.next_seq = 3;
+    /* stored as format 2 (what an M1.10b.2 device holds): the first 206 bytes, version 2 */
+    uint8_t b[DSP_DOSING_RECORD_BYTES];
+    DSP_CHECK_EQ_INT(DSP_DOSING_RECORD_BYTES, dsp_codec_encode_dosing(&ds, b, sizeof b));
+    b[1] = DSP_DOSING_FORMAT_V2;
+    fake_kv_put_raw(&kv, "dosing", b, DSP_DOSING_RECORD_V2_BYTES);
+    make_old_storage(4);
+    fake_kv_clear_faults(&kv);
+}
+
+static void test_layout_v4_to_v5_auth_record(void)
+{
+    make_populated_v4(true);
+    DSP_CHECK_EQ_INT(ALL_KEYS - 1, fake_kv_count(&kv));
+    snapshot(&snap_a);
+    /* Read-only open never migrates. */
+    DSP_CHECK_EQ_INT(DSP_STORAGE_ERR_MIGRATION_REQUIRED, reopen(false));
+    DSP_CHECK_EQ_INT(0, kv.sets);
+    /* Migration: "auth" provisioned UNCLAIMED, marker v5 last; everything else untouched. */
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
+    DSP_CHECK(st.migrated_now && !st.provisioned_now);
+    DSP_CHECK_EQ_INT(2, kv.sets); /* "auth", then "layout" */
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, st.auth_status);
+    DSP_CHECK_EQ_INT(ALL_KEYS, fake_kv_count(&kv));
+    snapshot(&snap_b);
+    DSP_CHECK(snapshots_equal(&snap_a, &snap_b)); /* byte-identical incl. dosing format 2 */
+    dsp_auth_t au;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_auth(&st, &au));
+    DSP_CHECK(dsp_auth_is_provisioning(&au));
+    dsp_layout_t lay;
+    const fake_kv_entry_t *m = fake_kv_find(&kv, "layout");
+    DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_layout(m->value, m->len, &lay));
+    DSP_CHECK_EQ_INT(5, lay.layout_version);
+    /* The upgraded data reads back: anti-replay state kept, admission counter starts at 0. */
+    dsp_dosing_state_t ds;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_dosing(&st, &ds));
+    DSP_CHECK_EQ_INT(41, ds.manual_hw[0]);
+    DSP_CHECK(ds.manual_hw[2] == DSP_MANUAL_SEQ_MAX);
+    DSP_CHECK_EQ_INT(DSP_DOSING_F_BLOCKED, ds.flags);
+    DSP_CHECK_EQ_INT(0, ds.adm_count);
+    /* The next dosing write upgrades it to format 3 (one atomic key). */
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_dosing(&st, &ds));
+    const fake_kv_entry_t *de = fake_kv_find(&kv, "dosing");
+    DSP_CHECK(de->len == DSP_DOSING_RECORD_BYTES && de->value[1] == DSP_DOSING_FORMAT_V3);
+    fake_kv_clear_faults(&kv);
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true)); /* plain v5 open afterwards, no writes */
+    DSP_CHECK(!st.migrated_now);
+    DSP_CHECK_EQ_INT(0, kv.sets);
+
+    /* Interrupted migration: a cut at every write, landed or not, in both flash modes. */
+    for (int mode = 0; mode < 2; mode++) {
+        for (int cut = 1; cut <= 2; cut++) {
+            make_populated_v4(mode == 1);
+            snapshot(&snap_a);
+            kv.power_cut_after_sets = cut;
+            dsp_storage_status_t s0 = reopen(true);
+            DSP_CHECK(cut == 2 || s0 != DSP_STORAGE_OK);
+            fake_kv_power_cycle(&kv);
+            fake_kv_clear_faults(&kv);
+            DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
+            DSP_CHECK_EQ_INT(ALL_KEYS, fake_kv_count(&kv));
+            DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_auth(&st, &au));
+            DSP_CHECK(dsp_auth_is_provisioning(&au));
+            snapshot(&snap_b);
+            DSP_CHECK(snapshots_equal(&snap_a, &snap_b));
+        }
+    }
+    /* v4 marker next to a CLAIMED (or malformed) "auth": inconsistent, untouched. */
+    for (int k = 0; k < 2; k++) {
+        make_populated_v4(true);
+        uint8_t b[DSP_AUTH_RECORD_BYTES];
+        dsp_auth_t c = claimed_auth();
+        DSP_CHECK_EQ_INT(DSP_AUTH_RECORD_BYTES, dsp_codec_encode_auth(&c, b, sizeof b));
+        if (k == 1) {
+            b[3] = 0x80; /* unknown flag */
+        }
+        fake_kv_put_raw(&kv, "auth", b, sizeof b);
+        expect_open(DSP_STORAGE_ERR_CORRUPT);
+    }
+    /* No marker and a claimed "auth": real data, marker lost -> CORRUPT, never re-provisioned. */
+    fresh(true);
+    {
+        dsp_auth_t c = claimed_auth();
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_auth(&st, &c));
+    }
+    fake_kv_remove(&kv, "layout");
+    expect_open(DSP_STORAGE_ERR_CORRUPT);
+    /* No marker, every key at its provisioning value: interrupted first boot, completed. */
+    fresh(true);
+    fake_kv_remove(&kv, "layout");
+    fake_kv_remove(&kv, "auth");
+    fake_kv_clear_faults(&kv);
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true));
+    DSP_CHECK_EQ_INT(ALL_KEYS, fake_kv_count(&kv));
+}
+
+/* Under a v5 marker "auth" is classified, never fatal by itself and never "unclaimed". */
+static void test_auth_classification_v5(void)
+{
+    /* valid: OK */
+    fresh(true);
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, st.auth_status);
+    /* missing (NVS dropped it), malformed, newer format */
+    for (int k = 0; k < 4; k++) {
+        fresh(true);
+        dsp_auth_t c = claimed_auth();
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_auth(&st, &c));
+        const fake_kv_entry_t *e = fake_kv_find(&kv, "auth");
+        uint8_t v[DSP_AUTH_RECORD_BYTES];
+        memcpy(v, e->value, sizeof v);
+        dsp_storage_status_t want = DSP_STORAGE_ERR_CORRUPT;
+        if (k == 0) {
+            fake_kv_remove(&kv, "auth");
+        } else if (k == 1) {
+            v[40] = 0; memset(v + 40, 0, 32); /* identity public key zero */
+            fake_kv_put_raw(&kv, "auth", v, sizeof v);
+        } else if (k == 2) {
+            fake_kv_put_raw(&kv, "auth", v, sizeof v - 1); /* truncated */
+        } else {
+            v[1] = 2; /* a newer format */
+            fake_kv_put_raw(&kv, "auth", v, sizeof v);
+            want = DSP_STORAGE_ERR_UNSUPPORTED;
+        }
+        snapshot(&snap_a);
+        fake_kv_clear_faults(&kv);
+        DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true)); /* the rest stays usable */
+        DSP_CHECK_EQ_INT(want, st.auth_status);
+        DSP_CHECK_EQ_INT(0, kv.sets); /* nothing repaired, nothing re-provisioned */
+        snapshot(&snap_b);
+        DSP_CHECK(snapshots_equal(&snap_a, &snap_b));
+        dsp_auth_t out;
+        DSP_CHECK(dsp_storage_load_auth(&st, &out) != DSP_STORAGE_OK);
+    }
+    /* A newer layout than v5 is unsupported as a whole. */
+    fresh(true);
+    const dsp_layout_t v6 = {6, 32, 16, 16};
+    uint8_t mk[DSP_LAYOUT_RECORD_BYTES];
+    DSP_CHECK_EQ_INT(DSP_LAYOUT_RECORD_BYTES, dsp_codec_encode_layout(&v6, mk, sizeof mk));
+    fake_kv_put_raw(&kv, "layout", mk, sizeof mk);
+    expect_open(DSP_STORAGE_ERR_UNSUPPORTED);
+}
+
+static bool region_has_byte(const uint8_t *p, size_t n, uint8_t v)
+{
+    size_t run = 0;
+    for (size_t i = 0; i < n; i++) {
+        run = p[i] == v ? run + 1 : 0;
+        if (run >= 8) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Key material does not linger in the storage scratch buffers. */
+static void test_auth_buffers_wiped(void)
+{
+    fresh(true);
+    dsp_auth_t c = claimed_auth();
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_save_auth(&st, &c));
+    DSP_CHECK(!region_has_byte(st.buf, sizeof st.buf, 0xA1));
+    DSP_CHECK(!region_has_byte(st.readback, sizeof st.readback, 0xA1));
+    dsp_auth_t out;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_auth(&st, &out));
+    DSP_CHECK(dsp_auth_equal(&c, &out));
+    DSP_CHECK(!region_has_byte(st.buf, sizeof st.buf, 0xA1));
+    dsp_auth_wipe(&out);
+    fake_kv_clear_faults(&kv);
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, reopen(true)); /* open reads and classifies "auth" */
+    DSP_CHECK(!region_has_byte(st.buf, sizeof st.buf, 0xA1));
+    DSP_CHECK(!region_has_byte(st.readback, sizeof st.readback, 0xA1));
+    DSP_CHECK(!region_has_byte((const uint8_t *)&st.auth_scratch, sizeof st.auth_scratch, 0xA1));
+    /* save refuses an invalid record, writes nothing */
+    c.claim_state = 7;
+    long sets = kv.sets;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_ERR_INVALID, dsp_storage_save_auth(&st, &c));
+    DSP_CHECK_EQ_INT(sets, kv.sets);
 }
 
 int main(void)
@@ -1308,6 +1578,9 @@ int main(void)
     DSP_RUN(test_randomized_atomicity);
     DSP_RUN(test_layout_migrations_to_v4);
     DSP_RUN(test_layout_v3_to_v4_dosing_record);
+    DSP_RUN(test_layout_v4_to_v5_auth_record);
+    DSP_RUN(test_auth_classification_v5);
+    DSP_RUN(test_auth_buffers_wiped);
     DSP_RUN(test_time_record_codec_and_storage);
     return dsp_test_finish();
 }

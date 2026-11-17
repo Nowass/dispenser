@@ -19,7 +19,11 @@
  *      steady-state headroom for repeated maximum-size writes is measured; at that headroom a
  *      cut at every cycle of a write (page reclamation) leaves the old or the new set;
  *   5. the same cut-everywhere check on plain nvs_set_blob() without any dispenser code, for
- *      several size pairs on a fresh and an aged partition (traced and dumped for 32 -> 64 B).
+ *      several size pairs on a fresh and an aged partition (traced and dumped for 32 -> 64 B);
+ *  11. (M1.10b.3) the layout v4 -> v5 migration of a populated device and "auth" record writes
+ *      (provisioned -> claimed, claimed -> claimed with a second phone), each cut at EVERY
+ *      write/erase cycle: the storage always opens, "auth" is exactly the old or the new record
+ *      (never missing, never damaged), every other key is intact.
  *
  * Modes (environment MODE): unset = checks 1-5; "matrix" = 6 (two-cut matrix: a cut at every
  * cycle of a write, then at every cycle of the recovery that follows, two more boots and a
@@ -166,7 +170,7 @@ static dsp_schedule_repo_t repo;
 static dsp_history_store_t hist;
 static uint8_t snap[0x14000];
 
-#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 6) /* h00..h31, sched, config, time, notify, dosing, layout */
+#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 7) /* h00..h31, sched, config, time, notify, dosing, layout, auth (v5) */
 
 typedef struct {
     size_t len[DATA_KEYS];
@@ -176,7 +180,7 @@ static keyset_t old_keys, now_keys;
 
 static void key_name(size_t i, char out[8])
 {
-    static const char *tail[] = {"sched", "config", "time", "notify", "dosing", "layout"};
+    static const char *tail[] = {"sched", "config", "time", "notify", "dosing", "layout", "auth"};
     if (i < DSP_STORAGE_HISTORY_SLOTS) {
         dsp_storage_history_key(i, out, 8);
     } else {
@@ -546,7 +550,7 @@ static int sections_1_to_5(void)
            "total %zu, used %zu, free %zu, available %zu (empty: available %zu)\n",
            sched_len(), ours, s1.total_entries, s1.used_entries, s1.free_entries,
            s1.available_entries, s0.available_entries);
-    CHECK(ours <= 310);
+    CHECK(ours <= 325); /* documented budget: 309 (M1.10b.2) + 15 for "auth" (layout v5) */
     CHECK(s1.available_entries > 4 * 101); /* room for several full-set rewrites */
     power_cycle();
     CHECK(open_storage() == DSP_STORAGE_OK);
@@ -718,6 +722,178 @@ static int sections_1_to_5(void)
     }
 
     return 0;
+}
+
+
+/* ---- 11. M1.10b.3: layout v4 -> v5 and "auth" writes, cut at every cycle ------------------ */
+
+static bool is_key(size_t i, const char *name)
+{
+    char k[8];
+    key_name(i, k);
+    return strcmp(k, name) == 0;
+}
+
+/* Reads every key except "auth" (and "layout" when skip_layout). */
+static void read_keys_except_auth(keyset_t *k, bool skip_layout)
+{
+    for (size_t i = 0; i < DATA_KEYS; i++) {
+        k->len[i] = 0;
+        if (is_key(i, "auth") || (skip_layout && is_key(i, "layout"))) {
+            continue;
+        }
+        char name[8];
+        key_name(i, name);
+        CHECK(kv.get(kv.ctx, name, k->v[i], DSP_RECORD_MAX_BYTES, &k->len[i]) == DSP_KV_OK);
+    }
+}
+
+static bool same_except_auth(const keyset_t *a, const keyset_t *b, bool skip_layout)
+{
+    for (size_t i = 0; i < DATA_KEYS; i++) {
+        if (is_key(i, "auth") || (skip_layout && is_key(i, "layout"))) {
+            continue;
+        }
+        if (a->len[i] != b->len[i] || memcmp(a->v[i], b->v[i], a->len[i]) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static dsp_auth_t auth_target;
+static dsp_storage_status_t op_open(void)
+{
+    return open_storage();
+}
+static dsp_storage_status_t op_save_auth(void)
+{
+    return dsp_storage_save_auth(&st, &auth_target);
+}
+
+static dsp_auth_t make_claimed(int phones)
+{
+    dsp_auth_t a;
+    dsp_auth_provisioned(&a);
+    uint8_t ip[32], iu[32], p[32];
+    memset(ip, 0xA1, 32);
+    memset(iu, 0xB1, 32);
+    memset(p, 0x11, 32);
+    CHECK(dsp_auth_claim(&a, ip, iu, p, "A", 1, 0) == DSP_AUTH_OK);
+    if (phones > 1) {
+        memset(p, 0x22, 32);
+        CHECK(dsp_auth_add(&a, p, "B", 1, 0, NULL) == DSP_AUTH_OK);
+    }
+    return a;
+}
+
+static void auth_cuts(const dsp_auth_t *old_rec, const dsp_auth_t *new_rec, const char *label)
+{
+    restore();
+    CHECK(open_storage() == DSP_STORAGE_OK);
+    read_keys_except_auth(&old_keys, false);
+    auth_target = *new_rec;
+    pw_cycles = 0;
+    CHECK(op_save_auth() == DSP_STORAGE_OK);
+    size_t n = pw_cycles;
+    int as_old = 0, as_new = 0;
+    for (size_t k = 1; k <= n + 1; k++) {
+        restore();
+        CHECK(open_storage() == DSP_STORAGE_OK);
+        pw_arm(k);
+        (void)op_save_auth();
+        power_cycle();
+        dsp_storage_status_t s = open_storage();
+        CHECK(s == DSP_STORAGE_OK);
+        CHECK(st.auth_status == DSP_STORAGE_OK); /* never missing or damaged */
+        dsp_auth_t got;
+        bool loaded = dsp_storage_load_auth(&st, &got) == DSP_STORAGE_OK;
+        CHECK(loaded);
+        bool o = loaded && dsp_auth_equal(&got, old_rec);
+        bool w = loaded && dsp_auth_equal(&got, new_rec);
+        if (!(o || w)) {
+            printf("  %s: cut at cycle %zu of %zu: neither old nor new record\n", label, k, n);
+        }
+        CHECK(o || w);
+        as_old += o;
+        as_new += w;
+        read_keys_except_auth(&now_keys, false);
+        CHECK(same_except_auth(&old_keys, &now_keys, false));
+    }
+    printf("  %s: %zu cycles, %zu cuts: old record %d, new record %d\n", label, n, n + 1, as_old, as_new);
+    CHECK(as_old >= 1 && as_new >= 1);
+}
+
+static void section_11(void)
+{
+    pw_restore_power();
+    dsp_nvs_kv_close(&nvs);
+    nvs_flash_deinit_partition("nvs");
+    CHECK(esp_partition_erase_range(part, 0, part->size) == ESP_OK);
+    nvs_up();
+    CHECK(open_storage() == DSP_STORAGE_OK); /* provisions layout v5 */
+    fill_max(); /* a populated device: maximum-size schedule set */
+    CHECK(update_one(1, "Migrated") == DSP_STORAGE_OK);
+    /* Make it the device an M1.10b.2 firmware left: no "auth", a v4 marker. */
+    nvs_handle_t h;
+    CHECK(nvs_open_from_partition("nvs", DSP_NVS_NAMESPACE, NVS_READWRITE, &h) == ESP_OK);
+    CHECK(nvs_erase_key(h, "auth") == ESP_OK);
+    CHECK(nvs_commit(h) == ESP_OK);
+    nvs_close(h);
+    const dsp_layout_t v4 = {4, DSP_STORAGE_HISTORY_SLOTS, DSP_SCHEDULE_CAPACITY, DSP_TOMBSTONE_CAPACITY};
+    uint8_t m[DSP_LAYOUT_RECORD_BYTES];
+    CHECK(dsp_codec_encode_layout(&v4, m, sizeof m) == sizeof m);
+    CHECK(kv.set(kv.ctx, "layout", m, sizeof m) == DSP_KV_OK && kv.commit(kv.ctx) == DSP_KV_OK);
+    power_cycle();
+    snapshot();
+    read_keys_except_auth(&old_keys, true);
+    /* 11a. migration cut at every cycle */
+    restore();
+    pw_cycles = 0;
+    CHECK(op_open() == DSP_STORAGE_OK);
+    CHECK(st.migrated_now);
+    size_t n = pw_cycles;
+    int resumed = 0;
+    for (size_t k = 1; k <= n + 1; k++) {
+        restore();
+        pw_arm(k);
+        (void)op_open();
+        power_cycle();
+        dsp_storage_status_t s = open_storage();
+        if (s != DSP_STORAGE_OK) {
+            printf("  11a: cut at cycle %zu of %zu: storage open failed (%d)\n", k, n, (int)s);
+        }
+        CHECK(s == DSP_STORAGE_OK);
+        CHECK(st.auth_status == DSP_STORAGE_OK);
+        dsp_auth_t got;
+        CHECK(dsp_storage_load_auth(&st, &got) == DSP_STORAGE_OK && dsp_auth_is_provisioning(&got));
+        read_keys_except_auth(&now_keys, true);
+        CHECK(same_except_auth(&old_keys, &now_keys, true));
+        uint8_t lb[16];
+        size_t ll = 0;
+        dsp_layout_t lay;
+        CHECK(kv.get(kv.ctx, "layout", lb, sizeof lb, &ll) == DSP_KV_OK &&
+              dsp_codec_decode_layout(lb, ll, &lay) == DSP_CODEC_OK && lay.layout_version == 5);
+        resumed += s == DSP_STORAGE_OK;
+    }
+    printf("11. v4 -> v5 migration of a populated device: %zu cycles, %zu cuts, opened as v5 %d\n",
+        n, n + 1, resumed);
+    /* 11b. "auth" writes: provisioned -> claimed, claimed -> claimed with a second phone */
+    restore();
+    CHECK(open_storage() == DSP_STORAGE_OK); /* migrated */
+    power_cycle();
+    snapshot();
+    dsp_auth_t prov;
+    dsp_auth_provisioned(&prov);
+    dsp_auth_t one = make_claimed(1), two = make_claimed(2);
+    auth_cuts(&prov, &one, "11b. auth write (claim)");
+    restore();
+    CHECK(open_storage() == DSP_STORAGE_OK);
+    auth_target = one;
+    CHECK(op_save_auth() == DSP_STORAGE_OK);
+    power_cycle();
+    snapshot();
+    auth_cuts(&one, &two, "11b. auth write (add phone)");
 }
 
 /* ================= Modes: matrix, ab, dump, load (see run_checks.sh) ================= */
@@ -1156,6 +1332,7 @@ int main(void)
         section_6_7();
     } else {
         (void)sections_1_to_5();
+        section_11();
     }
     printf("%d checks, %d failed\n", checks, failures);
     return failures == 0 && checks > 0 ? 0 : 1;

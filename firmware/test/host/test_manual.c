@@ -16,7 +16,7 @@
 
 #define VOL 1000u /* 0.84 s at 1200 ul/s */
 
-static const dsp_app_auth_t OWNER1 = {DSP_APP_ROLE_OWNER, 1};
+static const dsp_app_auth_t OWNER1 = {DSP_APP_ROLE_OWNER, 1, 0, 0};
 
 static dsp_dosing_state_t durable_dosing_state(void)
 {
@@ -239,7 +239,7 @@ static void test_slots_exhaustion_and_authorization(void)
     int f0 = step(g_true + 2 * MINUTE, op_floor());
     int f1 = step(g_true + 2 * MINUTE, as(op_floor(), &OWNER1));
     int f3 = step(g_true + 2 * MINUTE, as(op_floor(), &OWNER3));
-    static const dsp_app_auth_t OWNER2 = {DSP_APP_ROLE_OWNER, 2};
+    static const dsp_app_auth_t OWNER2 = {DSP_APP_ROLE_OWNER, 2, 0, 0};
     int last = step(g_true + 4 * MINUTE, as(op_manual(DSP_MANUAL_SEQ_MAX, VOL), &OWNER2));
     int f2 = step(g_true + 4 * MINUTE, as(op_floor(), &OWNER2));
     int exh = step(g_true + 6 * MINUTE, as(op_manual(DSP_MANUAL_SEQ_MAX, VOL), &OWNER2));
@@ -596,18 +596,22 @@ static void test_corrupt_and_unsupported_dosing_records(void)
     dsp_dosing_state_t back;
     DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_dosing(good, sizeof good, &back));
     DSP_CHECK(dsp_dosing_state_equal(&base, &back));
-    /* Golden layout of format 2 (docs: dsp_codec.h, firmware/README.md). */
+    /* Golden layout of format 3 (= format 2 + admission; docs: dsp_codec.h, README). */
     {
         dsp_dosing_state_t g = base;
         g.manual_hw[1] = 0x0102030405060708ull;
         g.manual_hw[3] = DSP_MANUAL_SEQ_MAX;
         g.ring[7] = (dsp_manual_result_t){3, DSP_MRES_REFUSED, 0x0E0F1011ull, 9};
         uint8_t b[DSP_DOSING_RECORD_BYTES];
-        DSP_CHECK_EQ_INT(206, dsp_codec_encode_dosing(&g, b, sizeof b));
+        g.adm_date = (dsp_date_t){2026, 11, 20};
+        g.adm_count = 0x0102;
+        DSP_CHECK_EQ_INT(212, dsp_codec_encode_dosing(&g, b, sizeof b));
         static const uint8_t hw1[8] = {0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01};
         static const uint8_t hw3[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F};
         DSP_CHECK_EQ_INT(DSP_REC_TYPE_DOSING, b[0]);
-        DSP_CHECK_EQ_INT(2, b[1]);
+        DSP_CHECK_EQ_INT(3, b[1]);
+        DSP_CHECK(b[206] == 0xEA && b[207] == 0x07 && b[208] == 11 && b[209] == 20); /* 2026-11-20 */
+        DSP_CHECK(b[210] == 0x02 && b[211] == 0x01);                                 /* count */
         DSP_CHECK_EQ_INT(5, b[52]); /* manual_hw[0] = 5 */
         DSP_CHECK(memcmp(b + 60, hw1, 8) == 0);
         DSP_CHECK(memcmp(b + 76, hw3, 8) == 0);
@@ -618,6 +622,19 @@ static void test_corrupt_and_unsupported_dosing_records(void)
                   e7[4] == 0x0F && e7[5] == 0x0E && e7[10] == 9);
         DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_dosing(b, sizeof b, &back));
         DSP_CHECK(dsp_dosing_state_equal(&g, &back));
+        /* format 2 = the first 206 bytes with version 2: admission counter 0 (upgrade path) */
+        b[1] = 2;
+        DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_dosing(b, DSP_DOSING_RECORD_V2_BYTES, &back));
+        DSP_CHECK_EQ_INT(0, back.adm_count);
+        DSP_CHECK_EQ_INT(0, back.adm_date.year);
+        DSP_CHECK_EQ_INT(0x0102030405060708ull == back.manual_hw[1], 1);
+        DSP_CHECK_EQ_INT(DSP_CODEC_ERR_SIZE, dsp_codec_decode_dosing(b, sizeof b, &back));
+        b[1] = 3;
+        DSP_CHECK_EQ_INT(DSP_CODEC_ERR_SIZE, dsp_codec_decode_dosing(b, DSP_DOSING_RECORD_V2_BYTES, &back));
+        /* an invalid admission date is refused */
+        b[208] = 13;
+        DSP_CHECK_EQ_INT(DSP_CODEC_ERR_FIELD, dsp_codec_decode_dosing(b, sizeof b, &back));
+        b[208] = 11;
         /* format 1 = the first 52 bytes with version 1, valid only without anti-replay state */
         b[1] = 1;
         DSP_CHECK_EQ_INT(DSP_CODEC_OK, dsp_codec_decode_dosing(b, DSP_DOSING_RECORD_V1_BYTES, &back));
@@ -665,7 +682,7 @@ static void test_corrupt_and_unsupported_dosing_records(void)
     /* A newer format: unsupported, fail closed, untouched. */
     uint8_t v3[DSP_DOSING_RECORD_BYTES];
     memcpy(v3, good, sizeof v3);
-    v3[1] = 3;
+    v3[1] = 4; /* format 4: newer than this firmware (3, M1.10b.3) */
     DSP_CHECK_EQ_INT(DSP_CODEC_ERR_VERSION, dsp_codec_decode_dosing(v3, sizeof v3, &back));
     fake_kv_put_raw(&kv, "dosing", v3, sizeof v3);
     reboot_power_on();

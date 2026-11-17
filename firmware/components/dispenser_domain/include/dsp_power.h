@@ -58,9 +58,35 @@ bool dsp_power_cause_keeps_retained(dsp_wake_cause_t cause);
 
 /* ---- RTC-retained block ------------------------------------------------------------- */
 
-#define DSP_POWER_RETAINED_VERSION 1
-#define DSP_POWER_RETAINED_BYTES 48
+#define DSP_POWER_RETAINED_VERSION 2 /* 2: M1.10b.3 ownership overlays (format 1 is discarded) */
+#define DSP_POWER_RETAINED_BYTES 120
 #define DSP_POWER_FAILSAFE_LIMIT 3 /* consecutive fail-safe resets before the inhibit */
+
+/* Ownership overlays (M1.10b.3, docs/OWNERSHIP_DESIGN.md section 4). Short-lived state that is
+ * a PRECONDITION for a handshake purpose, never authority: an ownership commit additionally
+ * needs a completed handshake with the setup code. Rules (dsp_owner.h): kept only across
+ * deep-sleep wakes, fixed deadlines, cleared by any clock step, bound to the durable ownership
+ * epoch. Raw times are the raw system clock (may be near 1970 on a never-synced device). */
+#define DSP_OWNER_INVITE_S 600  /* invite lifetime */
+#define DSP_OWNER_ARM_S 1800    /* recovery window */
+#define DSP_OWNER_EPOCH_DEGRADED UINT32_MAX /* arm taken while the credentials were damaged */
+
+typedef struct {
+    uint8_t valid;          /* 0/1; 0 = every field zero */
+    uint8_t creator_slot;   /* owner slot that created it */
+    uint32_t owner_epoch;   /* durable epoch at creation */
+    uint8_t token[16];      /* device RNG */
+    dsp_utc_t created_raw;
+    dsp_utc_t deadline_raw; /* created_raw + DSP_OWNER_INVITE_S, never recomputed */
+} dsp_invite_retained_t;
+
+typedef struct {
+    uint8_t armed;          /* 0/1; 0 = every field zero */
+    uint8_t aborts;         /* failed confirmations in this arm (0..2) */
+    uint32_t owner_epoch;   /* durable epoch at arming, or DSP_OWNER_EPOCH_DEGRADED */
+    dsp_utc_t armed_raw;
+    dsp_utc_t deadline_raw; /* armed_raw + DSP_OWNER_ARM_S, never recomputed */
+} dsp_recovery_retained_t;
 
 typedef struct {
     dsp_time_retained_t time;          /* M1.4 sync retry/backoff state */
@@ -69,14 +95,25 @@ typedef struct {
     uint8_t failsafe_count;            /* consecutive unconfirmed shutdowns (fail-safe) */
     uint8_t last_reason;               /* dsp_wake_reason_t of the last plan */
     dsp_utc_t last_wake_at;            /* raw time the last plan woke for (diagnostics) */
+    dsp_utc_t saved_raw;               /* raw time of the last save (monotonicity check) */
+    dsp_invite_retained_t invite;      /* M1.10b.3 */
+    dsp_recovery_retained_t arm;       /* M1.10b.3 */
+    bool overlays_dropped;             /* decode only (not stored): inconsistent overlays were
+                                          cleared while the rest of the block was kept */
 } dsp_power_retained_t;
 
 void dsp_power_retained_defaults(dsp_power_retained_t *r);
 bool dsp_power_retained_is_valid(const dsp_power_retained_t *r);
+/* Structural consistency of the ownership overlays alone (exact window lengths, flags, zero
+ * fields when unused). CRC-valid blocks with inconsistent overlays keep the rest of the block
+ * (fail-safe counter, sync backoff) and lose only the overlays. */
+bool dsp_power_overlays_consistent(const dsp_power_retained_t *r);
+void dsp_power_overlays_clear(dsp_power_retained_t *r);
 
 /* Fixed little-endian image: magic "DSPR" | version | length | 2 zero | fields | CRC-32
  * (IEEE) over everything before it. encode: false on invalid input. decode: false (and
- * *out untouched) unless magic, version, length, reserved bytes, CRC and ranges validate. */
+ * *out untouched) unless magic, version, length, reserved bytes, CRC and ranges validate;
+ * inconsistent overlays alone are cleared (overlays_dropped) instead of failing the block. */
 bool dsp_power_retained_encode(const dsp_power_retained_t *r, uint8_t out[DSP_POWER_RETAINED_BYTES]);
 bool dsp_power_retained_decode(const uint8_t *buf, size_t len, dsp_power_retained_t *out);
 

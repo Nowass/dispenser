@@ -25,6 +25,7 @@
 #include "dsp_notify_state.h"
 #include "dsp_dosing_state.h"
 #include "dsp_time_meta.h"
+#include "dsp_auth.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,6 +39,7 @@ enum {
     DSP_REC_TYPE_TIME = 5,   /* layout v2 (M1.4) */
     DSP_REC_TYPE_NOTIFY = 6, /* layout v3 (M1.5) */
     DSP_REC_TYPE_DOSING = 7, /* layout v4 (M1.9a) */
+    DSP_REC_TYPE_AUTH = 8,   /* layout v5 (M1.10b.3) */
 };
 
 #define DSP_CODEC_VERSION 1 /* format version written by this firmware for every type */
@@ -62,12 +64,18 @@ enum {
 #define DSP_CONFIG_RECORD_V1_BYTES 18
 #define DSP_CONFIG_RECORD_BYTES 46
 #define DSP_CONFIG_FORMAT_V2 2
-/* Dosing state (layout v4, M1.9a): format 2 (M1.10b.2, 206 B) = format 1 (52 B) + anti-replay
- * state. Format 1 is still read (counters 0, empty ring) and upgraded by the next write. */
+/* Dosing state (layout v4, M1.9a): format 3 (M1.10b.3, 212 B) = format 2 (M1.10b.2, 206 B) +
+ * manual-dose admission date and count; format 2 = format 1 (52 B) + anti-replay state. Older
+ * formats are still read (missing fields 0) and upgraded by the next write. */
 #define DSP_DOSING_RECORD_V1_BYTES 52
-#define DSP_DOSING_RECORD_BYTES 206
+#define DSP_DOSING_RECORD_V2_BYTES 206
+#define DSP_DOSING_RECORD_BYTES 212
 #define DSP_DOSING_FORMAT_V2 2
+#define DSP_DOSING_FORMAT_V3 3
 #define DSP_DOSING_RING_ENTRY_BYTES 14
+/* Credential record (layout v5, M1.10b.3): format 1, 96 B header + 4 x 80 B slots. */
+#define DSP_AUTH_RECORD_BYTES 416
+#define DSP_AUTH_SLOT_BYTES 80
 #define DSP_TIME_RECORD_BYTES 42
 #define DSP_NOTIFY_HEADER_BYTES 14
 #define DSP_NOTIFY_COND_BYTES 26
@@ -153,15 +161,26 @@ dsp_codec_status_t dsp_codec_decode_time(const uint8_t *buf, size_t len, dsp_tim
  * format 3 only, at 758: report keys 0 count | 1..3 zero | 4.. 4 x u64 key (unused: zero).
  * The decoder accepts formats 1, 2 (missing parts zero) and 3; the encoder writes 3.
  * Forward-only: older firmware reports a newer format as unsupported. */
-/* dosing, format 2 (206 B, M1.10b.2) = format 1 | 52..83 manual_hw[4] (u64) | 84 marker_slot |
+/* dosing, format 3 (212 B, M1.10b.3) = format 2 | 206..209 adm_date (year u16, month, day; all
+ * zero = none) | 210..211 adm_count (u16). The decoder accepts formats 1, 2 and 3.
+ * dosing, format 2 (206 B, M1.10b.2) = format 1 | 52..83 manual_hw[4] (u64) | 84 marker_slot |
  * 85 ring_next | 86..93 marker_req (u64) | 94..205 8 x ring entry (0 slot | 1 state | 2..9 seq u64
- * | 10..13 detail); unused ring entries all zero. The decoder accepts formats 1 and 2.
+ * | 10..13 detail); unused ring entries all zero.
  * dosing format 1 (52 B, layout v4, M1.9a): 0 type | 1 version | 2 readiness | 3 flags |
  * 4..7 refill_capacity | 8..11 refill_remaining | 12..15 refill_seq | 16..19 manual_volume |
  * 20..27 manual_started_at (i64) | 28..31 manual_seq | 32..35 ledger_date (year u16, month,
  * day) | 36..39 ledger_sum | 40..47 last_start (i64) | 48..51 next_seq. */
 size_t dsp_codec_encode_dosing(const dsp_dosing_state_t *s, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_dosing(const uint8_t *buf, size_t len, dsp_dosing_state_t *out);
+
+/* auth, format 1 (416 B, layout v5, M1.10b.3): 0 type (8) | 1 format | 2 claim_state |
+ * 3 flags (bit 0 KEY_FAULT) | 4..7 owner_epoch | 8..39 identity private key | 40..71 identity
+ * public key | 72..79 claimed_at (i64) | 80..87 recovered_at (i64) | 88..91 recoveries |
+ * 92..95 failed_sessions | 96.. 4 x slot (80 B: 0 used | 1 name_len | 2..3 zero | 4..35 phone
+ * public key | 36..59 name, zero padded | 60..63 zero | 64..71 enrolled_at | 72..79 last_seen).
+ * Strict (dsp_auth_is_valid). The encoded buffer holds the private key: callers wipe it. */
+size_t dsp_codec_encode_auth(const dsp_auth_t *a, uint8_t *buf, size_t cap);
+dsp_codec_status_t dsp_codec_decode_auth(const uint8_t *buf, size_t len, dsp_auth_t *out);
 
 size_t dsp_codec_encode_notify(const dsp_notify_state_t *s, uint8_t *buf, size_t cap);
 dsp_codec_status_t dsp_codec_decode_notify(const uint8_t *buf, size_t len, dsp_notify_state_t *out);

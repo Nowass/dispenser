@@ -97,6 +97,9 @@ enum {
     DSP_DOSING_G_CLOCK = 1u << 6,         /* no trusted clock */
     DSP_DOSING_G_PUMP_CONFIG = 1u << 7,   /* calibration or limits missing/invalid */
     DSP_DOSING_G_RESERVOIR_UNCONFIGURED = 1u << 8,
+    DSP_DOSING_G_CREDENTIALS = 1u << 9, /* M1.10b.3: credentials damaged (CRED_DEGRADED) or an
+                                           identity key fault in this wake: no dosing until
+                                           recovery or maintenance */
 };
 
 /* Safety limits violated. */
@@ -130,7 +133,12 @@ typedef struct {
     dsp_dosing_state_t s; /* RAM copy, always equal to the last durable write */
     bool loaded;
     bool degraded;
+    bool cred_inhibit;     /* M1.10b.3: DSP_DOSING_G_CREDENTIALS (set by the Application Service) */
+    uint16_t adm_limit;    /* M1.10b.3: fresh manual-dose decisions per day (>= 1) */
 } dsp_dosing_t;
+
+#define DSP_MANUAL_DECISIONS_PER_DAY_DEFAULT 32 /* approved starting policy (O10) */
+#define DSP_MANUAL_DECISIONS_PER_DAY_MAX 1000
 
 /* hw_max_runtime_ms: the platform's hardware cutoff (0 = unknown: never actuates). Loads
  * the "dosing" record; drives the pump OFF. */
@@ -197,6 +205,7 @@ typedef enum {
     DSP_MANUAL_REFUSED,
     DSP_MANUAL_EXECUTED,
     DSP_MANUAL_NOT_DURABLE,
+    DSP_MANUAL_RATE_LIMITED, /* M1.10b.3: admission refused; nothing written, still undecided */
 } dsp_manual_kind_t;
 
 /* Refusal codes stored as the REFUSED result detail (values = BLE protocol error codes). */
@@ -217,6 +226,25 @@ typedef struct {
 dsp_manual_outcome_t dsp_dosing_manual_request(dsp_dosing_t *d, uint8_t slot, uint64_t seq,
                                                uint32_t volume_ul, dsp_clock_t clock,
                                                uint32_t app_refusal);
+
+/* ---- Manual-dose admission (M1.10b.3, docs/OWNERSHIP_DESIGN.md 11.2) ----------------------
+ *
+ * A durable count of FRESH decisions (accepted or refused) per local day lives in the dosing
+ * record and is updated only inside the write that makes the decision durable (no write of its
+ * own). Order inside dsp_dosing_manual_request: invalid -> already decided (always answered,
+ * never counted) -> admission -> decision. A request over the limit is RATE_LIMITED: nothing is
+ * written and it stays undecided, so the anti-replay rule is unchanged.
+ * The count restarts only when a TRUSTED local date later than adm_date is seen; without a
+ * trusted clock, and after a clock rollback, the stored count keeps applying. */
+void dsp_dosing_set_admission_limit(dsp_dosing_t *d, uint16_t per_day); /* 0 = default */
+
+/* Read-only: true if a fresh decision would be admitted now (the Application Service checks
+ * before suspending BLE; the request path re-checks authoritatively). *retry_s (optional):
+ * seconds until the next local midnight with a trusted clock, 0 if unknown. */
+bool dsp_dosing_manual_admissible(const dsp_dosing_t *d, dsp_clock_t clock, uint32_t *retry_s);
+
+/* Credentials gate (CRED_DEGRADED or a key fault): closes DSP_DOSING_G_CREDENTIALS. */
+void dsp_dosing_set_credentials_inhibit(dsp_dosing_t *d, bool inhibit);
 
 /* Read-only result query (GET_RESULT): INVALID, DECIDED (state/detail as above) or
  * NOT_DURABLE with state NOT_DECIDED (seq above the high-water mark, or state not loaded). */

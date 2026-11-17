@@ -9,6 +9,7 @@
 # Keep the source list here only.
 set(DSP_DOMAIN_SRCS
     "src/dsp_app.c"
+    "src/dsp_auth.c"
     "src/dsp_bleproto.c"
     "src/dsp_codec.c"
     "src/dsp_config.c"
@@ -23,6 +24,7 @@ set(DSP_DOMAIN_SRCS
     "src/dsp_notify.c"
     "src/dsp_notify_proto.c"
     "src/dsp_notify_state.c"
+    "src/dsp_owner.c"
     "src/dsp_power.c"
     "src/dsp_recurrence.c"
     "src/dsp_reservoir.c"
@@ -34,6 +36,13 @@ set(DSP_DOMAIN_SRCS
     "src/dsp_timekeeping.c"
     "src/dsp_wakeup.c"
 )
+
+# M1.10b.3: only dsp_app.c, the future dsp_blesec.c and host tests may include dsp_app_sec.h.
+include("${CMAKE_CURRENT_LIST_DIR}/sec_header_guard.cmake")
+dsp_sec_header_guard("${CMAKE_CURRENT_LIST_DIR}/../.." _dsp_sec_violations)
+if(_dsp_sec_violations)
+    message(FATAL_ERROR "dsp_app_sec.h is restricted to the security layer; included by: ${_dsp_sec_violations}")
+endif()
 
 if(ESP_PLATFORM)
     # No REQUIRES: the domain depends on no other component. (ESP-IDF still adds

@@ -699,6 +699,10 @@ static void test_daily_ledger_and_clock_changes(void)
     memcpy(before.manual_hw, after.manual_hw, sizeof before.manual_hw);
     memcpy(before.ring, after.ring, sizeof before.ring);
     before.ring_next = after.ring_next;
+    /* M1.10b.3: the refusal is counted in the same write (no trusted date: date unchanged) */
+    DSP_CHECK(dsp_date_compare(before.adm_date, after.adm_date) == 0);
+    DSP_CHECK_EQ_INT(before.adm_count + 1, after.adm_count);
+    before.adm_count = after.adm_count;
     DSP_CHECK(dsp_dosing_state_equal(&before, &after));
     g_trusted = true;
     /* DST days are single local dates: 2027-03-28 (23 h) and 2026-10-25 (25 h). */

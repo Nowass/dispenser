@@ -1,4 +1,5 @@
 #include "dsp_app.h"
+#include "dsp_app_sec.h"
 
 #include <string.h>
 
@@ -11,6 +12,17 @@ _Static_assert(DSP_CONFIG_CALIBRATED_AT_MIN == DSP_TIME_PLAUSIBLE_MIN,
 _Static_assert(DSP_SCHEDULE_NAME_MAX_BYTES <= DSP_BLE_STR_MAX, "names fit a protocol string");
 
 /* ---- Helpers --------------------------------------------------------------------------- */
+
+/* M1.10b.3 ownership (defined in the ownership section below). */
+static void owner_load(dsp_app_t *app);
+static void owner_wake_start(dsp_app_t *app);
+static void owner_check_clock(dsp_app_t *app);
+static void owner_session_start(dsp_app_t *app);
+static void owner_session_end(dsp_app_t *app);
+static void owner_button(dsp_app_t *app, const dsp_button_event_t *ev);
+static void owner_abort_confirm(dsp_app_t *app);
+static bool owner_confirm_pending(const dsp_app_t *app);
+static void owner_confirm_tick(dsp_app_t *app);
 
 static void trace(dsp_app_t *app, dsp_app_stage_t stage)
 {
@@ -100,6 +112,7 @@ static bool load(dsp_app_t *app)
                         cfg->hw_max_runtime_ms) != DSP_DOSING_OK) {
         return false;
     }
+    dsp_dosing_set_admission_limit(&app->dosing, cfg->manual_decisions_per_day);
     dsp_time_service_t svc = {&app->tk, cfg->wifi, cfg->ntp, cfg->clock, &app->st, cfg->sntp_timeout_ms};
     app->time_svc = svc;
     dsp_connectivity_t conn = {&app->time_svc, &app->notify, cfg->https, &app->retained.conn,
@@ -175,6 +188,7 @@ static void stage_connect(dsp_app_t *app)
     guard.next_dose_known = next_due(app, &guard.next_dose_at);
     dsp_connectivity_report_t r = dsp_connectivity_run(&app->conn, &guard);
     app->rep.conn[app->rep.conn_runs++] = r.outcome;
+    owner_check_clock(app); /* an NTP step clears the ownership overlays */
 }
 
 /* ---- Service mode ------------------------------------------------------------------------ */
@@ -307,6 +321,10 @@ static dsp_app_resp_status_t from_dosing(dsp_dosing_status_t st)
 /* Returns false when the session must end. */
 static bool handle_command(dsp_app_t *app, const dsp_app_cmd_t *cmd, dsp_app_session_t *ss)
 {
+    if (cmd->kind == DSP_CMD_BUTTON) {
+        owner_button(app, &cmd->button); /* no response: physical input, not a request */
+        return true;
+    }
     dsp_app_response_t r;
     memset(&r, 0, sizeof r);
     r.id = cmd->id;
@@ -364,6 +382,7 @@ static void stage_ble(dsp_app_t *app)
     app->ble_active = true;
     app->rep.ble_session = true;
     ss->start_ms = mono_ms(app);
+    owner_session_start(app);
     ss->idle_ms = (uint64_t)idle_s * 1000u;
     ss->max_ms = ss->start_ms + (uint64_t)max_s * 1000u;
     ss->idle_deadline_ms = ss->start_ms + ss->idle_ms;
@@ -389,8 +408,11 @@ static void stage_ble(dsp_app_t *app)
             ss->end = DSP_BLE_END_IDLE;
             break;
         }
+        owner_confirm_tick(app); /* recovery confirmation deadline */
         if (!stalled && dose_due_now(app)) {
-            /* Q8: scheduled dosing first; BLE suspended for the pump, resumed afterwards. */
+            /* Q8: scheduled dosing first; BLE suspended for the pump, resumed afterwards. A
+             * pending recovery confirmation is aborted (the session is interrupted). */
+            owner_abort_confirm(app);
             size_t before = app->rep.dosed + app->rep.pump_failures;
             ble_suspend(app);
             stage_dose(app);
@@ -421,6 +443,9 @@ static void stage_ble(dsp_app_t *app)
         if (stalled || wait_ms < 1000u) {
             wait_ms = 1000u;
         }
+        if (owner_confirm_pending(app) && wait_ms > 200u) {
+            wait_ms = 200u; /* evaluate the confirmation deadline promptly */
+        }
         stalled = false;
         if (wait_ms > 3600000u) {
             wait_ms = 3600000u;
@@ -431,6 +456,7 @@ static void stage_ble(dsp_app_t *app)
         ss->end = DSP_BLE_END_MAX; /* iteration bound */
     }
     app->rep.ble_end = ss->end;
+    owner_session_end(app); /* handshake, authorization and confirmation end with the session */
     /* Unprocessed commands are dropped (the session is over); BLE stopped. */
     q_open(app, false);
     ble->stop(ble->ctx);
@@ -518,7 +544,8 @@ static uint32_t checklist(dsp_app_t *app)
     return f;
 }
 
-static void stage_shutdown_and_sleep(dsp_app_t *app)
+/* noinline: its RTC buffer stays off the dosing call chain (stack budget) */
+__attribute__((noinline)) static void stage_shutdown_and_sleep(dsp_app_t *app)
 {
     trace(app, DSP_STAGE_SHUTDOWN);
     const dsp_power_port_t *power = app->cfg->power;
@@ -532,6 +559,8 @@ static void stage_shutdown_and_sleep(dsp_app_t *app)
     if (app->loaded) {
         app->retained.time = app->tk.retained;
     }
+    owner_check_clock(app);
+    app->retained.saved_raw = raw_now(app) >= 0 && raw_now(app) <= DSP_UTC_MAX ? raw_now(app) : 0;
     app->retained.last_reason = (uint8_t)app->rep.plan.reason;
     app->retained.last_wake_at = app->rep.plan.wake_at >= DSP_UTC_MIN && app->rep.plan.wake_at <= DSP_UTC_MAX
                                      ? app->rep.plan.wake_at
@@ -544,6 +573,7 @@ static void stage_shutdown_and_sleep(dsp_app_t *app)
     uint8_t buf[DSP_POWER_RETAINED_BYTES];
     app->rep.retained_saved = dsp_power_retained_encode(&app->retained, buf) &&
                               power->save_retained(power->ctx, buf, sizeof buf);
+    dsp_secure_zero(buf, sizeof buf); /* may hold an invite token */
     if (f == 0) {
         trace(app, DSP_STAGE_SLEEP);
         app->rep.slept = true;
@@ -577,10 +607,52 @@ static dsp_app_op_result_t guard(dsp_app_t *app, const dsp_app_auth_t *auth)
     if (auth == NULL || auth->role != DSP_APP_ROLE_OWNER || auth->slot >= DSP_APP_PHONE_SLOTS) {
         return op(DSP_OP_FORBIDDEN, 0, 0);
     }
+    if (owner_confirm_pending(app)) {
+        return op(DSP_OP_BUSY, DSP_OP_B_CONFIRMING, 0); /* only END_SESSION while confirming */
+    }
+    uint16_t ops_max = app->cfg->session_ops_max != 0 ? app->cfg->session_ops_max
+                                                      : DSP_APP_SESSION_OPS_MAX_DEFAULT;
+    if (app->ss.ops >= ops_max) {
+        app->rep.rate_limited++;
+        return op(DSP_OP_BUSY, DSP_OP_B_RATE_LIMITED, 0);
+    }
+    app->ss.ops++;
     if (!app->loaded) {
         return op(DSP_OP_DEGRADED, 0, 0);
     }
     return op(DSP_OP_OK, 0, 0);
+}
+
+/* Session-local write limits (v1: reset by a reconnect or reset; documented): at most
+ * session_writes_max durable writes per session and writes_per_minute per 60 s window. */
+static dsp_app_op_result_t write_budget(dsp_app_t *app)
+{
+    uint16_t max = app->cfg->session_writes_max != 0 ? app->cfg->session_writes_max
+                                                     : DSP_APP_SESSION_WRITES_MAX_DEFAULT;
+    uint16_t per_min = app->cfg->writes_per_minute != 0 ? app->cfg->writes_per_minute
+                                                        : DSP_APP_WRITES_PER_MINUTE_DEFAULT;
+    uint64_t now = app->cfg->mono != NULL ? mono_ms(app) : 0;
+    if (now < app->ss.win_start_ms || now - app->ss.win_start_ms >= 60000u) {
+        app->ss.win_start_ms = now;
+        app->ss.win_writes = 0;
+    }
+    if (app->ss.writes >= max) {
+        app->rep.rate_limited++;
+        return op(DSP_OP_BUSY, DSP_OP_B_RATE_LIMITED, 0);
+    }
+    if (app->ss.win_writes >= per_min) {
+        app->rep.rate_limited++;
+        uint64_t left = 60000u - (now - app->ss.win_start_ms);
+        return op(DSP_OP_BUSY, DSP_OP_B_RATE_LIMITED, (uint32_t)((left + 999u) / 1000u));
+    }
+    return op(DSP_OP_OK, 0, 0);
+}
+
+/* A durable write is about to be attempted. */
+static void write_used(dsp_app_t *app)
+{
+    app->ss.writes++;
+    app->ss.win_writes++;
 }
 
 static dsp_app_op_result_t done(dsp_app_t *app, dsp_app_op_result_t r)
@@ -681,6 +753,13 @@ dsp_app_op_result_t dsp_app_set_config(dsp_app_t *app, const dsp_app_auth_t *aut
         dsp_config_apply_update(&cur, field_mask, values, app->cfg->hw_max_runtime_ms, &next);
     if (e != 0) {
         return op(DSP_OP_INVALID, e, 0);
+    }
+    {
+        dsp_app_op_result_t wb = write_budget(app);
+        if (wb.status != DSP_OP_OK) {
+            return wb;
+        }
+        write_used(app);
     }
     dsp_storage_status_t st = dsp_storage_save_config(&app->st, &next);
     if (st != DSP_STORAGE_OK) {
@@ -851,6 +930,13 @@ dsp_app_op_result_t dsp_app_create_schedule(dsp_app_t *app, const dsp_app_auth_t
     if (in.revision != 1) {
         return op(DSP_OP_INVALID, DSP_SCHED_E_REVISION, 0);
     }
+    {
+        dsp_app_op_result_t wb = write_budget(app);
+        if (wb.status != DSP_OP_OK) {
+            return wb;
+        }
+        write_used(app);
+    }
     g = from_repo(app, dsp_schedule_repo_create(&app->repo, &in, &app->hist), 0);
     if (g.status == DSP_OP_OK && set_revision != NULL) {
         *set_revision = dsp_schedule_repo_set(&app->repo)->revision;
@@ -896,6 +982,13 @@ dsp_app_op_result_t dsp_app_update_schedule(dsp_app_t *app, const dsp_app_auth_t
     if (in.revision != expected_revision + 1u) {
         return op(DSP_OP_INVALID, DSP_SCHED_E_REVISION, 0);
     }
+    {
+        dsp_app_op_result_t wb = write_budget(app);
+        if (wb.status != DSP_OP_OK) {
+            return wb;
+        }
+        write_used(app);
+    }
     g = from_repo(app, dsp_schedule_repo_update(&app->repo, &in), 0);
     if (g.status == DSP_OP_OK) {
         if (revision != NULL) {
@@ -930,6 +1023,13 @@ dsp_app_op_result_t dsp_app_delete_schedule(dsp_app_t *app, const dsp_app_auth_t
     if (expected_revision != cur->revision) {
         return op(DSP_OP_CONFLICT, cur->revision, 0);
     }
+    {
+        dsp_app_op_result_t wb = write_budget(app);
+        if (wb.status != DSP_OP_OK) {
+            return wb;
+        }
+        write_used(app);
+    }
     g = from_repo(app, dsp_schedule_repo_delete(&app->repo, id, expected_revision), 0);
     if (g.status == DSP_OP_OK && set_revision != NULL) {
         *set_revision = dsp_schedule_repo_set(&app->repo)->revision;
@@ -957,8 +1057,16 @@ dsp_app_op_result_t dsp_app_set_phone_time(dsp_app_t *app, const dsp_app_auth_t 
         dsp_timekeeper_on_phone_time(&app->tk, phone_utc_ms, uncertainty_ms, raw_now(app), &d);
     out->decision = (uint8_t)dec;
     if (dec == DSP_PHONE_TIME_ACCEPTED) {
+        dsp_app_op_result_t wb = write_budget(app);
+        if (wb.status != DSP_OP_OK) {
+            app->tk = before; /* nothing applied */
+            out->decision = 0;
+            return wb;
+        }
+        write_used(app);
         dsp_storage_status_t ps =
             dsp_time_apply(&app->tk, &before, &app->st, app->cfg->clock, &d, NULL);
+        owner_check_clock(app); /* a step clears the ownership overlays */
         if (ps != DSP_STORAGE_OK) {
             out->decision = 0;
             if (write_failed(ps)) {
@@ -1009,6 +1117,18 @@ dsp_app_op_result_t dsp_app_manual_dose(dsp_app_t *app, const dsp_app_auth_t *au
         fill_manual(app, slot, out, DSP_MRES_NOT_DECIDED, 0);
         return op(DSP_OP_DEGRADED, 0, 0); /* nothing can be made durable in this wake */
     }
+    /* Admission (M1.10b.3): after the decided lookup (retries are always answered), before
+     * anything else; a refusal here writes nothing and leaves the request undecided. */
+    uint16_t mmax = app->cfg->session_manual_max != 0 ? app->cfg->session_manual_max
+                                                      : DSP_APP_SESSION_MANUAL_MAX_DEFAULT;
+    uint32_t retry_s = 0;
+    if (app->ss.manual >= mmax ||
+        !dsp_dosing_manual_admissible(&app->dosing, dose_clock(app), &retry_s)) {
+        app->rep.rate_limited++;
+        fill_manual(app, slot, out, DSP_MRES_NOT_DECIDED, 0);
+        return op(DSP_OP_BUSY, DSP_OP_B_RATE_LIMITED, app->ss.manual >= mmax ? 0 : retry_s);
+    }
+    app->ss.manual++;
     /* Rule 2: BLE off before the pump; a due scheduled dose goes first (Q8). */
     bool was_connected = ble_connected(app);
     ble_suspend(app);
@@ -1062,6 +1182,10 @@ dsp_app_op_result_t dsp_app_manual_dose(dsp_app_t *app, const dsp_app_auth_t *au
     case DSP_MANUAL_INVALID:
         r = op(DSP_OP_INVALID, 0, 0);
         break;
+    case DSP_MANUAL_RATE_LIMITED: /* e.g. the date changed back meanwhile: still undecided */
+        app->rep.rate_limited++;
+        r = op(DSP_OP_BUSY, DSP_OP_B_RATE_LIMITED, 0);
+        break;
     default: /* NOT_DURABLE */
         if (o.dose.gates & (DSP_DOSING_G_NOT_LOADED | DSP_DOSING_G_DEGRADED)) {
             r = op(DSP_OP_DEGRADED, 0, 0);
@@ -1107,6 +1231,919 @@ dsp_app_op_result_t dsp_app_manual_floor(dsp_app_t *app, const dsp_app_auth_t *a
     return *floor != 0 ? done(app, op(DSP_OP_OK, 0, 0)) : op(DSP_OP_DEGRADED, 0, 0);
 }
 
+/* ---- M1.10b.3: ownership --------------------------------------------------------------------
+ *
+ * docs/OWNERSHIP_DESIGN.md (approved revision 2). The Application Service keeps the public view
+ * of the "auth" record, the credential state and the per-session evidence (handshake handle,
+ * issued authorization, recovery confirmation). Key material is read only when a transition or
+ * the security layer needs it, into st.auth_scratch, and wiped afterwards. */
+
+/* noinline: keeps this frame off the dosing call chain (stack budget) */
+__attribute__((noinline)) static void owner_publish(dsp_app_t *app)
+{
+    app->rep.cred_state = app->own.cred;
+    app->rep.cred_inhibit = app->own.cred == DSP_CRED_DEGRADED || app->own.key_fault;
+    if (app->loaded) {
+        dsp_dosing_set_credentials_inhibit(&app->dosing, app->rep.cred_inhibit);
+        /* DEVICE_ERROR (storage) while the credentials are damaged; this service is the only
+         * owner of that condition. No write unless it changes. */
+        (void)dsp_notify_set_device_condition(&app->notify, DSP_COND_STORAGE, app->rep.cred_inhibit,
+                                              1u, notify_clock(app));
+    }
+}
+
+/* Public cache from a full record (the private key never enters the cache). */
+static void owner_set_cache(dsp_app_t *app, const dsp_auth_t *full)
+{
+    app->own.cache = *full;
+    dsp_secure_zero(app->own.cache.id_priv, sizeof app->own.cache.id_priv);
+    if (app->own.key_fault) {
+        /* a key fault reported in this wake wins over any reload, durable or not */
+        app->own.cred = DSP_CRED_DEGRADED;
+        app->own.epoch = DSP_OWNER_EPOCH_DEGRADED;
+    } else if (dsp_auth_usable(full)) {
+        app->own.cred = DSP_CRED_CLAIMED;
+        app->own.epoch = full->owner_epoch;
+    } else if (dsp_auth_is_valid(full) && full->claim_state == DSP_AUTH_UNCLAIMED) {
+        app->own.cred = DSP_CRED_UNCLAIMED;
+        app->own.epoch = full->owner_epoch;
+    } else {
+        app->own.cred = DSP_CRED_DEGRADED; /* KEY_FAULT */
+        app->own.epoch = DSP_OWNER_EPOCH_DEGRADED;
+    }
+}
+
+static void owner_set_degraded(dsp_app_t *app)
+{
+    dsp_auth_wipe(&app->own.cache);
+    app->own.cred = DSP_CRED_DEGRADED;
+    app->own.epoch = DSP_OWNER_EPOCH_DEGRADED;
+}
+
+/* Loads the full record into st.auth_scratch (caller wipes). */
+static bool owner_load_full(dsp_app_t *app)
+{
+    return dsp_storage_load_auth(&app->st, &app->st.auth_scratch) == DSP_STORAGE_OK;
+}
+
+static bool retained_save_now(dsp_app_t *app)
+{
+    dsp_utc_t now = raw_now(app);
+    app->retained.saved_raw = now >= 0 && now <= DSP_UTC_MAX ? now : 0;
+    uint8_t buf[DSP_POWER_RETAINED_BYTES];
+    bool ok = dsp_power_retained_encode(&app->retained, buf) &&
+              app->cfg->power->save_retained(app->cfg->power->ctx, buf, sizeof buf);
+    dsp_secure_zero(buf, sizeof buf); /* may hold an invite token */
+    return ok;
+}
+
+static void owner_clear_overlays(dsp_app_t *app)
+{
+    if (app->retained.invite.valid || app->retained.arm.armed) {
+        app->rep.overlays_cleared = true;
+    }
+    dsp_owner_invite_clear(&app->retained);
+    dsp_owner_arm_clear(&app->retained);
+}
+
+/* noinline: keeps this frame off the dosing call chain (stack budget) */
+__attribute__((noinline)) static void owner_wake_start(dsp_app_t *app)
+{
+    bool had = app->retained.invite.valid || app->retained.arm.armed;
+    dsp_owner_on_wake(&app->retained, app->rep.cause, app->rep.retained_valid, raw_now(app));
+    if (app->cfg->ble == NULL || app->cfg->mono == NULL) {
+        owner_clear_overlays(app); /* no service mode: nothing could ever use them */
+    }
+    if (app->retained.overlays_dropped || (had && !app->retained.invite.valid && !app->retained.arm.armed)) {
+        app->rep.overlays_cleared = true;
+    }
+    if (app->cfg->mono != NULL) {
+        app->own.ref_valid = true;
+        app->own.ref_raw = raw_now(app);
+        app->own.ref_mono = mono_ms(app);
+    }
+}
+
+/* Clock-step detection within the wake: the raw clock must advance with the monotonic clock
+ * (tolerance 2 s). Any step clears both overlays (rule 3). */
+/* noinline: keeps this frame off the dosing call chain (stack budget) */
+__attribute__((noinline)) static void owner_check_clock(dsp_app_t *app)
+{
+    if (!app->own.ref_valid || app->cfg->mono == NULL) {
+        return;
+    }
+    uint64_t mono = mono_ms(app);
+    dsp_utc_t raw = raw_now(app);
+    bool step = mono < app->own.ref_mono;
+    if (!step) {
+        int64_t expected = app->own.ref_raw + (int64_t)((mono - app->own.ref_mono) / 1000u);
+        int64_t diff = raw - expected;
+        step = diff > 2 || diff < -2;
+    }
+    if (step) {
+        if (app->retained.invite.valid || app->retained.arm.armed) {
+            owner_clear_overlays(app);
+            (void)retained_save_now(app);
+        }
+        app->own.ref_raw = raw;
+        app->own.ref_mono = mono;
+    }
+}
+
+/* noinline: keeps this frame off the dosing call chain (stack budget) */
+__attribute__((noinline)) static void owner_load(dsp_app_t *app)
+{
+    dsp_auth_wipe(&app->own.cache);
+    app->own.cred = DSP_CRED_UNKNOWN;
+    app->own.epoch = DSP_OWNER_EPOCH_DEGRADED;
+    if (app->loaded) {
+        if (app->st.auth_status == DSP_STORAGE_OK && owner_load_full(app)) {
+            owner_set_cache(app, &app->st.auth_scratch);
+        } else {
+            owner_set_degraded(app); /* never "unclaimed" */
+        }
+        dsp_auth_wipe(&app->st.auth_scratch);
+        /* Recovery arm (O4): verified hold on a power-on or button wake, not for a valid
+         * unclaimed device (CLAIM applies), only with service mode. */
+        if (app->cfg->recovery_hold_ms >= DSP_OWNER_ARM_HOLD_MS &&
+            (app->rep.cause == DSP_CAUSE_POWER_ON || app->rep.cause == DSP_CAUSE_BUTTON) &&
+            app->own.cred != DSP_CRED_UNCLAIMED && app->cfg->ble != NULL && app->cfg->mono != NULL) {
+            dsp_owner_arm_set(&app->retained, app->own.epoch, raw_now(app));
+            app->rep.recovery_armed = retained_save_now(app);
+        }
+    }
+    owner_publish(app);
+}
+
+/* ---- Sessions, handshake evidence, issued authorization --------------------------------- */
+
+static bool owner_random(dsp_app_t *app, void *out, size_t len)
+{
+    const dsp_app_security_t *sec = app->cfg->security;
+    return sec != NULL && sec->random != NULL && sec->random(sec->ctx, (uint8_t *)out, len);
+}
+
+static void owner_drop_session_evidence(dsp_app_t *app)
+{
+    app->own.authz_valid = false;
+    app->own.authz_token = 0;
+    app->own.hs_active = false;
+    app->own.hs_nonce = 0;
+}
+
+/* noinline: keeps this frame off the dosing call chain (stack budget) */
+__attribute__((noinline)) static void owner_session_start(dsp_app_t *app)
+{
+    owner_drop_session_evidence(app);
+    dsp_confirm_reset(&app->own.confirm);
+    uint32_t id = 0;
+    if (app->cfg->security != NULL && owner_random(app, &id, sizeof id) && id == 0) {
+        id = 1;
+    }
+    app->ss.session_id = id;
+}
+
+static bool owner_confirm_pending(const dsp_app_t *app)
+{
+    return app->own.confirm.state == DSP_CONFIRM_PENDING;
+}
+
+/* A confirmation ended without success: counts against the arm (saved at once). */
+static void owner_confirm_failed(dsp_app_t *app)
+{
+    dsp_confirm_reset(&app->own.confirm);
+    dsp_owner_arm_abort(&app->retained);
+    (void)retained_save_now(app);
+}
+
+static void owner_abort_confirm(dsp_app_t *app)
+{
+    if (owner_confirm_pending(app)) {
+        owner_confirm_failed(app);
+    }
+}
+
+static void owner_confirm_tick(dsp_app_t *app)
+{
+    if (owner_confirm_pending(app) && app->cfg->mono != NULL &&
+        dsp_confirm_poll(&app->own.confirm, mono_ms(app)) == DSP_CONFIRM_ABORTED) {
+        owner_confirm_failed(app);
+    }
+}
+
+/* noinline: keeps this frame off the dosing call chain (stack budget) */
+__attribute__((noinline)) static void owner_session_end(dsp_app_t *app)
+{
+    owner_abort_confirm(app);
+    dsp_confirm_reset(&app->own.confirm); /* also an unused CONFIRMED result */
+    owner_drop_session_evidence(app);
+    app->ss.session_id = 0;
+}
+
+static void owner_button(dsp_app_t *app, const dsp_button_event_t *ev)
+{
+    if (!owner_confirm_pending(app)) {
+        return; /* FR-026 gestures are not part of this milestone */
+    }
+    dsp_confirm_event(&app->own.confirm, ev);
+    owner_confirm_tick(app);
+}
+
+/* Removes queued button events (taken before the confirmation started). */
+static void q_flush_buttons(dsp_app_t *app)
+{
+    q_lock(app);
+    size_t kept = 0;
+    dsp_app_cmd_t tmp[DSP_APP_CMDQ_CAPACITY];
+    for (size_t i = 0; i < app->q_count; i++) {
+        const dsp_app_cmd_t *c = &app->q[(app->q_head + i) % DSP_APP_CMDQ_CAPACITY];
+        if (c->kind != DSP_CMD_BUTTON) {
+            tmp[kept++] = *c;
+        }
+    }
+    for (size_t i = 0; i < kept; i++) {
+        app->q[i] = tmp[i];
+    }
+    app->q_head = 0;
+    app->q_count = kept;
+    q_unlock(app);
+}
+
+/* Preconditions of every security-layer entry: a registered security layer, an active
+ * button-wake service session (physical presence), storage loaded, no confirmation pending. */
+static dsp_app_op_result_t sec_ready(dsp_app_t *app)
+{
+    if (app == NULL || app->cfg == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    if (app->cfg->security == NULL || app->cfg->security->random == NULL) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    if (!app->accepting || app->rep.cause != DSP_CAUSE_BUTTON || app->ss.session_id == 0) {
+        return op(DSP_OP_BUSY, DSP_OP_B_SESSION, 0);
+    }
+    if (!app->loaded) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    return op(DSP_OP_OK, 0, 0);
+}
+
+/* Validates the handshake evidence for this session; consume = single use. Any mismatch also
+ * invalidates the stored handle (fail closed). */
+static dsp_app_op_result_t hs_check(dsp_app_t *app, const dsp_app_hs_t *hs, uint8_t purpose,
+                                    uint8_t purpose2, bool consume)
+{
+    dsp_app_op_result_t r = sec_ready(app);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    if (owner_confirm_pending(app)) {
+        return op(DSP_OP_BUSY, DSP_OP_B_CONFIRMING, 0);
+    }
+    dsp_app_owner_t *o = &app->own;
+    bool ok = hs != NULL && o->hs_active && (hs->purpose == purpose || hs->purpose == purpose2) &&
+              hs->purpose == o->hs_purpose && hs->session_id == app->ss.session_id &&
+              o->hs_session == app->ss.session_id && hs->nonce == o->hs_nonce && o->hs_nonce != 0;
+    if (ok) {
+        uint64_t now = mono_ms(app);
+        ok = now >= o->hs_start_ms && now - o->hs_start_ms <= DSP_APP_SEC_HS_MAX_MS &&
+             o->hs_epoch == o->epoch;
+    }
+    if (!ok || consume) {
+        o->hs_active = false;
+        o->hs_nonce = 0;
+    }
+    return ok ? op(DSP_OP_OK, 0, 0) : op(DSP_OP_FORBIDDEN, 0, 0);
+}
+
+static void owner_issue(dsp_app_t *app, uint8_t slot, dsp_app_auth_t *out)
+{
+    dsp_app_owner_t *o = &app->own;
+    uint64_t token = 0;
+    if (!owner_random(app, &token, sizeof token) || token == 0) {
+        o->authz_valid = false;
+        memset(out, 0, sizeof *out);
+        return;
+    }
+    o->authz_valid = true;
+    o->authz_slot = slot;
+    o->authz_session = app->ss.session_id;
+    o->authz_token = token;
+    o->authz_epoch = o->epoch;
+    out->role = DSP_APP_ROLE_OWNER;
+    out->slot = slot;
+    out->session_id = app->ss.session_id;
+    out->token = token;
+}
+
+/* Owner operation guard: guard() plus the ISSUED authorization of this session and epoch. */
+static dsp_app_op_result_t owner_guard(dsp_app_t *app, const dsp_app_auth_t *auth)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    const dsp_app_owner_t *o = &app->own;
+    if (app->cfg->security == NULL || !o->authz_valid || app->ss.session_id == 0 ||
+        auth->session_id != app->ss.session_id || o->authz_session != app->ss.session_id ||
+        auth->token != o->authz_token || auth->slot != o->authz_slot || o->authz_epoch != o->epoch ||
+        o->cred != DSP_CRED_CLAIMED || !o->cache.slot[auth->slot].used) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    return op(DSP_OP_OK, 0, 0);
+}
+
+static dsp_app_op_result_t from_auth(dsp_auth_result_t r)
+{
+    switch (r) {
+    case DSP_AUTH_OK:
+        return op(DSP_OP_OK, 0, 0);
+    case DSP_AUTH_ERR_SLOTS_FULL:
+        return op(DSP_OP_SLOTS_FULL, 0, 0);
+    case DSP_AUTH_ERR_DUPLICATE_KEY:
+        return op(DSP_OP_DUPLICATE, 0, 0);
+    case DSP_AUTH_ERR_NOT_FOUND:
+        return op(DSP_OP_NOT_FOUND, 0, 0);
+    case DSP_AUTH_ERR_LAST_SLOT:
+        return op(DSP_OP_REFUSED, DSP_OP_R_LAST_SLOT, 0);
+    case DSP_AUTH_ERR_STATE:
+    case DSP_AUTH_ERR_EPOCH:
+        return op(DSP_OP_REFUSED, DSP_OP_R_NOT_CLAIMED, 0);
+    default:
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+}
+
+/* Persists st.auth_scratch (then wiped) and refreshes the cache; a write failure ends dosing for
+ * the wake and re-reads the durable record (old or new). */
+static dsp_app_op_result_t owner_commit(dsp_app_t *app, bool ownership_change)
+{
+    dsp_storage_status_t s = dsp_storage_save_auth(&app->st, &app->st.auth_scratch);
+    dsp_auth_wipe(&app->st.auth_scratch);
+    if (s != DSP_STORAGE_OK) {
+        if (write_failed(s)) {
+            storage_failed(app);
+        }
+        if (owner_load_full(app)) {
+            owner_set_cache(app, &app->st.auth_scratch);
+        } else {
+            owner_set_degraded(app);
+        }
+        dsp_auth_wipe(&app->st.auth_scratch);
+        owner_publish(app);
+        return op(write_failed(s) ? DSP_OP_STORAGE : DSP_OP_DEGRADED, 0, 0);
+    }
+    if (owner_load_full(app)) { /* the durable record is the truth */
+        owner_set_cache(app, &app->st.auth_scratch);
+    } else {
+        owner_set_degraded(app);
+    }
+    dsp_auth_wipe(&app->st.auth_scratch);
+    if (ownership_change) {
+        app->rep.owner_changes++;
+    }
+    owner_publish(app);
+    return op(DSP_OP_OK, 0, 0);
+}
+
+static dsp_utc_t trusted_now_or_0(const dsp_app_t *app)
+{
+    dsp_clock_t c = dose_clock(app);
+    return c.valid && c.now >= DSP_UTC_MIN && c.now <= DSP_UTC_MAX ? c.now : 0;
+}
+
+/* ---- Owner operations ------------------------------------------------------------------- */
+
+dsp_app_op_result_t dsp_app_phones_list(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                        dsp_app_phone_t out[DSP_APP_PHONE_SLOTS], uint8_t *n)
+{
+    dsp_app_op_result_t g = owner_guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL || n == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    *n = 0;
+    for (uint8_t i = 0; i < DSP_AUTH_SLOTS; i++) {
+        const dsp_auth_slot_t *s = &app->own.cache.slot[i];
+        if (!s->used) {
+            continue;
+        }
+        dsp_app_phone_t *p = &out[(*n)++];
+        memset(p, 0, sizeof *p);
+        p->slot = i;
+        p->name_len = s->name_len;
+        memcpy(p->name, s->name, sizeof p->name);
+        p->enrolled_at = s->enrolled_at;
+        p->last_seen = s->last_seen;
+        p->is_self = i == auth->slot;
+    }
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_phone_remove(dsp_app_t *app, const dsp_app_auth_t *auth, uint8_t slot,
+                                         bool *session_ends)
+{
+    if (session_ends != NULL) {
+        *session_ends = false;
+    }
+    dsp_app_op_result_t g = owner_guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (slot >= DSP_AUTH_SLOTS) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    if (!app->own.cache.slot[slot].used) {
+        return op(DSP_OP_NOT_FOUND, 0, 0);
+    }
+    if (dsp_auth_used_count(&app->own.cache) <= 1) {
+        return op(DSP_OP_REFUSED, DSP_OP_R_LAST_SLOT, 0);
+    }
+    g = write_budget(app);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (!owner_load_full(app)) {
+        dsp_auth_wipe(&app->st.auth_scratch);
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    dsp_auth_result_t ar = dsp_auth_remove(&app->st.auth_scratch, slot);
+    if (ar != DSP_AUTH_OK) {
+        dsp_auth_wipe(&app->st.auth_scratch);
+        return from_auth(ar);
+    }
+    write_used(app);
+    bool self = slot == auth->slot;
+    g = owner_commit(app, true);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (self) {
+        owner_drop_session_evidence(app);
+        app->ss.end = DSP_BLE_END_REVOKED; /* the session ends after this response */
+        if (session_ends != NULL) {
+            *session_ends = true;
+        }
+    } else {
+        app->own.authz_epoch = app->own.epoch; /* the caller stays authorized */
+    }
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_invite_create(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                          uint8_t token_out[16], uint16_t *expires_s)
+{
+    dsp_app_op_result_t g = owner_guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (token_out == NULL || expires_s == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    if (dsp_auth_free_slot(&app->own.cache) < 0) {
+        return op(DSP_OP_SLOTS_FULL, 0, 0);
+    }
+    owner_check_clock(app);
+    uint8_t token[16];
+    bool nz = false;
+    if (!owner_random(app, token, sizeof token)) {
+        dsp_secure_zero(token, sizeof token);
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    for (size_t i = 0; i < sizeof token; i++) {
+        nz = nz || token[i] != 0;
+    }
+    if (!nz) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    dsp_owner_invite_set(&app->retained, auth->slot, app->own.epoch, token, raw_now(app));
+    if (!retained_save_now(app)) {
+        dsp_owner_invite_clear(&app->retained);
+        dsp_secure_zero(token, sizeof token);
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    memcpy(token_out, token, sizeof token);
+    dsp_secure_zero(token, sizeof token);
+    *expires_s = DSP_OWNER_INVITE_S;
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_invite_cancel(dsp_app_t *app, const dsp_app_auth_t *auth)
+{
+    dsp_app_op_result_t g = owner_guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    dsp_owner_invite_clear(&app->retained);
+    return retained_save_now(app) ? done(app, op(DSP_OP_OK, 0, 0)) : op(DSP_OP_DEGRADED, 0, 0);
+}
+
+dsp_app_op_result_t dsp_app_recovery_cancel(dsp_app_t *app, const dsp_app_auth_t *auth)
+{
+    dsp_app_op_result_t g = owner_guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    dsp_owner_arm_clear(&app->retained);
+    return retained_save_now(app) ? done(app, op(DSP_OP_OK, 0, 0)) : op(DSP_OP_DEGRADED, 0, 0);
+}
+
+bool dsp_app_post_button(dsp_app_t *app, const dsp_button_event_t *ev)
+{
+    if (app == NULL || app->cfg == NULL || ev == NULL ||
+        (ev->kind != DSP_BUTTON_SHORT && ev->kind != DSP_BUTTON_LONG)) {
+        return false;
+    }
+    dsp_app_cmd_t c;
+    memset(&c, 0, sizeof c);
+    c.kind = DSP_CMD_BUTTON;
+    c.button = *ev;
+    q_lock(app);
+    bool ok = app->accepting && app->q_count < DSP_APP_CMDQ_CAPACITY;
+    if (ok) {
+        app->q[(app->q_head + app->q_count) % DSP_APP_CMDQ_CAPACITY] = c;
+        app->q_count++;
+    }
+    q_unlock(app);
+    return ok;
+}
+
+/* ---- Security-layer operations (dsp_app_sec.h) ------------------------------------------ */
+
+static bool invite_ok(const dsp_app_t *app)
+{
+    return app->own.cred == DSP_CRED_CLAIMED &&
+           dsp_owner_invite_valid(&app->retained, raw_now(app), app->own.epoch);
+}
+
+static bool arm_ok(const dsp_app_t *app)
+{
+    return (app->own.cred == DSP_CRED_CLAIMED || app->own.cred == DSP_CRED_DEGRADED) &&
+           dsp_owner_arm_valid(&app->retained, raw_now(app), app->own.epoch);
+}
+
+void dsp_app_sec_view(dsp_app_t *app, dsp_app_sec_view_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof *out);
+    if (app == NULL || app->cfg == NULL) {
+        return;
+    }
+    owner_check_clock(app);
+    out->cred_state = app->own.cred;
+    out->recovery_armed = arm_ok(app);
+    out->invite_active = invite_ok(app);
+    out->slot_free = app->own.cred == DSP_CRED_CLAIMED && dsp_auth_free_slot(&app->own.cache) >= 0;
+    if (app->own.cred == DSP_CRED_CLAIMED) {
+        memcpy(out->id_pub, app->own.cache.id_pub, sizeof out->id_pub);
+    }
+}
+
+dsp_app_op_result_t dsp_app_sec_admit(dsp_app_t *app, dsp_sec_purpose_t purpose, dsp_app_hs_t *hs)
+{
+    dsp_app_op_result_t r = sec_ready(app);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    if (hs == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    memset(hs, 0, sizeof *hs);
+    if (owner_confirm_pending(app)) {
+        return op(DSP_OP_BUSY, DSP_OP_B_CONFIRMING, 0);
+    }
+    owner_check_clock(app);
+    dsp_app_owner_t *o = &app->own;
+    o->hs_active = false; /* a new admission replaces any unconsumed one */
+    o->hs_nonce = 0;
+    bool allowed;
+    switch (purpose) {
+    case DSP_SEC_SESSION:
+        allowed = o->cred == DSP_CRED_CLAIMED;
+        break;
+    case DSP_SEC_CLAIM:
+        allowed = o->cred == DSP_CRED_UNCLAIMED;
+        break;
+    case DSP_SEC_ADD:
+        allowed = invite_ok(app) && dsp_auth_free_slot(&o->cache) >= 0;
+        break;
+    case DSP_SEC_RECOVERY:
+        allowed = arm_ok(app);
+        break;
+    default:
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    if (!allowed) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    uint64_t nonce = 0;
+    if (!owner_random(app, &nonce, sizeof nonce) || nonce == 0) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    o->hs_active = true;
+    o->hs_purpose = (uint8_t)purpose;
+    o->hs_session = app->ss.session_id;
+    o->hs_nonce = nonce;
+    o->hs_start_ms = mono_ms(app);
+    o->hs_epoch = o->epoch;
+    hs->purpose = (uint8_t)purpose;
+    hs->session_id = app->ss.session_id;
+    hs->nonce = nonce;
+    return op(DSP_OP_OK, 0, 0);
+}
+
+dsp_app_op_result_t dsp_app_sec_identity(dsp_app_t *app, const dsp_app_hs_t *hs,
+                                         uint8_t pub[DSP_AUTH_KEY_BYTES],
+                                         uint8_t priv[DSP_AUTH_KEY_BYTES])
+{
+    dsp_app_op_result_t r = hs_check(app, hs, DSP_SEC_SESSION, DSP_SEC_ADD, false);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    if (pub == NULL || priv == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    if (app->own.cred != DSP_CRED_CLAIMED || !owner_load_full(app) ||
+        !dsp_auth_usable(&app->st.auth_scratch)) {
+        dsp_auth_wipe(&app->st.auth_scratch);
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    memcpy(pub, app->st.auth_scratch.id_pub, DSP_AUTH_KEY_BYTES);
+    memcpy(priv, app->st.auth_scratch.id_priv, DSP_AUTH_KEY_BYTES);
+    dsp_auth_wipe(&app->st.auth_scratch);
+    return op(DSP_OP_OK, 0, 0);
+}
+
+dsp_app_op_result_t dsp_app_sec_invite_token(dsp_app_t *app, const dsp_app_hs_t *hs,
+                                             uint8_t token[16])
+{
+    dsp_app_op_result_t r = hs_check(app, hs, DSP_SEC_ADD, DSP_SEC_ADD, false);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    if (token == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    owner_check_clock(app);
+    if (!invite_ok(app)) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    memcpy(token, app->retained.invite.token, sizeof app->retained.invite.token);
+    return op(DSP_OP_OK, 0, 0);
+}
+
+dsp_app_op_result_t dsp_app_sec_lookup(dsp_app_t *app, const dsp_app_hs_t *hs,
+                                       const uint8_t phone_pub[DSP_AUTH_KEY_BYTES],
+                                       dsp_app_auth_t *out)
+{
+    if (out != NULL) {
+        memset(out, 0, sizeof *out);
+    }
+    dsp_app_op_result_t r = hs_check(app, hs, DSP_SEC_SESSION, DSP_SEC_SESSION, true);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    if (phone_pub == NULL || out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    int slot = app->own.cred == DSP_CRED_CLAIMED ? dsp_auth_find(&app->own.cache, phone_pub) : -1;
+    if (slot < 0) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    owner_issue(app, (uint8_t)slot, out);
+    if (!app->own.authz_valid) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    /* last_seen (O8): trusted clock only, at most hourly; diagnostic. */
+    dsp_utc_t now = trusted_now_or_0(app);
+    if (now != 0 && dsp_auth_touch(&app->own.cache, (uint8_t)slot, now)) {
+        if (owner_load_full(app) && dsp_auth_touch(&app->st.auth_scratch, (uint8_t)slot, now)) {
+            (void)owner_commit(app, false); /* diagnostic write, not an ownership change */
+        } else {
+            dsp_auth_wipe(&app->st.auth_scratch);
+        }
+    }
+    return op(DSP_OP_OK, 0, 0);
+}
+
+dsp_app_op_result_t dsp_app_sec_enroll(dsp_app_t *app, const dsp_app_hs_t *hs,
+                                       const uint8_t phone_pub[DSP_AUTH_KEY_BYTES],
+                                       const char *name, size_t name_len,
+                                       const uint8_t *new_priv, const uint8_t *new_pub,
+                                       dsp_app_auth_t *out)
+{
+    if (out != NULL) {
+        memset(out, 0, sizeof *out);
+    }
+    dsp_app_op_result_t r = hs_check(app, hs, DSP_SEC_CLAIM, DSP_SEC_ADD, true);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    if (phone_pub == NULL || out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    bool claim = hs->purpose == DSP_SEC_CLAIM;
+    if (claim ? (new_priv == NULL || new_pub == NULL) : (new_priv != NULL || new_pub != NULL)) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    owner_check_clock(app);
+    if (claim ? app->own.cred != DSP_CRED_UNCLAIMED : !invite_ok(app)) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    r = write_budget(app);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    if (!owner_load_full(app)) {
+        dsp_auth_wipe(&app->st.auth_scratch);
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    uint8_t slot = 0;
+    dsp_utc_t now = trusted_now_or_0(app);
+    dsp_auth_result_t ar =
+        claim ? dsp_auth_claim(&app->st.auth_scratch, new_priv, new_pub, phone_pub, name, name_len, now)
+              : dsp_auth_add(&app->st.auth_scratch, phone_pub, name, name_len, now, &slot);
+    if (ar != DSP_AUTH_OK) {
+        dsp_auth_wipe(&app->st.auth_scratch);
+        return from_auth(ar);
+    }
+    if (!claim) {
+        /* Single use: the invite is consumed (and saved) BEFORE the commit. */
+        dsp_owner_invite_clear(&app->retained);
+        if (!retained_save_now(app)) {
+            dsp_auth_wipe(&app->st.auth_scratch);
+            return op(DSP_OP_DEGRADED, 0, 0);
+        }
+    }
+    write_used(app);
+    r = owner_commit(app, true);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    owner_issue(app, slot, out);
+    return op(app->own.authz_valid ? DSP_OP_OK : DSP_OP_DEGRADED, 0, 0);
+}
+
+dsp_app_op_result_t dsp_app_sec_recovery_begin(dsp_app_t *app, const dsp_app_hs_t *hs,
+                                               const uint8_t transcript_hash[32])
+{
+    dsp_app_op_result_t r = hs_check(app, hs, DSP_SEC_RECOVERY, DSP_SEC_RECOVERY, true);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    if (transcript_hash == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    owner_check_clock(app);
+    if (!arm_ok(app)) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    q_flush_buttons(app); /* presses queued before the operation never count */
+    dsp_confirm_begin(&app->own.confirm, app->ss.session_id, transcript_hash, mono_ms(app));
+    return op(DSP_OP_OK, 0, 0);
+}
+
+dsp_confirm_state_t dsp_app_sec_recovery_state(dsp_app_t *app)
+{
+    if (app == NULL || app->cfg == NULL || app->cfg->mono == NULL) {
+        return DSP_CONFIRM_NONE;
+    }
+    if (!owner_confirm_pending(app)) {
+        return (dsp_confirm_state_t)app->own.confirm.state;
+    }
+    dsp_confirm_state_t st = dsp_confirm_poll(&app->own.confirm, mono_ms(app));
+    if (st == DSP_CONFIRM_ABORTED) {
+        owner_confirm_failed(app);
+    }
+    return st;
+}
+
+dsp_app_op_result_t dsp_app_sec_recovery_apply(dsp_app_t *app, const uint8_t transcript_hash[32],
+                                               const uint8_t phone_pub[DSP_AUTH_KEY_BYTES],
+                                               const char *name, size_t name_len,
+                                               const uint8_t new_priv[DSP_AUTH_KEY_BYTES],
+                                               const uint8_t new_pub[DSP_AUTH_KEY_BYTES],
+                                               dsp_app_auth_t *out)
+{
+    if (out != NULL) {
+        memset(out, 0, sizeof *out);
+    }
+    dsp_app_op_result_t r = sec_ready(app);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    (void)dsp_app_sec_recovery_state(app);
+    dsp_confirm_t *c = &app->own.confirm;
+    bool bound = c->state == DSP_CONFIRM_CONFIRMED && c->session_id == app->ss.session_id &&
+                 transcript_hash != NULL && memcmp(c->transcript, transcript_hash, 32) == 0;
+    dsp_confirm_reset(c); /* single use, whatever happens next */
+    if (!bound) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    if (phone_pub == NULL || new_priv == NULL || new_pub == NULL || out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    owner_check_clock(app);
+    if (!arm_ok(app)) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    if (!dsp_dosing_state(&app->dosing)) {
+        return op(DSP_OP_DEGRADED, 0, 0); /* never without a durable SERVICE_REQUIRED */
+    }
+    /* New epoch above every epoch an RTC overlay could still carry. */
+    uint32_t min_epoch = 1;
+    if (app->retained.invite.valid && app->retained.invite.owner_epoch < UINT32_MAX - 2) {
+        min_epoch = app->retained.invite.owner_epoch + 1;
+    }
+    if (app->retained.arm.owner_epoch != DSP_OWNER_EPOCH_DEGRADED &&
+        app->retained.arm.owner_epoch + 1 > min_epoch && app->retained.arm.owner_epoch < UINT32_MAX - 2) {
+        min_epoch = app->retained.arm.owner_epoch + 1;
+    }
+    /* 1. The arm (and any invite) is consumed and saved first. */
+    owner_clear_overlays(app);
+    app->rep.overlays_cleared = false; /* an intended consumption, not an anomaly */
+    if (!retained_save_now(app)) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    /* 2. Restricting write: SERVICE_REQUIRED (no-op when already). */
+    uint32_t gates = 0, problems = 0;
+    if (dsp_dosing_set_readiness(&app->dosing, DSP_READINESS_SERVICE_REQUIRED, &gates, &problems) !=
+        DSP_DOSING_OK) {
+        storage_failed(app);
+        return op(DSP_OP_STORAGE, 0, 0);
+    }
+    /* 3. The new credential record. */
+    const dsp_auth_t *prev = NULL;
+    if (app->st.auth_status == DSP_STORAGE_OK && owner_load_full(app)) {
+        prev = &app->st.auth_scratch;
+    }
+    dsp_auth_t *next = &app->st.auth_scratch;
+    dsp_auth_result_t ar = dsp_auth_recover(prev, min_epoch, new_priv, new_pub, phone_pub, name,
+                                            name_len, trusted_now_or_0(app), next);
+    if (ar != DSP_AUTH_OK) {
+        dsp_auth_wipe(next);
+        return from_auth(ar);
+    }
+    write_used(app);
+    r = owner_commit(app, true);
+    if (r.status != DSP_OP_OK) {
+        return r;
+    }
+    app->own.key_fault = false; /* the new identity replaces the faulty one */
+    owner_publish(app);
+    owner_issue(app, 0, out);
+    return op(app->own.authz_valid ? DSP_OP_OK : DSP_OP_DEGRADED, 0, 0);
+}
+
+dsp_app_op_result_t dsp_app_sec_key_fault(dsp_app_t *app)
+{
+    if (app == NULL || app->cfg == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    if (app->cfg->security == NULL) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    /* 1. Enforcement first, in RAM, independent of any write. */
+    app->own.key_fault = true;
+    app->rep.key_fault = true;
+    bool was_claimed = app->own.cred == DSP_CRED_CLAIMED;
+    owner_set_degraded(app);
+    owner_drop_session_evidence(app);
+    owner_publish(app);
+    if (!app->loaded || !was_claimed) {
+        return op(DSP_OP_OK, 0, 0);
+    }
+    /* 2. Diagnostic persistence (supports recovery in later wakes). */
+    if (!owner_load_full(app) || dsp_auth_mark_key_fault(&app->st.auth_scratch) != DSP_AUTH_OK) {
+        dsp_auth_wipe(&app->st.auth_scratch);
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    dsp_app_op_result_t r = owner_commit(app, true);
+    owner_set_degraded(app); /* whatever the write did: degraded for the rest of the wake */
+    owner_publish(app);
+    return r;
+}
+
+void dsp_app_sec_handshake_failed(dsp_app_t *app)
+{
+    if (sec_ready(app).status != DSP_OP_OK || app->ss.failed_hs_counted) {
+        return;
+    }
+    app->ss.failed_hs_counted = true;
+    if (app->own.cred == DSP_CRED_DEGRADED || app->own.cred == DSP_CRED_UNKNOWN) {
+        return; /* no valid record to update */
+    }
+    if (owner_load_full(app) && dsp_auth_count_failed_session(&app->st.auth_scratch)) {
+        (void)owner_commit(app, false); /* diagnostic write */
+    } else {
+        dsp_auth_wipe(&app->st.auth_scratch);
+    }
+}
+
 /* ---- Public API ------------------------------------------------------------------------ */
 
 static bool config_valid(const dsp_app_config_t *cfg)
@@ -1121,6 +2158,19 @@ static bool config_valid(const dsp_app_config_t *cfg)
              cfg->ble->resume != NULL && cfg->ble->stop != NULL && cfg->ble->wait != NULL &&
              cfg->ble->respond != NULL && cfg->mono != NULL && cfg->mono->now_ms != NULL)) &&
            (cfg->sync == NULL || (cfg->sync->lock != NULL && cfg->sync->unlock != NULL));
+}
+
+/* Its buffer (the whole RTC block) is not on the dosing call chain: noinline (stack budget). */
+__attribute__((noinline)) static void load_retained(dsp_app_t *app)
+{
+    const dsp_app_config_t *cfg = app->cfg;
+    dsp_power_retained_defaults(&app->retained);
+    if (dsp_power_cause_keeps_retained(app->rep.cause)) {
+        uint8_t buf[DSP_POWER_RETAINED_BYTES + 1];
+        size_t len = cfg->power->load_retained(cfg->power->ctx, buf, sizeof buf);
+        app->rep.retained_valid = dsp_power_retained_decode(buf, len, &app->retained);
+        dsp_secure_zero(buf, sizeof buf); /* may hold an invite token */
+    }
 }
 
 dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg)
@@ -1141,13 +2191,9 @@ dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg)
     }
     app->rep.pump_unconfirmed = !off;
     app->rep.cause = cfg->power->wake_cause(cfg->power->ctx);
-    dsp_power_retained_defaults(&app->retained);
-    if (dsp_power_cause_keeps_retained(app->rep.cause)) {
-        uint8_t buf[DSP_POWER_RETAINED_BYTES + 1];
-        size_t len = cfg->power->load_retained(cfg->power->ctx, buf, sizeof buf);
-        app->rep.retained_valid = dsp_power_retained_decode(buf, len, &app->retained);
-    }
+    load_retained(app);
     app->retained.wake_count++;
+    owner_wake_start(app); /* overlay rules 1-4 (reset reason, CRC, raw clock, expiry) */
     app->inhibited = app->retained.failsafe_count >= DSP_POWER_FAILSAFE_LIMIT;
     app->rep.inhibited = app->inhibited;
 
@@ -1156,6 +2202,7 @@ dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg)
         trace(app, DSP_STAGE_LOAD);
         app->loaded = load(app);
         app->rep.degraded = !app->loaded;
+        owner_load(app); /* credentials gate before any dosing (O3: damaged -> no dosing) */
         if (app->loaded) {
             stage_recover(app);
             stage_clock(app);

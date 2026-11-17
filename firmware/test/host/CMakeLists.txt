@@ -86,6 +86,11 @@ dsp_add_host_test(test_app_ops test_app_ops.c support/fake_kv.c)
 # M1.10b.2: manual dose with durable anti-replay (reuses the test_app_ops harness).
 dsp_add_host_test(test_manual test_manual.c support/fake_kv.c)
 target_compile_options(test_manual PRIVATE -Wno-unused-function)
+# M1.10b.3: credential record, RTC overlays, confirmation (pure) and ownership through the
+# Application Service (reuses the test_app_ops harness).
+dsp_add_host_test(test_auth test_auth.c)
+dsp_add_host_test(test_owner test_owner.c support/fake_kv.c)
+target_compile_options(test_owner PRIVATE -Wno-unused-function)
 # M1.9c: the pure platform adapter logic (compiled unchanged into the firmware component;
 # no ESP-IDF headers) and a two-thread check of the command-queue boundary.
 set(DSP_PLATFORM_DIR "${CMAKE_CURRENT_LIST_DIR}/../../components/dispenser_platform")
@@ -94,6 +99,9 @@ dsp_add_host_test(test_platform test_platform.c support/fake_kv.c
 target_include_directories(test_platform PRIVATE "${DSP_PLATFORM_DIR}/include")
 find_package(Threads REQUIRED)
 # M1.9c: build-time endpoint guard of the application runtime (pure CMake script).
+add_test(NAME test_sec_header_guard
+         COMMAND ${CMAKE_COMMAND} -DWORK=${CMAKE_CURRENT_BINARY_DIR}/sec_guard_tree
+                 -P "${CMAKE_CURRENT_LIST_DIR}/test_sec_header_guard.cmake")
 add_test(NAME test_endpoint_guard
          COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/test_endpoint_guard.cmake")
 target_link_libraries(test_platform PRIVATE Threads::Threads)

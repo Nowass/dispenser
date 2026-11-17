@@ -75,6 +75,15 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   [Platform adapters and application runtime](#platform-adapters-and-application-runtime-m19c).
 - (M1.10a) **BLE protocol v1 codec** and the Noise feasibility gate (see
   [BLE protocol codec and Noise gate](#ble-protocol-codec-and-noise-gate-m110a)).
+- (M1.10b.3) **Device ownership and credential persistence**: storage layout v5 with the `auth`
+  credential record (identity key pair, four revocable phone slots, ownership epoch), resumable
+  v4 → v5 migration, claim / add (RTC invite) / revoke / recovery (RTC arm + bound 3-press
+  confirmation) through the Application Service, damaged credentials block all dosing (never
+  "unclaimed"), KEY_FAULT inhibits at once, durable manual-dose admission (`dosing` format 3) and
+  session-local limits, setup-code provisioning in the developer tool. No cryptography, no
+  Noise, no BLE: the security layer (M1.10c) registers later; until then nothing can authorize
+  an ownership change. See
+  [Device ownership and credentials](#device-ownership-and-credentials-m110b3).
 - (M1.10b.2) **Manual dose with durable anti-replay**: per-phone-slot request high-water marks
   and a ring of the last 8 results in the `dosing` record (format 2, layout v4); a request is
   decided exactly once (executed or durably refused) and never activates the pump again; the
@@ -218,6 +227,10 @@ firmware/
 │   │   ├── include/dsp_power.h       Power Service: plan, RTC-retained block, sleep port (M1.9b)
 │   │   ├── include/dsp_app.h         Application Service: the wake cycle (M1.9b)
 │   │   ├── include/dsp_bleproto.h    BLE protocol v1 codec: frames, fragments, records (M1.10a)
+│   │   ├── include/dsp_auth.h        credential record model and transitions (M1.10b.3)
+│   │   ├── include/dsp_owner.h       RTC invite/recovery-arm rules, 3-press confirmation (M1.10b.3)
+│   │   ├── include/dsp_app_sec.h     RESTRICTED security-layer interface (M1.10b.3)
+│   │   ├── sec_header_guard.cmake    configure-time check: who may include dsp_app_sec.h
 │   │   └── src/                      matching .c files
 │   └── dispenser_platform/     ESP-IDF adapters (never in the host build)
 │       ├── Kconfig                   DSP_SNTP_SERVER (M1.4), DSP_NOTIFY_URL, DSP_NOTIFY_HEALTH_URL (M1.7)
@@ -247,7 +260,12 @@ firmware/
 │   ├── test_dosing.c              Dosing Service (M1.9a)
 │   ├── test_app.c                 Application and Power Services (M1.9b)
 │   ├── test_platform.c            platform adapter logic and queue threads (M1.9c)
-│   └── test_bleproto.c            BLE protocol v1 codec, shared vectors, fuzzing (M1.10a)
+│   ├── test_bleproto.c            BLE protocol v1 codec, shared vectors, fuzzing (M1.10a)
+│   ├── test_app_ops.c             configuration, schedule, time operations (M1.10b.1)
+│   ├── test_manual.c              manual-dose anti-replay through wakes (M1.10b.2)
+│   ├── test_auth.c                credential record, RTC overlays, confirmation (M1.10b.3)
+│   ├── test_owner.c               ownership through wakes, power cuts, admission (M1.10b.3)
+│   └── test_sec_header_guard.cmake  restricted-header check (M1.10b.3)
 ├── test/integration/           local end-to-end harness (M1.8, see its README)
 │   ├── notify_harness.c           real domain code driven over stdin
 │   ├── posix_https_port.[ch]      host HTTP port: real TLS (OpenSSL), test CA, timeouts
@@ -672,17 +690,18 @@ dosing service (future) ──► dsp_exec ──► dsp_history_store_t ─┐
   ESP-IDF docs note that its recovery may erase and rewrite some pages. This is internal
   library behavior that the firmware neither performs nor can prevent.
 
-### Storage layout v4 (one NVS namespace, `dispenser`, partition `nvs`)
+### Storage layout v5 (one NVS namespace, `dispenser`, partition `nvs`)
 
 | Key | Content | Size |
 |---|---|---|
-| `layout` | layout marker (version 4, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
+| `layout` | layout marker (version 5 since M1.10b.3, 32 history slots, 16 schedules, 16 tombstones); written **last** at provisioning | 7 B |
 | `h00` … `h31` | execution history slot: M1.2 record (format 2 since M1.9a: + claimed volume) or the explicit EMPTY record | 96 B each (format 1: 92 B) |
 | `sched` | the whole schedule set (schedules + deleted-ID tombstones + set revision); format 2 since M1.10b.1 (+ name, edit floor per schedule) | 8 … 3,160 B (format 1: 8 … 2,504 B) |
 | `config` | device configuration (format 2 since M1.9a: + pump calibration and safety limits) | 46 B (format 1: 18 B) |
 | `time` | time metadata (M1.4): last sync, high-water time, rollback hold, last correction, dosing floor | 42 B |
 | `notify` | notification state (M1.5): ID epoch and sequence, condition latches, 16-entry queue; since M1.7 (format 2) also the transport diagnostics and the 4-entry rejection log; since M1.9a (format 3) the dose-bound report keys | 794 B (format 2: 758 B, format 1: 682 B) |
-| `dosing` | dosing state (M1.9a, layout v4): readiness, BLOCKED latch, refill intent, manual in-flight marker, daily ledger, last pump start; format 2 since M1.10b.2: per-slot manual-dose high-water marks, the marker's request binding, ring of the last 8 request results | 206 B (format 1: 52 B) |
+| `dosing` | dosing state (M1.9a, layout v4): readiness, BLOCKED latch, refill intent, manual in-flight marker, daily ledger, last pump start; format 2 since M1.10b.2: per-slot manual-dose high-water marks, the marker's request binding, ring of the last 8 request results ; format 3 since M1.10b.3: the durable manual-dose admission date and count | 212 B (format 2: 206 B, format 1: 52 B) |
+| `auth` | credential record (layout v5, M1.10b.3): claim state, KEY_FAULT flag, ownership epoch, device identity key pair, 4 phone slots (public key, name, enrolled, last seen), recovery and diagnostic counters. **Not** the setup code (only in `nvs_sec`) | 416 B |
 
 **Explicit presence (approved):** on first boot every key is written with its
 provisioning value (EMPTY slots, empty set, default configuration), then the marker.
@@ -764,6 +783,20 @@ dosing (52 B):        0 type (7) | 1 ver | 2 readiness (1 READY, 2 SERVICE_REQUI
                       85 ring_next (0..7) | 86..93 marker_req (u64; 0 = none) |
                       94..205 8 x result (0 slot | 1 state 1 PENDING..5 REFUSED | 2..9 seq u64 |
                       10..13 detail: volume or refusal code; an unused entry is all zero)
+  format 3 (212 B, M1.10b.3): 206..209 adm_date (year u16, month, day; all zero = none) |
+                      210..211 adm_count (u16): fresh manual-dose decisions counted for adm_date
+                      (formats 1 and 2 decode with both zero)
+auth (416 B, layout v5, M1.10b.3):
+                      0 type (8) | 1 ver (1) | 2 claim_state (0 UNCLAIMED, 1 CLAIMED) | 3 flags
+                      (1 KEY_FAULT) | 4..7 owner_epoch | 8..39 identity private key | 40..71
+                      identity public key | 72..79 claimed_at (i64) | 80..87 recovered_at (i64) |
+                      88..91 recoveries | 92..95 failed_sessions | 96.. 4 x slot (80 B)
+  slot (80 B):        0 used (0/1) | 1 name_len (0..24) | 2..3 zero | 4..35 phone public key |
+                      36..59 name (UTF-8, no control characters, zero padded) | 60..63 zero |
+                      64..71 enrolled_at (i64) | 72..79 last_seen (i64); unused slot all zero
+                      Strict validation: UNCLAIMED has no identity and no slot; CLAIMED has a
+                      non-zero identity, epoch >= 1 and >= 1 used slot; used keys non-zero,
+                      distinct, never the identity key; KEY_FAULT only with CLAIMED.
 ```
 
 Golden byte vectors for history, configuration and schedule set (computed independently
@@ -863,9 +896,9 @@ firmware, see M1.7), never in `config`, this namespace or logs.
 
 NVS entries are 32 B and blobs cost 2 entries plus 1 per 32 data bytes. History
 32 × 5 = 160 entries, schedule set ≤ 101 (format 2, 3,160 B; format 1: 81), config 4 (46 B),
-time 4 (M1.4, 42 B), notify 27 (M1.9a, 794 B), dosing 9 (M1.10b.2, 206 B), marker 3,
-namespace 1: **≤ about 309 entries (10 KB)**, plus up to 101 free entries while the largest
-record is rewritten.
+time 4 (M1.4, 42 B), notify 27 (M1.9a, 794 B), dosing 9 (M1.10b.3, 212 B), auth 15 (M1.10b.3,
+416 B), marker 3, namespace 1: **≤ about 324 entries (measured with the real NVS:
+`test/nvs_linux` check 1)**, plus up to 101 free entries while the largest record is rewritten.
 The M1.7 partition table gives `nvs` 80 KiB (20 pages, about 2,500 usable entries): the
 live data uses about 11 %, which leaves room for ESP-IDF's own Wi-Fi/PHY/BLE data and
 spreads wear. Wear: about 10 entries per automatic dose (plus 3 for the reservoir estimate
@@ -890,12 +923,22 @@ provisioning value as left by an interrupted migration:
 - the marker is rewritten as v4 **last**;
 - a power cut before the marker is resumed at the next boot.
 
-Record formats inside a layout: history 1 → 2, configuration 1 → 2, `notify` 1/2 → 3 and
-(M1.10b.1) `sched` 1 → 2 are read as before (new fields 0) and upgraded by the next write of
-that record; no migration step is needed. M1.10b.1 therefore keeps **layout v4**: names and the
-edit floor live inside the existing `sched` key (single atomic write, upgraded lazily). Layout v5
-is reserved for the credential record and the manual-dose anti-replay state (M1.10b.2+, see
-`docs/BLE_PROTOCOL_DESIGN.md` section 7.1).
+**Layout v4 → v5 (M1.10b.3; implemented, tested with the fake KV at every write and with the
+real NVS cut at every flash cycle):** the v4 data is validated as before; the `auth` record is
+provisioned UNCLAIMED (epoch 0) unless an interrupted migration already wrote exactly that
+value; the marker is rewritten as v5 **last**. A v4 device was never claimable, so UNCLAIMED is
+its true state. Any other `auth` content next to a v4 marker is CORRUPT (nothing written).
+v1/v2/v3 migrate straight to v5 (`auth` provisioned before the marker).
+
+Under a v5 marker a missing, malformed or newer `auth` does **not** fail the open: it is
+classified (`st->auth_status`) and the Application Service enters CRED_DEGRADED (dosing
+blocked, see the M1.10b.3 section), so recovery can still force SERVICE_REQUIRED durably; any
+other damaged key is CORRUPT as before.
+
+Record formats inside a layout: history 1 → 2, configuration 1 → 2, `notify` 1/2 → 3,
+(M1.10b.1) `sched` 1 → 2, (M1.10b.2) `dosing` 1 → 2 and (M1.10b.3) `dosing` 2 → 3 are read as
+before (new fields 0) and upgraded by the next write of that record; no migration step is
+needed.
 
 Without write permission the open reports `ERR_MIGRATION_REQUIRED` and writes nothing. An old
 marker next to a newer key with real data is `CORRUPT`. Older firmware reading a newer layout
@@ -1538,15 +1581,17 @@ power cut) is implemented before the gate and reset behavior are measured.
 | Configuration | Image | Headroom in a 1.75 MiB slot | Static DRAM (`idf.py size`) |
 |---|---|---|---|
 | default | 0x24400 (148,480 B) | 91.9 % | 50,059 B |
-| diagnostics (time + HTTPS) | 0xfe6a0 (1,042,080 B) | 43.2 % | 108,552 B |
-| runtime (simulated pump, no connectivity) | 0x389c0 (231,872 B) | 87.4 % | 83,103 B |
-| runtime + connectivity (+ test button GPIO 3, sim maximum 30 s) | 0x10bc50 (1,096,784 B) | 40.2 % | 135,780 B |
+| diagnostics (time + HTTPS) | 0xfe800 (1,042,432 B) | 43.2 % | 108,552 B |
+| runtime (simulated pump, no connectivity) | 0x3a290 (238,224 B) | 87.0 % | 84,487 B |
+| runtime + connectivity (+ test button GPIO 3, sim maximum 30 s) | 0x10db70 (1,104,752 B) | 39.8 % | 140,164 B |
 
-- Static RAM of the runtime: application state `s_app` 16,112 B, task stack 12,288 B, retained
-  block 72 B in RTC memory; `s_https` adds 1,336 B with connectivity.
-- **Stack:** worst domain call chain from `dsp_app_run_wake` = **2,992 B** (GCC
+- Static RAM of the runtime: application state `s_app` 17,472 B, task stack 12,288 B, retained
+  block 136 B in RTC memory (120 B domain block since M1.10b.3); `s_https` adds 1,336 B with
+  connectivity.
+- **Stack:** worst domain call chain from `dsp_app_run_wake` = **3,152 B** (M1.10b.3; GCC
   `-fcallgraph-info=su`, RISC-V `-Os`: run_wake → stage_dose → process_due → run_automatic →
-  claim → history scan). Not included: the platform code behind the ports (NVS; with
+  claim → history scan; the same script gives 3,104 B for M1.10b.2 `aa0532f`, which this README
+  listed as 2,992 B with an earlier method). Not included: the platform code behind the ports (NVS; with
   connectivity the TLS handshake inside `esp_http_client`), which needs measuring: the sleep log
   prints the task's stack high-water mark for that (hardware acceptance 7.6). The 12 KiB default
   is a provisional margin, not a measurement.
@@ -1661,6 +1706,84 @@ Sizes (ESP32-C3, `-Os`): the operations add about 4.4 KB of code once the dispat
 (`dsp_app_t` 15,856 B: the larger schedule set in the repository and the storage buffers);
 at most 208 B of stack per operation.
 
+## Device ownership and credentials (M1.10b.3)
+
+**Implemented and host-tested in the domain; nothing reachable over BLE yet** (security layer
+and dispatcher: M1.10c/d). Design: [`docs/OWNERSHIP_DESIGN.md`](../docs/OWNERSHIP_DESIGN.md)
+(revision 2, approved with O1-O11 and R1-R5). No cryptography in the domain: key generation,
+X25519, HKDF and the Noise handshakes belong to the M1.10c security layer; the domain stores and
+validates key bytes and decides ownership transitions.
+
+- **Credential record `auth`** (`dsp_auth.h`, layout v5, 416 B): identity key pair, four
+  independently revocable phone slots, `owner_epoch` (+1 at every ownership change, never
+  decreases), KEY_FAULT, recovery and failed-session counters. The 128-bit setup code is stored
+  only in `nvs_sec` (`setup_code`, 16-byte blob) and never in `auth`.
+- **Three credential states:** UNCLAIMED (valid record, no owner), CLAIMED, CRED_DEGRADED
+  (missing / corrupt / newer `auth` under a v5 marker, KEY_FAULT, or a key fault reported in this
+  wake). CRED_DEGRADED is never reported or treated as unclaimed, closes the dosing gate
+  `DSP_DOSING_G_CREDENTIALS` (automatic and manual), raises the storage DEVICE_ERROR condition and
+  admits only RECOVERY. It ends by a successful recovery (the device is then SERVICE_REQUIRED) or
+  maintenance.
+- **Owner operations** (`dsp_app.h`): `dsp_app_phones_list`, `dsp_app_phone_remove` (never the
+  last phone; removing itself ends the session), `dsp_app_invite_create` / `_cancel` (one invite),
+  `dsp_app_recovery_cancel`. They require an authorization **issued by the Application Service**
+  in the current session and epoch (`auth->session_id`, `auth->token`); a hand-made
+  `{OWNER, slot}` is FORBIDDEN.
+- **Integration blocker (must hold until M1.10c):** the configuration, schedule, phone-time and
+  manual-dose operations (M1.10b.1/b.2) and the REFILL / SET_READINESS queue commands still
+  accept a caller-provided authorization input. They must **not** become reachable through BLE
+  until M1.10c provides security-layer-issued authorization and they verify it like the
+  ownership operations (session ID, token, epoch). A caller-provided or hand-crafted owner
+  authorization must never be sufficient for an externally reachable operation. Today nothing
+  external can call them (no BLE task, no dispatcher).
+- **Security-layer interface** (`dsp_app_sec.h`, restricted): admit (per purpose) → identity /
+  invite token → commit (lookup, enroll, recovery begin/apply), key fault, failed handshake.
+  Every call checks at runtime: a registered security layer (`cfg->security`; **NULL in every
+  build before M1.10c, so no ownership authorization can exist**), an active button-wake session
+  (physical presence), the single-use handshake handle issued for this session (purpose, random
+  nonce, 30 s, epoch at admission), the ownership preconditions again at commit, and for
+  recovery the RTC arm and the confirmation bound to (session, transcript hash). The header
+  boundary is also enforced at configure time (`sec_header_guard.cmake`): defense in depth only.
+- **RTC overlays** (`dsp_owner.h`, retained block format 2, 120 B): the invite (16-byte device
+  RNG token, 10 min) and the recovery arm (30 min) are kept only across deep-sleep wakes (every
+  reset clears them, R1), have fixed deadlines, are cleared by any clock step (raw clock vs.
+  monotonic clock within the wake; raw clock below the last save across wakes) and are bound to
+  `owner_epoch`. CRC-valid but inconsistent overlays are dropped without discarding the rest of
+  the block. Overlays are preconditions, never authority (a commit still needs the setup-code
+  handshake). Consumption is saved to RTC memory **before** the commit.
+- **Recovery:** arm by a verified ≥ 10 s hold from the first sample after a power-on or button
+  boot (`cfg->recovery_hold_ms`, measured by the button driver, M1.10d); RECOVERY handshake in a
+  later session; exactly 3 short presses (guard 300 ms after start, ≤ 400 ms each, gaps ≤ 500 ms,
+  700 ms sequence end, 20 s) delivered as `DSP_CMD_BUTTON` events, queued and replayed events
+  ignored; the third failed confirmation disarms. Apply: arm cleared and saved, readiness
+  SERVICE_REQUIRED (restricting write), then the new `auth` (new identity, new phone in slot 0).
+  History, schedules, configuration, time, notifications, the BLOCKED latch, refill intent,
+  manual high-water marks, the result ring and the admission counter are untouched (tested byte
+  for byte).
+- **KEY_FAULT:** `dsp_app_sec_key_fault` inhibits dosing in RAM first (for the rest of the wake,
+  whatever the write does), then persists the flag (epoch + 1) for later wakes.
+- **Admission and limits:** manual dose order: invalid → already decided (always answered, never
+  counted) → session limit (8) → durable daily admission (`dosing` format 3, default 32 per
+  local day, `cfg->manual_decisions_per_day`, counted only inside the decision write; restarts
+  only for a trusted later date; without trusted time it keeps counting) → decision. Over a limit:
+  `BUSY` detail `RATE_LIMITED` (aux: seconds), nothing written, the request stays undecided.
+  Session-local: 256 operations, 48 durable writes, 16 writes per minute (configurable); **v1
+  limitation: a reconnect or reset clears these** (the manual daily counter is durable).
+- **Provisioning:** `tools/provision_dev_secrets.py` generates the setup code if absent (written
+  back to the owner-only secrets file), stores it in `nvs_sec`, and writes the label text
+  `DSP2:<device-id>:<26 Crockford base32 + 2 check characters>` to a 0600 file outside the
+  repository; it never prints the code.
+- **Resources** (runtime image, measured against `aa0532f`): +6,352 B image, +1,384 B static DRAM
+  (`s_app` 17,472 B), +64 B RTC memory; worst wake chain 3,152 B (+48 B); ownership operations at
+  most 688 B of stack (recovery apply). NVS: +15 entries.
+- **Not done here:** Noise and key generation (M1.10c), button driver and hold measurement
+  (M1.10d), factory reset (M1.10b.4, separate review), Wi-Fi store (M1.10b.4).
+- **M1.10c deliverable (protocol):** the HELLO/Info credentials-damaged flag (bit 1, O9). The
+  wire format today is unchanged (bit 0 RECOVERY_ARMED only; the codecs reject bit 1); it must be
+  added in one change to the normative specification, the shared vector generator and vectors,
+  the C codec and the Kotlin codec, never as an undocumented difference. The domain already
+  exposes the state (`dsp_app_sec_view`).
+
 ## Manual dose with durable anti-replay (M1.10b.2)
 
 **Implemented and host-tested in the domain; not reachable over BLE yet** (dispatcher and
@@ -1705,7 +1828,10 @@ security layer: M1.10c/d). Design: `docs/BLE_PROTOCOL_DESIGN.md` 7.4 (D8); wire 
   years (about 260 with format 1). A phone that keeps sending valid but refused requests adds
   about 4.8 cycles on that page per 1,000 refusals (1,000 a day: about 17,700 cycles in 10
   years): compare with the flash's rated endurance before release; no endurance figure is
-  assumed here.
+  assumed here. **Bounded since M1.10b.3:** fresh manual-dose decisions are limited per local
+  day by a durable counter (`dosing` format 3, default 32, written only in the decision write);
+  configuration, schedule and ownership writes have session-local limits (v1: a reconnect or
+  reset clears them; documented residual). See the M1.10b.3 section.
 
 ## HTTPS notification transport and connectivity session (M1.7)
 
@@ -1960,6 +2086,9 @@ Current host tests (CTest names):
 | `test_app` | Application and Power Services (M1.9b): complete wake cycles over the real domain services with fakes for the pump, KV (power cuts that abort the wake via longjmp), clock and RTC continuity, NTP, Wi-Fi, HTTP, BLE service mode and the sleep port with RTC memory. Oracles on every pump start (durable claim/marker, last start and consumption; no radio active; inside the due window; no duplicate) and every sleep (pump OFF, radios off, no HTTPS session). Retained-block codec (every bit flip rejected) and plan rules; first boot and exact stage order; scheduled, same-time (interval retry inside the window, else missed) and missed doses; manual dose and bounded queue in service mode; BLE session lifetime (180 s idle, kept while connected, idle restart after disconnect, 15 min and configurable maximum, wall-clock steps ignored, no resume past the deadline, queue lock balance and no posting outside a session); SERVICE_REQUIRED, READY, BLOCKED and refill (dose wakes suppressed and restored); Wi-Fi unavailable (backoff, dosing unaffected); CRITICAL on an existing wake and the hourly limit; BLE suspended for a due dose and resumed; DEGRADED and storage failures; clock rollback (2 h, > 7 days) and DST; SAFE_OFF/shutdown/BLE confirmation failures and the fail-safe inhibit; **power loss at every stage (2 scenarios × 4 reboot variants)**; **two 365-day simulations** (clean: every expected occurrence exactly once; chaotic: cuts, resets, Wi-Fi faults, clock steps, pump faults, button sessions) |
 | `test_app_ops` | M1.10b.1 operations through complete wakes (operations run from the BLE fake's `wait()`, i.e. the application task, like the future dispatcher), oracles on every pump start (no BLE, no operation in progress, inside the due window, never before the edit floor, no duplicate). Authorization fails closed (NULL, non-owner, bad slot: FORBIDDEN, no write; BUSY outside a session; DEGRADED storage); phone time: initial sync without catch-up, plan follows, SYNCED ignored, uncertainty and range boundaries (incl. INT64 extremes), HOLDOVER acceptance and a 2 h step back without re-running a claimed occurrence, > 7 days back and recorded holds refused, forward step skips jumped-over doses, write and clock-set failures, power cut at every write; configuration: field mask, read-only fields, stale revision, every calibration/limit field refused while READY, capacity rules, 25 field boundaries, SERVICE_REQUIRED never enables dosing, refill pending, write failure ends dosing for the wake, power cuts; schedules: CRUD across restarts with names, 30 validation and name cases, revisions, duplicate and reused IDs, capacity and paging, no resurrection after edits, edits near the due window, delete + recreate, Prague DST (fall back and spring forward), plan follows changes, write failure and power cuts in create/update/delete (old or new set, floor durable), format-1 upgrade |
 | `test_manual` | M1.10b.2 anti-replay through complete wakes (harness of `test_app_ops`; oracle on every manual pump start: durable decision bound to the request, high-water mark raised, PENDING result, no request ever twice): accept / duplicate / invalid / floor, duplicates before, during (re-entrant from the pump) and after a dose, lost response and reboot, ring eviction (UNAVAILABLE, never executed), counter gaps, independent slots, exhaustion at 2^63 - 1, fail-closed authorization and the retired queue command, refusals followed by changed conditions (readiness, refill, pump fault in the wake), storage failures at the refusal, decision and consumption writes, power loss at every write of an accepted request (landed or not) and during the pump, power loss at the refusal write, format 1 -> 2 upgrade with a cut at the upgrade write (readiness, BLOCKED, refill and ledger preserved), a format-1 in-flight marker, corrupt and unsupported records (never treated as fresh), format-2 golden bytes, BLE suspend/resume and no resume after the 15-minute deadline |
+| `test_auth` | M1.10b.3 pure units: `auth` golden bytes (built field by field), every validity rule at byte and model level, claim/add/remove/key fault/recover transitions and refusals (unchanged input), epoch increments and saturation, last_seen policy, zeroization; retained block format 2 (round trip, CRC, format 1 discarded, CRC-valid inconsistent overlays dropped while the fail-safe counter survives); overlay rules for every reset cause, expiry boundaries, deep sleeps never extending, raw clock regression, epoch binding and the degraded sentinel, abort counting; the 3-press confirmation (exact, 2, 4, long, slow, gaps, guard/queued/replayed events, out of order, deadline edges, clock back) |
+| `test_owner` | M1.10b.3 ownership through complete wakes (harness of `test_app_ops`, fake security registration): no security layer = nothing authorized and nothing written; claim with one write and only `auth` changed; forged, replayed, other-slot, other-session and wrong-role authorizations; handshake handles mismatched, expired, consumed, replayed (CLAIM and SESSION), RNG failure; invite single use (incl. an old RTC image restored), expiry boundary, every reset type, repeated resets, clock steps; revocation (only one slot, epoch + 1, manual marks untouched), self-removal, last phone, slot reuse continuing above the old high-water mark; recovery (byte-identical preservation, BLOCKED and manual marks kept, old phones gone), **two consecutive power cuts inside recovery** (every combination around the SERVICE_REQUIRED and the new `auth` write, landed or not, each followed by a reboot: old or new record only, SERVICE_REQUIRED before any new owner, no automatic or manual dose, stale authorizations refused, re-arm required, clean retry completes), arming rules (9,999 ms, timer wake, unclaimed, window edge, cancel, epoch change), confirmation failures (deadline, queued/old events, wrong transcript, single use, session end, due dose); power loss at every write of recovery and of claim/add/remove (landed or not); missing/malformed/newer `auth` block dosing and only RECOVERY heals; KEY_FAULT inhibits at once even when not durable; durable admission (limit boundaries, decided retries answered, reboot, untrusted clock, next day, rollback) and session-local limits; secret hygiene (no private key in the application state, storage buffers or RTC) |
+| `test_sec_header_guard` | M1.10b.3 configure-time boundary check for `dsp_app_sec.h` (`cmake -P`): allowed files pass, violating sources and headers are reported, the firmware tree is clean |
 | `test_endpoint_guard` | M1.9c build-time endpoint guard (`cmake -P`): runtime disabled, runtime without connectivity, connectivity without an endpoint (fails), explicit staging endpoint, production without approval (fails), production with approval; production-host spellings, non-https and host-less URLs, a look-alike host, and the guard's production host equal to the `DSP_NOTIFY_URL` default |
 | `test_bleproto` | M1.10a BLE protocol v1 codec: every record of `test-vectors/ble_protocol_v1.txt` (59 messages decoded field by field and re-encoded byte for byte, 63 rejections with their reason, encrypted headers, forward compatibility, negotiation, fragmentation for MTU 23–517, reassembly errors and timeout, Info and advertising records), canonical re-encoding of every accepted bit-flipped frame (12,968 mutations), rejection of every body truncation, 200,000 random frames and 200,000 random fragments, encoder refusals |
 | `test_platform` | M1.9c pure adapter rules (`dsp_platform_logic.c`, compiled unchanged into the firmware): reset/wake mapping for every reset kind and wake-source combination, retained block and clock continuity agreeing on every reset, sleep clamping, button pin check (strapping and non-wake pins rejected), RTC header (power-on garbage, torn header, oversize, corrupt data rejected by the domain CRC), backoff and hourly limit preserved through the RTC buffer, no clock trust from retained data; and a **two-thread** queue test (a producer thread posting 400 commands, queue full and session-closed refusals, while the application task runs a service session under a mutex): every accepted command answered exactly once. Also run separately under ThreadSanitizer (0 races; a lock-free mutant reports races) |
@@ -2028,6 +2157,7 @@ alternative to the native setup, not a requirement.
 | Integration: domain + real TLS + committed Worker + local D1 + fake Gmail (M1.8) | locally integrated (`test/integration`, 1,000 randomized sessions) | n/a | not run |
 | Dosing Service, storage layout v4, formats (M1.9a) | implemented, tested with fake pump and fake KV (power cuts, failures, randomized) | compiled, not called | not run; **no real pump driver** |
 | Application and Power Services (M1.9b) | implemented, tested with fakes (pump, KV with power cuts, clock, NTP, Wi-Fi, HTTP, BLE, sleep port, RTC memory); 365-day simulations | compiled, not called | not run; **no deep sleep, RTC, button or BLE adapters** |
+| Ownership, credential record, storage layout v5, admission (M1.10b.3) | implemented, tested through complete wakes with power cuts (`test_owner`), unit tests (`test_auth`), storage migrations (`test_storage`) and the real NVS (`test/nvs_linux` check 11) | compiled, not linked (no security layer until M1.10c) | not run |
 | Manual dose with durable anti-replay (M1.10b.2) | implemented, tested through complete wakes with power cuts (`test_manual`) and service-level tests (`test_dosing`) | compiled, not linked (no caller until the dispatcher) | not run |
 | Configuration, schedules, phone time operations (M1.10b.1) | implemented, tested through complete wakes with power cuts (`test_app_ops`) and unit tests | compiled, not linked (no caller until the dispatcher) | not run |
 | BLE protocol v1 codec (`dsp_bleproto`, M1.10a) | implemented, shared vectors + property/fuzz tests; Kotlin codec runs the same vectors | compiled, not linked (not called) | not run |
@@ -2067,8 +2197,8 @@ alternative to the native setup, not a requirement.
 **Release blocker (open):** the ESP-IDF v6.1 NVS power-loss defect (`test/nvs_linux`,
 `HARDWARE_ACCEPTANCE.md` section 9); fixed in software (`third_party/nvs_flash`), bench
 verification (9.4) pending.
-After the M1.10b.2 review: M1.10b.3–b.4 (credential record with storage layout v5, Wi-Fi
-provisioning store, reset service), only after explicit authorization;
+After the M1.10b.3 review: M1.10b.4 (Wi-Fi provisioning store; factory reset after its own
+design review), only after explicit authorization;
 then M1.10c–f (session security, NimBLE adapter, Android integration, on-device acceptance); the
 hardware review (pin map, pump gate and cutoff, button, battery measurement) is not started.
 The on-device acceptance

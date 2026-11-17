@@ -61,10 +61,10 @@ typedef enum {
 
 dsp_plat_button_t dsp_plat_button_check(int gpio);
 
-/* RTC-retained storage of the 48-byte domain block (contents validated by the domain:
- * magic, version, length, CRC, ranges). Lives in RTC_NOINIT memory: arbitrary after a
- * power-on, so the stored length is checked before anything is copied. */
-#define DSP_PLAT_RTC_CAP 64u
+/* RTC-retained storage of the domain block (120 bytes since M1.10b.3; contents validated by
+ * the domain: magic, version, length, CRC, ranges). Lives in RTC_NOINIT memory: arbitrary
+ * after a power-on, so the stored length is checked before anything is copied. */
+#define DSP_PLAT_RTC_CAP 128u
 typedef struct {
     uint32_t len;
     uint32_t len_inv; /* ~len: a torn or random header is rejected */

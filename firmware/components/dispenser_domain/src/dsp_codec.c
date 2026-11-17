@@ -683,7 +683,7 @@ size_t dsp_codec_encode_dosing(const dsp_dosing_state_t *d, uint8_t *buf, size_t
     }
     memset(buf, 0, DSP_DOSING_RECORD_BYTES);
     buf[0] = DSP_REC_TYPE_DOSING;
-    buf[1] = DSP_DOSING_FORMAT_V2;
+    buf[1] = DSP_DOSING_FORMAT_V3;
     buf[2] = d->readiness;
     buf[3] = d->flags;
     put_u32(buf + 4, d->refill_capacity_ul);
@@ -709,6 +709,8 @@ size_t dsp_codec_encode_dosing(const dsp_dosing_state_t *d, uint8_t *buf, size_t
         put_u64(e + 2, d->ring[i].seq);
         put_u32(e + 10, d->ring[i].detail);
     }
+    put_date(buf + 206, d->adm_date);
+    put_u16(buf + 210, d->adm_count);
     return DSP_DOSING_RECORD_BYTES;
 }
 
@@ -720,11 +722,15 @@ dsp_codec_status_t dsp_codec_decode_dosing(const uint8_t *buf, size_t len, dsp_d
     if (buf[0] != DSP_REC_TYPE_DOSING) {
         return DSP_CODEC_ERR_TYPE;
     }
-    if (buf[1] != DSP_CODEC_VERSION && buf[1] != DSP_DOSING_FORMAT_V2) {
+    if (buf[1] != DSP_CODEC_VERSION && buf[1] != DSP_DOSING_FORMAT_V2 &&
+        buf[1] != DSP_DOSING_FORMAT_V3) {
         return DSP_CODEC_ERR_VERSION; /* newer format: unsupported (fail closed) */
     }
-    bool v2 = buf[1] == DSP_DOSING_FORMAT_V2;
-    if (len != (v2 ? DSP_DOSING_RECORD_BYTES : DSP_DOSING_RECORD_V1_BYTES) || out == NULL) {
+    bool v3 = buf[1] == DSP_DOSING_FORMAT_V3;
+    bool v2 = v3 || buf[1] == DSP_DOSING_FORMAT_V2;
+    size_t want = v3 ? DSP_DOSING_RECORD_BYTES
+                     : (v2 ? DSP_DOSING_RECORD_V2_BYTES : DSP_DOSING_RECORD_V1_BYTES);
+    if (len != want || out == NULL) {
         return DSP_CODEC_ERR_SIZE;
     }
     dsp_dosing_state_t d;
@@ -756,9 +762,87 @@ dsp_codec_status_t dsp_codec_decode_dosing(const uint8_t *buf, size_t len, dsp_d
             d.ring[i].detail = get_u32(e + 10);
         }
     }
+    if (v3) { /* formats 1 and 2: no admission count yet (counts from 0) */
+        d.adm_date = get_date(buf + 206);
+        d.adm_count = get_u16(buf + 210);
+    }
     if (!dsp_dosing_state_is_valid(&d)) {
         return DSP_CODEC_ERR_FIELD;
     }
     *out = d;
     return DSP_CODEC_OK;
+}
+
+/* ---- Credential record (layout v5, M1.10b.3) ------------------------------------------- */
+
+size_t dsp_codec_encode_auth(const dsp_auth_t *a, uint8_t *buf, size_t cap)
+{
+    if (a == NULL || buf == NULL || cap < DSP_AUTH_RECORD_BYTES || !dsp_auth_is_valid(a)) {
+        return 0;
+    }
+    memset(buf, 0, DSP_AUTH_RECORD_BYTES);
+    buf[0] = DSP_REC_TYPE_AUTH;
+    buf[1] = DSP_CODEC_VERSION;
+    buf[2] = a->claim_state;
+    buf[3] = a->flags;
+    put_u32(buf + 4, a->owner_epoch);
+    memcpy(buf + 8, a->id_priv, DSP_AUTH_KEY_BYTES);
+    memcpy(buf + 40, a->id_pub, DSP_AUTH_KEY_BYTES);
+    put_i64(buf + 72, a->claimed_at);
+    put_i64(buf + 80, a->recovered_at);
+    put_u32(buf + 88, a->recoveries);
+    put_u32(buf + 92, a->failed_sessions);
+    for (int i = 0; i < DSP_AUTH_SLOTS; i++) {
+        const dsp_auth_slot_t *s = &a->slot[i];
+        uint8_t *p = buf + 96 + DSP_AUTH_SLOT_BYTES * i;
+        p[0] = s->used ? 1 : 0;
+        p[1] = s->name_len;
+        memcpy(p + 4, s->pub, DSP_AUTH_KEY_BYTES);
+        memcpy(p + 36, s->name, DSP_AUTH_NAME_MAX);
+        put_i64(p + 64, s->enrolled_at);
+        put_i64(p + 72, s->last_seen);
+    }
+    return DSP_AUTH_RECORD_BYTES;
+}
+
+dsp_codec_status_t dsp_codec_decode_auth(const uint8_t *buf, size_t len, dsp_auth_t *out)
+{
+    dsp_codec_status_t hs = check_header(buf, len, DSP_REC_TYPE_AUTH);
+    if (hs != DSP_CODEC_OK) {
+        return hs;
+    }
+    if (len != DSP_AUTH_RECORD_BYTES || out == NULL) {
+        return DSP_CODEC_ERR_SIZE;
+    }
+    dsp_auth_t a;
+    memset(&a, 0, sizeof a);
+    a.claim_state = buf[2];
+    a.flags = buf[3];
+    a.owner_epoch = get_u32(buf + 4);
+    memcpy(a.id_priv, buf + 8, DSP_AUTH_KEY_BYTES);
+    memcpy(a.id_pub, buf + 40, DSP_AUTH_KEY_BYTES);
+    a.claimed_at = get_i64(buf + 72);
+    a.recovered_at = get_i64(buf + 80);
+    a.recoveries = get_u32(buf + 88);
+    a.failed_sessions = get_u32(buf + 92);
+    bool ok = true;
+    for (int i = 0; i < DSP_AUTH_SLOTS; i++) {
+        const uint8_t *p = buf + 96 + DSP_AUTH_SLOT_BYTES * i;
+        dsp_auth_slot_t *s = &a.slot[i];
+        if (p[0] > 1 || p[2] != 0 || p[3] != 0 || !all_zero(p + 60, 4)) {
+            ok = false;
+        }
+        s->used = p[0] == 1;
+        s->name_len = p[1];
+        memcpy(s->pub, p + 4, DSP_AUTH_KEY_BYTES);
+        memcpy(s->name, p + 36, DSP_AUTH_NAME_MAX);
+        s->enrolled_at = get_i64(p + 64);
+        s->last_seen = get_i64(p + 72);
+    }
+    ok = ok && dsp_auth_is_valid(&a);
+    if (ok) {
+        *out = a;
+    }
+    dsp_auth_wipe(&a);
+    return ok ? DSP_CODEC_OK : DSP_CODEC_ERR_FIELD;
 }

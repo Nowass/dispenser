@@ -9,9 +9,10 @@
 #define KEY_TIME "time"
 #define KEY_NOTIFY "notify"
 #define KEY_DOSING "dosing"
+#define KEY_AUTH "auth"
 
-/* Layout written by this firmware (v4 = v3 + "dosing" record, M1.9a; v3 = v2 + "notify"
- * record, M1.5; v2 = v1 + "time"). */
+/* Layout written by this firmware (v5 = v4 + "auth" record, M1.10b.3; v4 = v3 + "dosing"
+ * record, M1.9a; v3 = v2 + "notify" record, M1.5; v2 = v1 + "time"). */
 static const dsp_layout_t LAYOUT_CURRENT = {
     .layout_version = DSP_STORAGE_LAYOUT_VERSION,
     .history_slots = DSP_STORAGE_HISTORY_SLOTS,
@@ -21,6 +22,7 @@ static const dsp_layout_t LAYOUT_CURRENT = {
 #define LAYOUT_V1_VERSION 1 /* M1.3 */
 #define LAYOUT_V2_VERSION 2 /* M1.4 */
 #define LAYOUT_V3_VERSION 3 /* M1.5 */
+#define LAYOUT_V4_VERSION 4 /* M1.9a */
 
 static dsp_storage_status_t from_kv_read(dsp_kv_status_t s)
 {
@@ -107,6 +109,7 @@ typedef enum {
     KEY_TIME_REC,
     KEY_NOTIFY_REC,
     KEY_DOSING_REC,
+    KEY_AUTH_REC,
 } key_kind_t;
 
 static size_t encode_pristine(dsp_storage_t *st, key_kind_t kind)
@@ -132,6 +135,9 @@ static size_t encode_pristine(dsp_storage_t *st, key_kind_t kind)
         dsp_dosing_state_defaults(&d); /* SERVICE_REQUIRED: never enables dosing */
         return dsp_codec_encode_dosing(&d, st->buf, sizeof st->buf);
     }
+    case KEY_AUTH_REC:
+        dsp_auth_provisioned(&st->auth_scratch); /* UNCLAIMED, epoch 0 */
+        return dsp_codec_encode_auth(&st->auth_scratch, st->buf, sizeof st->buf);
     default:
         memset(&st->notify_scratch, 0, sizeof st->notify_scratch); /* no events */
         return dsp_codec_encode_notify(&st->notify_scratch, st->buf, sizeof st->buf);
@@ -191,6 +197,14 @@ static dsp_storage_status_t check_value(dsp_storage_t *st, key_kind_t kind, cons
         }
         break;
     }
+    case KEY_AUTH_REC: {
+        cs = dsp_codec_decode_auth(v, len, &st->auth_scratch);
+        if (cs == DSP_CODEC_OK) {
+            *pristine = dsp_auth_is_provisioning(&st->auth_scratch);
+        }
+        dsp_auth_wipe(&st->auth_scratch);
+        break;
+    }
     default: {
         cs = dsp_codec_decode_notify(v, len, &st->notify_scratch);
         if (cs == DSP_CODEC_OK) {
@@ -209,11 +223,13 @@ static dsp_storage_status_t check_value(dsp_storage_t *st, key_kind_t kind, cons
 }
 
 /* Data keys (everything except the marker), in this order: h00..h31, sched, config, time,
- * notify, dosing. Layout vN has the first DATA_KEYS_VN of them. */
-#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 5)
+ * notify, dosing, auth. Layout vN has the first DATA_KEYS_VN of them. */
+#define DATA_KEYS (DSP_STORAGE_HISTORY_SLOTS + 6)
 #define DATA_KEYS_V1 (DSP_STORAGE_HISTORY_SLOTS + 2) /* h00..h31, sched, config */
 #define DATA_KEYS_V2 (DSP_STORAGE_HISTORY_SLOTS + 3) /* + time */
 #define DATA_KEYS_V3 (DSP_STORAGE_HISTORY_SLOTS + 4) /* + notify */
+#define DATA_KEYS_V4 (DSP_STORAGE_HISTORY_SLOTS + 5) /* + dosing */
+#define AUTH_INDEX DATA_KEYS_V4                      /* v5: + auth */
 
 static void data_key(size_t i, char key[8], key_kind_t *kind)
 {
@@ -232,9 +248,12 @@ static void data_key(size_t i, char key[8], key_kind_t *kind)
     } else if (i == DSP_STORAGE_HISTORY_SLOTS + 3) {
         strcpy(key, KEY_NOTIFY);
         *kind = KEY_NOTIFY_REC;
-    } else {
+    } else if (i == DSP_STORAGE_HISTORY_SLOTS + 4) {
         strcpy(key, KEY_DOSING);
         *kind = KEY_DOSING_REC;
+    } else {
+        strcpy(key, KEY_AUTH);
+        *kind = KEY_AUTH_REC;
     }
 }
 
@@ -258,9 +277,32 @@ static dsp_storage_status_t verify_keys(dsp_storage_t *st, size_t n_keys)
     return DSP_STORAGE_OK;
 }
 
+/* Classifies "auth" under a v5 marker (never fails the open by itself): missing or malformed
+ * -> CORRUPT, newer -> UNSUPPORTED; a KV read error is a real read failure. */
+static dsp_storage_status_t classify_auth(dsp_storage_t *st)
+{
+    size_t len = 0;
+    dsp_kv_status_t ks = st->kv->get(st->kv->ctx, KEY_AUTH, st->readback, DSP_RECORD_MAX_BYTES, &len);
+    if (ks == DSP_KV_NOT_FOUND || ks == DSP_KV_ERR_TOO_LARGE) {
+        st->auth_status = DSP_STORAGE_ERR_CORRUPT;
+        return DSP_STORAGE_OK;
+    }
+    if (ks != DSP_KV_OK) {
+        return from_kv_read(ks);
+    }
+    bool pristine;
+    st->auth_status = check_value(st, KEY_AUTH_REC, st->readback, len, &pristine);
+    dsp_secure_zero(st->readback, len);
+    return DSP_STORAGE_OK;
+}
+
 static dsp_storage_status_t verify_all(dsp_storage_t *st)
 {
-    dsp_storage_status_t ks = verify_keys(st, DATA_KEYS);
+    dsp_storage_status_t ks = verify_keys(st, DATA_KEYS_V4);
+    if (ks != DSP_STORAGE_OK) {
+        return ks;
+    }
+    ks = classify_auth(st);
     if (ks != DSP_STORAGE_OK) {
         return ks;
     }
@@ -416,6 +458,7 @@ dsp_storage_status_t dsp_storage_open(dsp_storage_t *st, const dsp_kv_t *kv, con
     st->open = false;
     st->provisioned_now = false;
     st->migrated_now = false;
+    st->auth_status = DSP_STORAGE_ERR_NOT_OPEN;
     if (kv == NULL || kv->get == NULL || kv->set == NULL || kv->commit == NULL ||
         !dsp_tz_is_valid(tz)) {
         return DSP_STORAGE_ERR_ARG;
@@ -438,7 +481,8 @@ dsp_storage_status_t dsp_storage_open(dsp_storage_t *st, const dsp_kv_t *kv, con
         } else if ((layout.layout_version != LAYOUT_CURRENT.layout_version &&
                     layout.layout_version != LAYOUT_V1_VERSION &&
                     layout.layout_version != LAYOUT_V2_VERSION &&
-                    layout.layout_version != LAYOUT_V3_VERSION) ||
+                    layout.layout_version != LAYOUT_V3_VERSION &&
+                    layout.layout_version != LAYOUT_V4_VERSION) ||
                    layout.history_slots != LAYOUT_CURRENT.history_slots ||
                    layout.schedule_capacity != LAYOUT_CURRENT.schedule_capacity ||
                    layout.tombstone_capacity != LAYOUT_CURRENT.tombstone_capacity) {
@@ -449,11 +493,17 @@ dsp_storage_status_t dsp_storage_open(dsp_storage_t *st, const dsp_kv_t *kv, con
             s = migrate(st, DATA_KEYS_V2, allow_provision);
         } else if (layout.layout_version == LAYOUT_V3_VERSION) {
             s = migrate(st, DATA_KEYS_V3, allow_provision);
+        } else if (layout.layout_version == LAYOUT_V4_VERSION) {
+            s = migrate(st, DATA_KEYS_V4, allow_provision);
         } else {
             s = verify_all(st);
         }
     }
     st->open = s == DSP_STORAGE_OK;
+    /* Scratch buffers may have held the credential record (key material). */
+    dsp_secure_zero(st->buf, DSP_AUTH_RECORD_BYTES);
+    dsp_secure_zero(st->readback, DSP_AUTH_RECORD_BYTES);
+    dsp_auth_wipe(&st->auth_scratch);
     return s;
 }
 
@@ -645,4 +695,41 @@ dsp_storage_status_t dsp_storage_save_dosing(dsp_storage_t *st, const dsp_dosing
         return DSP_STORAGE_ERR_INVALID;
     }
     return dsp_storage_put(st, KEY_DOSING, len);
+}
+
+/* ---- Credential record (layout v5, M1.10b.3) ------------------------------------------- */
+
+dsp_storage_status_t dsp_storage_load_auth(dsp_storage_t *st, dsp_auth_t *out)
+{
+    if (out == NULL) {
+        return DSP_STORAGE_ERR_ARG;
+    }
+    size_t len = 0;
+    dsp_storage_status_t s = dsp_storage_get(st, KEY_AUTH, &len);
+    if (s == DSP_STORAGE_OK) {
+        dsp_codec_status_t cs = dsp_codec_decode_auth(st->buf, len, out);
+        s = cs == DSP_CODEC_OK ? DSP_STORAGE_OK : dsp_storage_from_codec(cs);
+    }
+    if (st != NULL) {
+        dsp_secure_zero(st->buf, DSP_AUTH_RECORD_BYTES);
+    }
+    return s;
+}
+
+dsp_storage_status_t dsp_storage_save_auth(dsp_storage_t *st, const dsp_auth_t *a)
+{
+    if (st == NULL || !st->open) {
+        return DSP_STORAGE_ERR_NOT_OPEN;
+    }
+    if (a == NULL || !dsp_auth_is_valid(a)) {
+        return DSP_STORAGE_ERR_INVALID;
+    }
+    size_t len = dsp_codec_encode_auth(a, st->buf, sizeof st->buf);
+    dsp_storage_status_t s = len == 0 ? DSP_STORAGE_ERR_INVALID : dsp_storage_put(st, KEY_AUTH, len);
+    dsp_secure_zero(st->buf, DSP_AUTH_RECORD_BYTES);
+    dsp_secure_zero(st->readback, DSP_AUTH_RECORD_BYTES);
+    if (s == DSP_STORAGE_OK) {
+        st->auth_status = DSP_STORAGE_OK;
+    }
+    return s;
 }

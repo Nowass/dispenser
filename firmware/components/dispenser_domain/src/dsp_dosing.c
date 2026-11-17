@@ -117,6 +117,9 @@ static uint32_t state_gates(const dsp_dosing_t *d)
     if (d->s.flags & DSP_DOSING_F_MANUAL_ACTIVE) {
         g |= DSP_DOSING_G_MANUAL_ACTIVE;
     }
+    if (d->cred_inhibit) {
+        g |= DSP_DOSING_G_CREDENTIALS;
+    }
     return g;
 }
 
@@ -200,6 +203,7 @@ dsp_dosing_status_t dsp_dosing_init(dsp_dosing_t *d, dsp_storage_t *st, dsp_exec
     d->pump = pump;
     d->tz = tz;
     d->hw_max_runtime_ms = hw_max_runtime_ms;
+    d->adm_limit = DSP_MANUAL_DECISIONS_PER_DAY_DEFAULT;
     pump->force_off(pump->ctx); /* safe-off before anything else */
     if (dsp_storage_load_dosing(st, &d->s) != DSP_STORAGE_OK) {
         return DSP_DOSING_ERR_STORAGE; /* not loaded: every gate stays closed */
@@ -404,6 +408,78 @@ dsp_dosing_result_t dsp_dosing_run_automatic(dsp_dosing_t *d, const dsp_schedule
     return r;
 }
 
+/* ---- Admission (M1.10b.3) ------------------------------------------------------------------ */
+
+typedef struct {
+    dsp_date_t date;
+    uint16_t count; /* count AFTER this decision */
+} adm_t;
+
+void dsp_dosing_set_admission_limit(dsp_dosing_t *d, uint16_t per_day)
+{
+    if (d == NULL) {
+        return;
+    }
+    if (per_day == 0) {
+        per_day = DSP_MANUAL_DECISIONS_PER_DAY_DEFAULT;
+    }
+    d->adm_limit = per_day > DSP_MANUAL_DECISIONS_PER_DAY_MAX ? DSP_MANUAL_DECISIONS_PER_DAY_MAX
+                                                             : per_day;
+}
+
+void dsp_dosing_set_credentials_inhibit(dsp_dosing_t *d, bool inhibit)
+{
+    if (d != NULL) {
+        d->cred_inhibit = inhibit;
+    }
+}
+
+/* Effective count now and the values the next decision write stores. The count restarts only
+ * for a trusted local date AFTER the stored one (no restart without trust or after rollback). */
+static bool admission(const dsp_dosing_t *d, dsp_clock_t clock, adm_t *next, uint32_t *retry_s)
+{
+    dsp_date_t today;
+    bool trusted = clock.valid && dsp_utc_to_local_date(d->tz, clock.now, &today);
+    bool restart = trusted && (d->s.adm_date.year == 0 || dsp_date_compare(today, d->s.adm_date) > 0);
+    uint16_t count = restart ? 0 : d->s.adm_count;
+    uint16_t limit = d->adm_limit != 0 ? d->adm_limit : DSP_MANUAL_DECISIONS_PER_DAY_DEFAULT;
+    if (retry_s != NULL) {
+        *retry_s = 0;
+        if (trusted) {
+            /* seconds until the next local midnight (approximate across DST: refreshed by the
+             * date rule, never early) */
+            int32_t off = 0;
+            if (dsp_tz_offset_at(d->tz, clock.now, &off)) {
+                int64_t local = clock.now + off;
+                int64_t into = ((local % 86400) + 86400) % 86400;
+                *retry_s = (uint32_t)(86400 - into);
+            }
+        }
+    }
+    if (count >= limit) {
+        return false;
+    }
+    if (next != NULL) {
+        next->date = restart ? today : d->s.adm_date;
+        next->count = (uint16_t)(count + 1);
+    }
+    return true;
+}
+
+bool dsp_dosing_manual_admissible(const dsp_dosing_t *d, dsp_clock_t clock, uint32_t *retry_s)
+{
+    if (retry_s != NULL) {
+        *retry_s = 0;
+    }
+    return d != NULL && d->loaded && admission(d, clock, NULL, retry_s);
+}
+
+static void apply_admission(dsp_dosing_state_t *next, adm_t a)
+{
+    next->adm_date = a.date;
+    next->adm_count = a.count;
+}
+
 /* Writes the result of request (slot, req) into the ring: updates its entry, or takes the next
  * entry that is not the active marker's PENDING one (the oldest is evicted). */
 static void ring_set(dsp_dosing_state_t *s, uint8_t slot, uint64_t req, uint8_t state,
@@ -449,7 +525,7 @@ static void clear_marker(dsp_dosing_state_t *next, uint8_t final_state)
 static dsp_dosing_result_t manual_execute(dsp_dosing_t *d, uint8_t slot, uint64_t req,
                                           uint32_t volume_ul, dsp_clock_t clock,
                                           dsp_dosing_result_t r, dsp_date_t ledger_date,
-                                          uint32_t ledger_sum, bool *decided)
+                                          uint32_t ledger_sum, adm_t adm, bool *decided)
 {
     *decided = false;
     dsp_notify_clock_t nc = nclock_of(clock);
@@ -474,6 +550,7 @@ static dsp_dosing_result_t manual_execute(dsp_dosing_t *d, uint8_t slot, uint64_
     next.marker_slot = slot;
     next.marker_req = req;
     ring_set(&next, slot, req, DSP_MRES_PENDING, volume_ul);
+    apply_admission(&next, adm); /* counted in the decision write itself */
     if (!save_state(d, &next)) {
         (void)dsp_exec_finish(d->ex, &token, DSP_HISTORY_FAILED);
         r.status = DSP_DOSING_ERR_STORAGE; /* not durable (or unknown): not executed */
@@ -562,11 +639,13 @@ uint64_t dsp_dosing_manual_floor(const dsp_dosing_t *d, uint8_t slot)
 /* Durable refusal: manual_hw[slot] = seq and the ring entry in one write. */
 /* always inline: its state copy then shares stack slots with the disjoint execution path */
 __attribute__((always_inline)) static inline dsp_manual_outcome_t
-refuse(dsp_dosing_t *d, uint8_t slot, uint64_t seq, uint32_t code, dsp_dosing_result_t dose)
+refuse(dsp_dosing_t *d, uint8_t slot, uint64_t seq, uint32_t code, dsp_dosing_result_t dose,
+       adm_t adm)
 {
     dsp_dosing_state_t next = d->s;
     next.manual_hw[slot] = seq;
     ring_set(&next, slot, seq, DSP_MRES_REFUSED, code);
+    apply_admission(&next, adm); /* counted in the refusal write itself */
     dsp_manual_outcome_t o;
     if (save_state(d, &next)) {
         o = outcome(DSP_MANUAL_REFUSED, DSP_MRES_REFUSED, code);
@@ -603,10 +682,15 @@ dsp_manual_outcome_t dsp_dosing_manual_request(dsp_dosing_t *d, uint8_t slot, ui
         o.dose.gates = DSP_DOSING_G_DEGRADED;
         return o;
     }
+    /* Admission (M1.10b.3): after the decided lookup, before any decision; nothing written. */
+    adm_t adm;
+    if (!admission(d, clock, &adm, NULL)) {
+        return outcome(DSP_MANUAL_RATE_LIMITED, DSP_MRES_NOT_DECIDED, 0);
+    }
     /* Rule 2: evaluated exactly once. */
     if (app_refusal != 0) {
         r.status = DSP_DOSING_REFUSED;
-        return refuse(d, slot, seq, app_refusal, r);
+        return refuse(d, slot, seq, app_refusal, r, adm);
     }
     dsp_config_t cfg;
     dsp_date_t ledger_date;
@@ -617,18 +701,18 @@ dsp_manual_outcome_t dsp_dosing_manual_request(dsp_dosing_t *d, uint8_t slot, ui
             o.dose = r;
             return o;
         }
-        return refuse(d, slot, seq, DSP_MREFUSE_GATES, r);
+        return refuse(d, slot, seq, DSP_MREFUSE_GATES, r, adm);
     }
     if (!prepare_limits(d, clock, volume_ul, &cfg, &r, &ledger_date, &ledger_sum)) {
         uint32_t code = r.status == DSP_DOSING_LIMIT ? DSP_MREFUSE_LIMIT : DSP_MREFUSE_GATES;
-        return refuse(d, slot, seq, code, r);
+        return refuse(d, slot, seq, code, r, adm);
     }
     if (!dsp_reservoir_covers(&cfg, volume_ul)) {
         r.status = DSP_DOSING_NOT_COVERED; /* refused; the latch is for automatic doses */
-        return refuse(d, slot, seq, DSP_MREFUSE_NOT_COVERED, r);
+        return refuse(d, slot, seq, DSP_MREFUSE_NOT_COVERED, r, adm);
     }
     bool decided = false;
-    r = manual_execute(d, slot, seq, volume_ul, clock, r, ledger_date, ledger_sum, &decided);
+    r = manual_execute(d, slot, seq, volume_ul, clock, r, ledger_date, ledger_sum, adm, &decided);
     if (!decided) {
         dsp_manual_outcome_t o = outcome(DSP_MANUAL_NOT_DURABLE, DSP_MRES_NOT_DECIDED, 0);
         o.dose = r;

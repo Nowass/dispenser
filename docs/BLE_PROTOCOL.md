@@ -123,7 +123,7 @@ Error body (any type, flags `RESPONSE|ERROR`): `code u8, detail u32, aux u32`.
 | Field | Values |
 |---|---|
 | `claim_state` | 0 UNCLAIMED, 1 CLAIMED |
-| HELLO response `flags` | bit 0 RECOVERY_ARMED; others 0 |
+| HELLO response `flags` | bit 0 RECOVERY_ARMED; others 0 (v1.0 wire format as implemented; **pending M1.10c amendment:** bit 1 CREDENTIALS_DAMAGED, approved decision O9, to be added to this table, the Info record and advertising flags, the vector generator and vectors, and the C and Kotlin codecs in one change) |
 | `purpose` | 1 SESSION, 2 CLAIM, 3 ADD, 4 RECOVERY |
 | `msg_index` | 0–2 |
 | `readiness` | 1 READY, 2 SERVICE_REQUIRED |
@@ -245,6 +245,8 @@ refusal the error body `code, detail, aux` below.
 |---|---|---|---|
 | no owner authorization | 5 FORBIDDEN | 0 | 0 |
 | not inside a service session | 6 BUSY | 0 | 0 |
+| rate limited (M1.10b.3: durable manual-dose admission per day, session-local operation and write limits); the request is NOT decided | 6 BUSY | 1 | seconds until a retry can succeed (0 = unknown) |
+| a recovery confirmation is pending on the device (only END_SESSION) | 6 BUSY | 2 | 0 |
 | state precondition | 7 REFUSED | 1 = field changeable only in SERVICE_REQUIRED, 2 = refill pending, 3 = device time not trusted (send SET_TIME first) | refused `field_mask` bits (detail 1) |
 | schedule `amount_ul` above `max_dose_ul` | 8 LIMIT | 1 (per-dose limit) | `max_dose_ul` |
 | 16 schedules stored | 8 LIMIT | 0 | 16 |

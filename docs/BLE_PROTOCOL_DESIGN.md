@@ -270,6 +270,12 @@ All by the Noise specification, with our framing rules:
   never needed for dosing (autonomous operation continues).
 - If J-PAKE with a short code were ever chosen, persistent exponential cool-down would become
   mandatory, with the lock-out DoS trade-off documented.
+- **Flash wear by authenticated requests (found in the M1.10b.2 review):** every durable refusal
+  and every configuration, schedule or ownership change is an NVS write; an enrolled phone (bug
+  or misuse) can repeat them without bound inside its sessions. Proposed (M1.10c): a weighted
+  durable-write budget in the Application Service, checked after the decided-request lookup and
+  answered `BUSY`/rate limited without deciding the request (`docs/OWNERSHIP_DESIGN.md`
+  section 11).
 
 ---
 
@@ -899,9 +905,10 @@ quality with RF on; suspend/resume latency around a dose; advertising power; but
 |---|---|---|---|
 | **M1.10a** (done: gate 34/34, codecs + shared vectors, reproduced from a clean worktree) | **Gate first:** fetch the pinned noise-c/libsodium sources, run their unit and official vector tests on the host (ChaChaPoly/25519/SHA-256 incl. XXpsk3 and IK), cross-build them for the ESP32-C3 with the name table enabled and measure flash/heap/stack, and build them with the Android NDK (no app integration yet). Then: normative `docs/BLE_PROTOCOL.md` and the normative security specification; shared codec vectors with an independent Python generator; C codec `dsp_bleproto` and Kotlin codec; fuzz harness. No security code of our own. | no | gate results reported and accepted; codec vectors pass on both sides; security spec approved |
 | **M1.10b.1** (implemented, in review) | M1 configuration, M2 schedules (names, edit floor), M3 phone time behind `dsp_app`; `sched` format 2 inside layout v4; authorization as an explicit, fail-closed input | no | host suites incl. power cuts (`test_app_ops`) |
-| **M1.10b.2** (implemented, in review) | M4 per-slot manual-dose anti-replay (7.4): `dosing` format 2 (layout v4), `dsp_app_manual_dose`/`get_result`/`manual_floor`, Status `manual_floor` | no | host suites incl. power cuts (`test_manual`) |
-| **M1.10b.3–b.4** | credential record with storage layout v5 and migration; M6 Wi-Fi store; M7 reset service | no | host suites incl. migrations and power cuts |
-| **M1.10c** | `dsp_blesec`: integration of the pinned noise-c (RNG hook, key handling, framing); credential record (M5); enrollment, sessions, invites, removal, recovery state machine; authorization tests; cross-check through the real application; JNI binding with the same vectors on Android | no | official and cross vectors pass on host, target and Android; authorization tests pass |
+| **M1.10b.2** (done, `aa0532f`) | M4 per-slot manual-dose anti-replay (7.4): `dosing` format 2 (layout v4), `dsp_app_manual_dose`/`get_result`/`manual_floor`, Status `manual_floor` | no | host suites incl. power cuts (`test_manual`) |
+| **M1.10b.3** (done) | credential record with storage layout v5 and migration, ownership operations and transitions, RTC invite/recovery arm, ownership epoch and KEY_FAULT, durable manual-dose admission (`dosing` format 3), setup-code provisioning (`docs/OWNERSHIP_DESIGN.md`) | no | host suites incl. migrations and power cuts (`test_owner`, `test_auth`, `test_storage`), real NVS (`test/nvs_linux` check 11) |
+| **M1.10b.4** | M6 Wi-Fi store; M7 factory reset (separate design review) | no | host suites incl. power cuts |
+| **M1.10c** | `dsp_blesec`: integration of the pinned noise-c (RNG hook, key handling, framing) on top of the M1.10b.3 security-layer interface (`dsp_app_sec.h`); enrollment, sessions, invites, removal, recovery handshakes; **security-layer-issued authorization verified by every externally reachable operation** (configuration, schedules, time, manual dose, REFILL, SET_READINESS: a caller-provided authorization must never suffice); **HELLO/Info credentials-damaged flag (bit 1, O9) in the specification, vector generator, C and Kotlin codecs together**; authorization tests; cross-check through the real application; JNI binding with the same vectors on Android | no | official and cross vectors pass on host, target and Android; authorization tests pass |
 | **M1.10d** | NimBLE adapter (GATT, advertising with service data, fragmentation, flow control, suspend/resume, `connected()`), button events (M10) behind the reviewed pin, off by default; size/heap gate | compile only | builds pass the budget gate |
 | **M1.10e** | Android: Companion Device Manager, native Noise (JNI) with Keystore wrapping, claim via QR, sessions, schedules (`DEVICE_APPLIED`), refill, manual dose with confirmation and per-slot `seq`, phones/invites/recovery UI, Wi-Fi provisioning | no (fake transport) | JVM + instrumented tests |
 | **M1.10f** | On-device acceptance with real phones (pairing dialogs absent, timing, heap, RNG, power) | yes | `HARDWARE_ACCEPTANCE.md` BLE section |

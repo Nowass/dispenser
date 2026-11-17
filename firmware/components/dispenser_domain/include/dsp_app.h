@@ -35,7 +35,9 @@
 #include <stdint.h>
 
 #include "dsp_connectivity.h"
+#include "dsp_auth.h"
 #include "dsp_dosing.h"
+#include "dsp_owner.h"
 #include "dsp_power.h"
 #include "dsp_schedule_repo.h"
 
@@ -76,12 +78,20 @@ typedef enum {
  * REFILL and SET_READINESS still carry no authorization: they get it with the security layer
  * (M1.10c). Until then these legacy queue paths MUST NOT become externally reachable: no
  * platform BLE task may post them (none exists), and the M1.10c/d dispatcher must route them
- * through an owner authorization like the other dsp_app operations. */
+ * through an owner authorization like the other dsp_app operations.
+ *
+ * INTEGRATION BLOCKER (M1.10b.3 review): configuration, schedule, phone-time, manual-dose,
+ * REFILL and SET_READINESS operations must not become reachable through BLE before M1.10c
+ * provides authorization ISSUED by the security layer (dsp_app_sec_lookup / enroll / recovery,
+ * checked like the ownership operations: session ID + token + epoch). A caller-provided or
+ * hand-crafted {OWNER, slot} must never be sufficient for an externally reachable operation;
+ * these operations accept it today only because nothing external can call them. */
 typedef enum {
     DSP_CMD_STATUS = 1,
     DSP_CMD_REFILL = 3,        /* capacity_ul, remaining_ul */
     DSP_CMD_SET_READINESS = 4, /* readiness */
     DSP_CMD_END_SESSION = 5,
+    DSP_CMD_BUTTON = 6,        /* M1.10b.3: a debounced button event (button), no response */
 } dsp_app_cmd_kind_t;
 #define DSP_CMD_RETIRED_MANUAL_DOSE 2
 
@@ -91,6 +101,7 @@ typedef struct {
     uint32_t capacity_ul;
     uint32_t remaining_ul;
     uint8_t readiness; /* dsp_readiness_t */
+    dsp_button_event_t button; /* DSP_CMD_BUTTON */
 } dsp_app_cmd_t;
 
 typedef enum {
@@ -160,6 +171,21 @@ typedef struct {
     dsp_time_reading_t (*reading)(void *ctx, dsp_utc_t last_sync_utc);
 } dsp_time_port_t;
 
+/* Registration of the security layer (M1.10c, dsp_blesec). NULL until it exists: then no
+ * ownership authorization can be produced at all (every dsp_app_sec_* call and every owner
+ * operation is FORBIDDEN). random: the hardware RNG (esp_fill_random with RF on), used for
+ * session IDs, authorization tokens, handshake nonces and invite tokens; false = unavailable. */
+typedef struct {
+    void *ctx;
+    bool (*random)(void *ctx, uint8_t *out, size_t len);
+} dsp_app_security_t;
+
+/* Session-local limits (M1.10b.3, v1: reset by a reconnect or a reset; documented). */
+#define DSP_APP_SESSION_OPS_MAX_DEFAULT 256u
+#define DSP_APP_SESSION_WRITES_MAX_DEFAULT 48u /* a full setup: 16 schedules + config + time */
+#define DSP_APP_WRITES_PER_MINUTE_DEFAULT 16u
+#define DSP_APP_SESSION_MANUAL_MAX_DEFAULT 8u
+
 typedef struct {
     const dsp_kv_t *kv;
     const dsp_tz_t *tz;
@@ -180,6 +206,16 @@ typedef struct {
     int64_t max_sleep_s;           /* 0 = DSP_POWER_MAX_SLEEP_DEFAULT_S */
     uint32_t service_idle_s;       /* 0 = DSP_APP_SERVICE_IDLE_DEFAULT_S */
     uint32_t service_max_s;        /* 0 = DSP_APP_SERVICE_MAX_DEFAULT_S (>= idle) */
+    /* M1.10b.3 */
+    const dsp_app_security_t *security; /* NULL = no security layer (no ownership changes) */
+    uint32_t recovery_hold_ms;     /* wake input: verified continuous button hold from the
+                                      first sample after this boot (button driver, M1.10d) */
+    uint16_t manual_decisions_per_day; /* 0 = DSP_MANUAL_DECISIONS_PER_DAY_DEFAULT (build-time
+                                          configuration, never changed over BLE) */
+    uint16_t session_ops_max;      /* 0 = DSP_APP_SESSION_OPS_MAX_DEFAULT */
+    uint16_t session_writes_max;   /* 0 = DSP_APP_SESSION_WRITES_MAX_DEFAULT */
+    uint16_t writes_per_minute;    /* 0 = DSP_APP_WRITES_PER_MINUTE_DEFAULT */
+    uint16_t session_manual_max;   /* 0 = DSP_APP_SESSION_MANUAL_MAX_DEFAULT */
 } dsp_app_config_t;
 
 typedef enum {
@@ -190,7 +226,16 @@ typedef enum {
     DSP_BLE_END_RESUME,     /* resume refused by the platform */
     DSP_BLE_END_CLOCK,      /* monotonic clock went backwards (ends conservatively) */
     DSP_BLE_END_START_FAILED,
+    DSP_BLE_END_REVOKED,    /* M1.10b.3: the session's own phone slot was removed */
 } dsp_app_ble_end_t;
+
+/* M1.10b.3: credential state (docs/OWNERSHIP_DESIGN.md 3.1). */
+typedef enum {
+    DSP_CRED_UNKNOWN = 0,   /* storage not loaded */
+    DSP_CRED_UNCLAIMED,     /* valid record, no owner */
+    DSP_CRED_CLAIMED,       /* valid record, >= 1 phone, no key fault */
+    DSP_CRED_DEGRADED,      /* missing / corrupt / unsupported / KEY_FAULT: dosing blocked */
+} dsp_cred_state_t;
 
 /* ---- Report --------------------------------------------------------------------------- */
 
@@ -226,6 +271,14 @@ typedef struct {
     bool retained_saved;
     bool slept;
     bool fail_safe;
+    /* M1.10b.3 */
+    uint8_t cred_state;         /* dsp_cred_state_t after LOAD (and after ownership changes) */
+    bool cred_inhibit;          /* dosing blocked by the credentials gate in this wake */
+    bool key_fault;             /* an identity key fault was reported in this wake */
+    bool recovery_armed;        /* the recovery arm was taken in this wake */
+    bool overlays_cleared;      /* invite/arm cleared by a reset, a clock step or an anomaly */
+    size_t owner_changes;       /* durable ownership changes in this wake */
+    size_t rate_limited;        /* operations answered BUSY/RATE_LIMITED */
     size_t trace_len;
     uint8_t trace[DSP_APP_TRACE_MAX]; /* dsp_app_stage_t in execution order */
 } dsp_app_report_t;
@@ -244,7 +297,9 @@ typedef struct dsp_app dsp_app_t;
  * Authorization is an explicit input produced by the security layer (M1.10c). Until that
  * layer exists nothing produces an owner authorization, so every operation fails closed:
  * a NULL authorization or any role other than OWNER returns DSP_OP_FORBIDDEN before any
- * storage access.
+ * storage access. NOTE: these operations do not yet verify that the authorization was ISSUED
+ * (session ID, token, epoch) as the M1.10b.3 ownership operations do; M1.10c must add that
+ * check before any of them is reachable over BLE (see the integration blocker above).
  *
  * A storage WRITE failure (old or new value durable) answers DSP_OP_STORAGE and ends dosing
  * for the rest of the wake (as a Dosing Service storage failure does); the schedule
@@ -263,6 +318,12 @@ typedef enum {
 typedef struct {
     uint8_t role; /* dsp_app_role_t, set by the security layer after a verified session */
     uint8_t slot; /* enrolled phone slot, 0..DSP_APP_PHONE_SLOTS - 1 */
+    /* M1.10b.3: evidence of an authorization ISSUED by the Application Service to the security
+     * layer (dsp_app_sec_lookup / enroll / recovery). Ownership operations require it to match
+     * the issued one for the current session and ownership epoch; the M1.10b.1/b.2 operations
+     * do not check it yet (M1.10c routes every request through an issued authorization). */
+    uint32_t session_id;
+    uint64_t token;
 } dsp_app_auth_t;
 
 typedef enum {
@@ -285,13 +346,23 @@ typedef enum {
                                                                               wire DUPLICATE */
     DSP_OP_NOT_COVERED, /* manual dose: the reservoir estimate does not cover it
                                                                               wire NOT_COVERED */
+    DSP_OP_SLOTS_FULL,  /* M1.10b.3: four phones enrolled                     wire SLOTS_FULL */
 } dsp_app_op_status_t;
+
+/* DSP_OP_BUSY details (M1.10b.3; detail 0 = not inside a service session). */
+enum {
+    DSP_OP_B_SESSION = 0,
+    DSP_OP_B_RATE_LIMITED = 1, /* aux = seconds until a retry can succeed (0 = unknown) */
+    DSP_OP_B_CONFIRMING = 2,   /* a recovery confirmation is pending on the device */
+};
 
 enum {
     DSP_OP_R_READY = 1,          /* field changeable only while SERVICE_REQUIRED */
     DSP_OP_R_REFILL_PENDING = 2, /* an interrupted refill must be completed first */
     DSP_OP_R_CLOCK = 3,          /* time not trusted: create / timing edit / re-enable need a
                                     trusted clock for the edit floor (send SET_TIME first) */
+    DSP_OP_R_LAST_SLOT = 4,      /* M1.10b.3: the last enrolled phone cannot be removed */
+    DSP_OP_R_NOT_CLAIMED = 5,    /* M1.10b.3: ownership state does not allow it */
 };
 
 typedef struct {
@@ -432,6 +503,40 @@ dsp_app_op_result_t dsp_app_get_result(dsp_app_t *app, const dsp_app_auth_t *aut
 dsp_app_op_result_t dsp_app_manual_floor(dsp_app_t *app, const dsp_app_auth_t *auth,
                                          uint64_t *floor);
 
+/* ---- M1.10b.3: ownership (docs/OWNERSHIP_DESIGN.md, approved revision 2) --------------------
+ *
+ * Owner operations for the future dispatcher. Same session/role preconditions as above, and in
+ * addition the authorization must be one ISSUED by this service in the current session and
+ * ownership epoch (auth->session_id, auth->token): a hand-made {OWNER, slot} is FORBIDDEN.
+ * Without a registered security layer (cfg->security == NULL, every build before M1.10c) no
+ * such authorization can exist. Writes are single atomic "auth" record writes. */
+typedef struct {
+    uint8_t slot;
+    uint8_t name_len;
+    char name[DSP_AUTH_NAME_MAX];
+    dsp_utc_t enrolled_at;
+    dsp_utc_t last_seen;
+    bool is_self;
+} dsp_app_phone_t;
+
+dsp_app_op_result_t dsp_app_phones_list(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                        dsp_app_phone_t out[DSP_APP_PHONE_SLOTS], uint8_t *n);
+/* Removes one slot (also the caller's own; never the last). epoch + 1, so every invite and arm
+ * of the previous epoch becomes invalid. *session_ends: the caller's own slot was removed (the
+ * session ends after the response). */
+dsp_app_op_result_t dsp_app_phone_remove(dsp_app_t *app, const dsp_app_auth_t *auth, uint8_t slot,
+                                         bool *session_ends);
+/* One active invite (replaces an older one): 16-byte token from the device RNG, valid for
+ * DSP_OWNER_INVITE_S, bound to the current epoch, kept in RTC memory only (saved at once). */
+dsp_app_op_result_t dsp_app_invite_create(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                          uint8_t token_out[16], uint16_t *expires_s);
+dsp_app_op_result_t dsp_app_invite_cancel(dsp_app_t *app, const dsp_app_auth_t *auth);
+dsp_app_op_result_t dsp_app_recovery_cancel(dsp_app_t *app, const dsp_app_auth_t *auth);
+
+/* Producer side for button events (button driver, M10): queued like dsp_app_post; consumed by
+ * the recovery confirmation only (FR-026 gestures are not part of this milestone). */
+bool dsp_app_post_button(dsp_app_t *app, const dsp_button_event_t *ev);
+
 /* Service-session lifetime state (monotonic milliseconds). Internal. */
 typedef struct {
     uint64_t start_ms;
@@ -440,7 +545,42 @@ typedef struct {
     uint64_t idle_ms;
     bool was_connected;
     uint8_t end;               /* dsp_app_ble_end_t */
+    /* M1.10b.3: identity and session-local limits */
+    uint32_t session_id;       /* random per session (0 without a security layer) */
+    uint16_t ops;
+    uint16_t writes;
+    uint16_t manual;
+    uint16_t win_writes;
+    uint64_t win_start_ms;
+    bool failed_hs_counted;    /* failed_sessions written at most once per session */
 } dsp_app_session_t;
+
+/* Ownership runtime state (RAM; internal). The cache never holds the private key. */
+typedef struct {
+    uint8_t cred;              /* dsp_cred_state_t */
+    uint32_t epoch;            /* durable owner_epoch, DSP_OWNER_EPOCH_DEGRADED when damaged */
+    bool key_fault;            /* inhibits dosing for the rest of the wake even if not durable */
+    dsp_auth_t cache;          /* public view of the record (id_priv always zero) */
+    /* issued authorization (one per session) */
+    bool authz_valid;
+    uint8_t authz_slot;
+    uint32_t authz_session;
+    uint64_t authz_token;
+    uint32_t authz_epoch;
+    /* the single handshake in progress (dsp_app_sec_admit -> one commit) */
+    bool hs_active;
+    uint8_t hs_purpose;
+    uint32_t hs_session;
+    uint64_t hs_nonce;
+    uint64_t hs_start_ms;
+    uint32_t hs_epoch;
+    /* recovery confirmation, bound to (session, transcript) */
+    dsp_confirm_t confirm;
+    /* raw-vs-monotonic reference for clock-step detection within the wake */
+    bool ref_valid;
+    dsp_utc_t ref_raw;
+    uint64_t ref_mono;
+} dsp_app_owner_t;
 
 /* Caller-owned, statically allocated application state. Treat as opaque. */
 struct dsp_app {
@@ -465,6 +605,7 @@ struct dsp_app {
     size_t q_count;
     bool storage_fault; /* M1.10b.1: an operation's write failed: no dosing in this wake */
     dsp_app_session_t ss; /* current service session (valid while accepting) */
+    dsp_app_owner_t own;  /* M1.10b.3 */
     dsp_app_report_t rep;
 };
 

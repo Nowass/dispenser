@@ -14,8 +14,16 @@ firmware/test/nvs_linux/run_checks.sh --matrix   # + two-cut matrices (about 30-
 
 `run_checks.sh` requires the patched component to pass everything AND the unpatched component
 to still reproduce the known defects (negative control); see its header. Modes of the program
-(`MODE`): unset = checks 1-5, `matrix` = 6-8, `dump`/`load` = 9 (images exchanged between the
-components), `ab` = 10 (redundant-record alternative, kept for comparison).
+(`MODE`): unset = checks 1-5 and 11, `matrix` = 6-8, `dump`/`load` = 9 (images exchanged between
+the components), `ab` = 10 (redundant-record alternative, kept for comparison).
+
+**Check 11 (M1.10b.3, layout v5):** the v4 → v5 migration of a populated device (maximum-size
+schedule set, no `auth`, v4 marker) and two `auth` record writes (provisioned → claimed, claimed →
+two phones), each cut at every flash write/erase cycle. Patched component (2026-11-17): migration
+153 cycles, 154 cuts, every reopen as v5 with the provisioned `auth` and every other key intact;
+`auth` writes 127 cycles, 128 cuts each, always exactly the old (123) or the new (5) record. The
+unpatched component loses the record at cycle 115 of each `auth` write (the known defect, also a
+negative control). Check 1 with layout v5: dispenser namespace 324 entries (budget 325).
 
 Prerequisite: the host's libbsd development headers (`libbsd-dev`), which ESP-IDF's linux target
 needs. Without root they can be unpacked locally (`apt-get download libbsd-dev && dpkg-deb -x

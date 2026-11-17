@@ -429,7 +429,7 @@ static const dsp_pump_port_t PUMP = {NULL, pump_run, pump_off, pump_is_off};
 /* ---- Power port: wake cause, RTC memory, sleep, fail-safe -------------------------------- */
 
 static dsp_wake_cause_t g_cause;
-static uint8_t rtc[64];
+static uint8_t rtc[DSP_POWER_RETAINED_BYTES];
 static size_t rtc_len;
 static bool rtc_save_fails;
 static int sleeps, fail_safes, sleep_violations;
@@ -510,7 +510,7 @@ static struct {
  * capacity_ul); every one gets the next request ID of owner slot 0, and its result is recorded
  * as a response of kind TEST_MANUAL (status mapped to the former queue response codes). */
 #define TEST_MANUAL 200
-static const dsp_app_auth_t OWNER = {DSP_APP_ROLE_OWNER, 0};
+static const dsp_app_auth_t OWNER = {DSP_APP_ROLE_OWNER, 0, 0, 0};
 static uint64_t manual_seq;
 static void ble_respond(void *ctx, const dsp_app_response_t *r);
 static dsp_config_t peek_cfg(void);

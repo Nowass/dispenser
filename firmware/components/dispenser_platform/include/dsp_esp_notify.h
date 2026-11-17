@@ -40,6 +40,10 @@ extern "C" {
 #define DSP_NVS_SEC_KEY_SSID "wifi_ssid"
 #define DSP_NVS_SEC_KEY_PASS "wifi_pass"
 #define DSP_NVS_SEC_KEY_TOKEN "api_token"
+/* M1.10b.3: the 128-bit setup code (16-byte blob, provision_dev_secrets.py); read only by the
+ * M1.10c security layer (PSK input), never logged, never returned over BLE. */
+#define DSP_NVS_SEC_KEY_SETUP_CODE "setup_code"
+#define DSP_SETUP_CODE_BYTES 16
 
 /* HTTP port singleton. url must start with "https://" (else false). */
 bool dsp_esp_http_configure(const char *url);

@@ -96,6 +96,9 @@ bool dsp_dosing_state_is_valid(const dsp_dosing_state_t *s)
     if (!instant_ok(s->last_start_utc)) {
         return false;
     }
+    if (!date_zero(s->adm_date) && !dsp_date_is_valid(s->adm_date)) {
+        return false;
+    }
     /* Sequence numbers in use are below next_seq. */
     if ((s->refill_seq != 0 && s->refill_seq >= s->next_seq) ||
         (s->manual_seq != 0 && s->manual_seq >= s->next_seq)) {
@@ -140,7 +143,8 @@ bool dsp_dosing_state_equal(const dsp_dosing_state_t *a, const dsp_dosing_state_
            a->next_seq == b->next_seq && a->manual_hw[0] == b->manual_hw[0] &&
            a->manual_hw[1] == b->manual_hw[1] && a->manual_hw[2] == b->manual_hw[2] &&
            a->manual_hw[3] == b->manual_hw[3] && a->marker_slot == b->marker_slot &&
-           a->marker_req == b->marker_req && a->ring_next == b->ring_next && rings_equal(a, b);
+           a->marker_req == b->marker_req && a->ring_next == b->ring_next && rings_equal(a, b) &&
+           dsp_date_compare(a->adm_date, b->adm_date) == 0 && a->adm_count == b->adm_count;
 }
 
 const dsp_manual_result_t *dsp_dosing_state_find_result(const dsp_dosing_state_t *s, uint8_t slot,
