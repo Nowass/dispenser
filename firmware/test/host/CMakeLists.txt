@@ -89,6 +89,10 @@ target_compile_options(test_manual PRIVATE -Wno-unused-function)
 # M1.10b.3: credential record, RTC overlays, confirmation (pure) and ownership through the
 # Application Service (reuses the test_app_ops harness).
 dsp_add_host_test(test_auth test_auth.c)
+# M1.10c.1: pre-authentication protocol gate and the authorization boundary through wakes.
+dsp_add_host_test(test_link test_link.c)
+dsp_add_host_test(test_session test_session.c support/fake_kv.c)
+target_compile_options(test_session PRIVATE -Wno-unused-function)
 dsp_add_host_test(test_owner test_owner.c support/fake_kv.c)
 target_compile_options(test_owner PRIVATE -Wno-unused-function)
 # M1.9c: the pure platform adapter logic (compiled unchanged into the firmware component;

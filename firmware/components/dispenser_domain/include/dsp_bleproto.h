@@ -102,7 +102,17 @@ typedef enum {
     DSP_BLE_E_DUPLICATE,
     DSP_BLE_E_HANDSHAKE_FAILED,
     DSP_BLE_E_SLOTS_FULL,
+    DSP_BLE_E_UNAVAILABLE, /* 20: a recognized operation this firmware does not provide (M1.10c.1) */
 } dsp_ble_error_code_t;
+
+/* HELLO / Info flags (protocol 5.1, 7.1) and advertising flags (7.1). */
+#define DSP_BLE_HELLO_F_RECOVERY_ARMED 0x01u
+#define DSP_BLE_HELLO_F_CREDENTIALS_DAMAGED 0x02u /* M1.10c.1 (decision O9) */
+#define DSP_BLE_HELLO_F_ALL 0x03u
+#define DSP_BLE_ADV_F_CLAIMED 0x01u
+#define DSP_BLE_ADV_F_RECOVERY_ARMED 0x02u
+#define DSP_BLE_ADV_F_CREDENTIALS_DAMAGED 0x04u
+#define DSP_BLE_ADV_F_ALL 0x07u
 
 /* Codec results (the "reasons" of the shared vectors). */
 typedef enum {

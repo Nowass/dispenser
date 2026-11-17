@@ -75,6 +75,18 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   [Platform adapters and application runtime](#platform-adapters-and-application-runtime-m19c).
 - (M1.10a) **BLE protocol v1 codec** and the Noise feasibility gate (see
   [BLE protocol codec and Noise gate](#ble-protocol-codec-and-noise-gate-m110a)).
+- (M1.10c.1, under review) **BLE authorization boundary**: the BLE queue carries opaque frames
+  (capacity 4, connection generation) plus connect/disconnect/button events; the BLE port is
+  byte-only (`send_frame`, `disconnect`, `publish_info`); a pre-authentication gate (`dsp_link`)
+  answers HELLO (public state incl. CREDENTIALS_DAMAGED), refuses every privileged request
+  (UNAUTHENTICATED, never decoded or dispatched) and closes after 3 errors or 30 s; an
+  unauthenticated END_SESSION closes only its own connection (the service window ends only by
+  the authorized `dsp_app_end_service_session` or an internal timeout); every
+  `dsp_app_*` operation verifies an authorization issued for the current connection and epoch
+  (a caller-built `{OWNER, slot}` is FORBIDDEN); status, diagnostics, acknowledge, refill and
+  readiness became authorized operations (their queue commands are retired); protocol error 20
+  UNAVAILABLE and the CREDENTIALS_DAMAGED flags. No Noise yet (M1.10c.2): no BLE request can
+  reach an operation. Design: `docs/SECURITY_INTEGRATION_DESIGN.md`.
 - (M1.10b.3) **Device ownership and credential persistence**: storage layout v5 with the `auth`
   credential record (identity key pair, four revocable phone slots, ownership epoch), resumable
   v4 → v5 migration, claim / add (RTC invite) / revoke / recovery (RTC arm + bound 3-press
@@ -230,6 +242,7 @@ firmware/
 │   │   ├── include/dsp_auth.h        credential record model and transitions (M1.10b.3)
 │   │   ├── include/dsp_owner.h       RTC invite/recovery-arm rules, 3-press confirmation (M1.10b.3)
 │   │   ├── include/dsp_app_sec.h     RESTRICTED security-layer interface (M1.10b.3)
+│   │   ├── include/dsp_link.h        pre-authentication frame gate per connection (M1.10c.1)
 │   │   ├── sec_header_guard.cmake    configure-time check: who may include dsp_app_sec.h
 │   │   └── src/                      matching .c files
 │   └── dispenser_platform/     ESP-IDF adapters (never in the host build)
@@ -265,7 +278,9 @@ firmware/
 │   ├── test_manual.c              manual-dose anti-replay through wakes (M1.10b.2)
 │   ├── test_auth.c                credential record, RTC overlays, confirmation (M1.10b.3)
 │   ├── test_owner.c               ownership through wakes, power cuts, admission (M1.10b.3)
-│   └── test_sec_header_guard.cmake  restricted-header check (M1.10b.3)
+│   ├── test_sec_header_guard.cmake  restricted-header check (M1.10b.3)
+│   ├── test_link.c                pre-authentication gate, every privileged type, fuzzing (M1.10c.1)
+│   └── test_session.c             authorization boundary through wakes, HELLO/Info state (M1.10c.1)
 ├── test/integration/           local end-to-end harness (M1.8, see its README)
 │   ├── notify_harness.c           real domain code driven over stdin
 │   ├── posix_https_port.[ch]      host HTTP port: real TLS (OpenSSL), test CA, timeouts

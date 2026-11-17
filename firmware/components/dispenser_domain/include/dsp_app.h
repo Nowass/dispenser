@@ -36,7 +36,9 @@
 
 #include "dsp_connectivity.h"
 #include "dsp_auth.h"
+#include "dsp_bleproto.h"
 #include "dsp_dosing.h"
+#include "dsp_link.h"
 #include "dsp_owner.h"
 #include "dsp_power.h"
 #include "dsp_schedule_repo.h"
@@ -45,7 +47,7 @@
 extern "C" {
 #endif
 
-#define DSP_APP_CMDQ_CAPACITY 8
+#define DSP_APP_CMDQ_CAPACITY 4 /* opaque frames (M1.10c.1): 4 x one maximum frame */
 #define DSP_APP_SERVICE_IDLE_DEFAULT_S 180u /* approved: advertising without a client */
 #define DSP_APP_SERVICE_MAX_DEFAULT_S 900u  /* approved: maximum total session (15 min) */
 #define DSP_APP_SHUTDOWN_ATTEMPTS 3
@@ -69,72 +71,35 @@ typedef enum {
     DSP_STAGE_FAIL_SAFE,
 } dsp_app_stage_t;
 
-/* ---- Service-mode commands (bounded queue) --------------------------------------------- */
-
-/* Queue commands. The manual dose is NOT a queue command (M1.10b.2): it exists only as the
- * authenticated operation dsp_app_manual_dose() with durable anti-replay; value 2 is retired
- * and refused by dsp_app_post().
+/* ---- Service-mode queue (bounded) ------------------------------------------------------- *
  *
- * REFILL and SET_READINESS still carry no authorization: they get it with the security layer
- * (M1.10c). Until then these legacy queue paths MUST NOT become externally reachable: no
- * platform BLE task may post them (none exists), and the M1.10c/d dispatcher must route them
- * through an owner authorization like the other dsp_app operations.
- *
- * INTEGRATION BLOCKER (M1.10b.3 review): configuration, schedule, phone-time, manual-dose,
- * REFILL and SET_READINESS operations must not become reachable through BLE before M1.10c
- * provides authorization ISSUED by the security layer (dsp_app_sec_lookup / enroll / recovery,
- * checked like the ownership operations: session ID + token + epoch). A caller-provided or
- * hand-crafted {OWNER, slot} must never be sufficient for an externally reachable operation;
- * these operations accept it today only because nothing external can call them. */
+ * M1.10c.1: the queue carries OPAQUE protocol frames, transport events and button events only.
+ * The M1.9b command structs (STATUS, MANUAL_DOSE, REFILL, SET_READINESS, END_SESSION) are
+ * retired: every request arrives as a protocol frame and is decoded, gated and (from M1.10c.2,
+ * after authentication) dispatched in the application task; every privileged operation needs a
+ * security-layer-issued authorization (see the operations below). */
 typedef enum {
-    DSP_CMD_STATUS = 1,
-    DSP_CMD_REFILL = 3,        /* capacity_ul, remaining_ul */
-    DSP_CMD_SET_READINESS = 4, /* readiness */
-    DSP_CMD_END_SESSION = 5,
-    DSP_CMD_BUTTON = 6,        /* M1.10b.3: a debounced button event (button), no response */
-} dsp_app_cmd_kind_t;
-#define DSP_CMD_RETIRED_MANUAL_DOSE 2
+    DSP_QI_FRAME = 1,     /* one complete frame of connection `gen` (reassembled by the BLE task) */
+    DSP_QI_CONNECTED,     /* a client connected: new connection generation `gen`, ATT MTU */
+    DSP_QI_DISCONNECTED,  /* the connection `gen` ended */
+    DSP_QI_BUTTON,        /* a debounced button event (recovery confirmation) */
+} dsp_app_qkind_t;
 
 typedef struct {
-    uint8_t kind; /* dsp_app_cmd_kind_t */
-    uint32_t id;  /* echoed in the response */
-    uint32_t capacity_ul;
-    uint32_t remaining_ul;
-    uint8_t readiness; /* dsp_readiness_t */
-    dsp_button_event_t button; /* DSP_CMD_BUTTON */
-} dsp_app_cmd_t;
-
-typedef enum {
-    DSP_RESP_OK = 0,
-    DSP_RESP_REFUSED,  /* gates / limits / coverage (see dosing detail) */
-    DSP_RESP_DEGRADED, /* storage not available, dosing inhibited or a fault in this wake */
-    DSP_RESP_ERR_ARG,
-    DSP_RESP_STORAGE,  /* a write failed */
-    DSP_RESP_FAILED,   /* the pump reported a fault */
-} dsp_app_resp_status_t;
-
-typedef struct {
-    uint32_t id;
-    uint8_t kind;
-    dsp_app_resp_status_t status;
-    dsp_dosing_status_t dosing; /* detail of REFILL / SET_READINESS */
-    uint32_t gates;
-    uint32_t limits;
-    uint32_t pump_problems;
-    /* Status snapshot (every response). */
-    bool storage_available;
-    uint8_t readiness;
-    uint8_t dosing_flags;
-    uint32_t capacity_ul;
-    uint32_t remaining_ul;
-    bool next_due_known;
-    dsp_utc_t next_due_at;
-} dsp_app_response_t;
+    uint8_t kind;  /* dsp_app_qkind_t */
+    uint32_t gen;
+    uint16_t mtu;
+    uint16_t len;
+    dsp_button_event_t button;
+    uint8_t bytes[DSP_BLE_FRAME_MAX];
+} dsp_app_qitem_t;
 
 /* ---- Ports ---------------------------------------------------------------------------- */
 
-/* BLE service mode (no NimBLE/GATT in this milestone). The platform BLE task only posts
- * commands with dsp_app_post() and never touches domain state.
+/* BLE service mode (no NimBLE/GATT in this milestone). The platform BLE task is a byte pipe: it
+ * posts complete frames and connection events (dsp_app_post_frame / _conn_event) and never touches
+ * domain state; it sends the frames handed to send_frame (fragmenting them) and serves the Info
+ * record and advertising payload published by publish_info.
  *
  * Session lifetime (approved policy), measured on the MONOTONIC clock (never wall time):
  *  - no client connected: the session ends DSP_APP_SERVICE_IDLE_DEFAULT_S (configurable)
@@ -143,7 +108,7 @@ typedef struct {
  *  - it always ends at the maximum total duration (DSP_APP_SERVICE_MAX_DEFAULT_S, configurable);
  *  - a due scheduled dose suspends it (connection closed, "busy: dosing"); it resumes only
  *    while the deadline still permits, and a connection closed by the suspension restarts the
- *    idle timeout at resume. */
+ *    idle timeout at resume. Suspension also ends the connection's security session. */
 typedef struct {
     void *ctx;
     bool (*start)(void *ctx);    /* advertising on; false = unavailable */
@@ -152,9 +117,15 @@ typedef struct {
     bool (*resume)(void *ctx);   /* false = ends the session */
     void (*stop)(void *ctx);     /* idempotent: radio off */
     bool (*is_off)(void *ctx);   /* checklist confirmation; NULL = unconfirmed */
-    /* Blocks until a command was posted or max_ms elapsed. */
+    /* Blocks until something was posted or max_ms elapsed. */
     void (*wait)(void *ctx, uint32_t max_ms);
-    void (*respond)(void *ctx, const dsp_app_response_t *resp);
+    /* One complete protocol frame for the current connection (the BLE task fragments it). */
+    bool (*send_frame)(void *ctx, const uint8_t *frame, size_t len);
+    /* Drops the current connection (security close); advertising continues. */
+    void (*disconnect)(void *ctx);
+    /* Optional: the public Info record and advertising payload (protocol 7.1). */
+    void (*publish_info)(void *ctx, const uint8_t info[DSP_BLE_INFO_LEN],
+                         const uint8_t advert[DSP_BLE_ADVERT_LEN]);
 } dsp_ble_port_t;
 
 /* Optional synchronization boundary for the command queue (see dsp_app_post). NULL = the
@@ -178,7 +149,17 @@ typedef struct {
 typedef struct {
     void *ctx;
     bool (*random)(void *ctx, uint8_t *out, size_t len);
+    /* Optional (M1.10c.2): HELLO/prologue device hash (SHA-256 based, docs/BLE_PROTOCOL.md);
+     * id_pub NULL = unclaimed or damaged credentials (device-ID form). NULL: 8 zero bytes. */
+    bool (*device_id_hash)(void *ctx, const uint8_t *id_pub, uint8_t out[8]);
 } dsp_app_security_t;
+
+/* Public identity for the Info record and the HELLO hash (platform: factory MAC, version). */
+typedef struct {
+    uint8_t device_id[6];
+    uint8_t fw_major, fw_minor;
+    uint16_t fw_patch;
+} dsp_app_identity_t;
 
 /* Session-local limits (M1.10b.3, v1: reset by a reconnect or a reset; documented). */
 #define DSP_APP_SESSION_OPS_MAX_DEFAULT 256u
@@ -208,6 +189,7 @@ typedef struct {
     uint32_t service_max_s;        /* 0 = DSP_APP_SERVICE_MAX_DEFAULT_S (>= idle) */
     /* M1.10b.3 */
     const dsp_app_security_t *security; /* NULL = no security layer (no ownership changes) */
+    const dsp_app_identity_t *identity; /* optional; NULL = zeros */
     uint32_t recovery_hold_ms;     /* wake input: verified continuous button hold from the
                                       first sample after this boot (button driver, M1.10d) */
     uint16_t manual_decisions_per_day; /* 0 = DSP_MANUAL_DECISIONS_PER_DAY_DEFAULT (build-time
@@ -222,7 +204,7 @@ typedef enum {
     DSP_BLE_END_NONE = 0,
     DSP_BLE_END_IDLE,       /* no client within the idle timeout */
     DSP_BLE_END_MAX,        /* maximum total duration reached */
-    DSP_BLE_END_COMMAND,    /* END_SESSION */
+    DSP_BLE_END_COMMAND,    /* authorized owner END_SESSION (dsp_app_end_service_session) */
     DSP_BLE_END_RESUME,     /* resume refused by the platform */
     DSP_BLE_END_CLOCK,      /* monotonic clock went backwards (ends conservatively) */
     DSP_BLE_END_START_FAILED,
@@ -259,8 +241,10 @@ typedef struct {
     bool ble_session;
     size_t ble_suspends;
     uint8_t ble_end;            /* dsp_app_ble_end_t */
-    size_t commands;
-    size_t responses;
+    size_t frames_in;           /* M1.10c.1: frames of the current connection processed */
+    size_t frames_out;          /* frames sent */
+    size_t frames_stale;        /* frames of another connection generation, dropped */
+    size_t link_closes;         /* connections closed by the protocol gate */
     size_t ops;                 /* M1.10b.1 operations called (any result) */
     size_t ops_ok;
     bool op_storage_fault;      /* an operation's write failed (dosing ended for the wake) */
@@ -503,6 +487,30 @@ dsp_app_op_result_t dsp_app_get_result(dsp_app_t *app, const dsp_app_auth_t *aut
 dsp_app_op_result_t dsp_app_manual_floor(dsp_app_t *app, const dsp_app_auth_t *auth,
                                          uint64_t *floor);
 
+/* ---- M1.10c.1: status, diagnostics, refill, readiness (formerly unauthenticated queue commands)
+ *
+ * Same preconditions as every operation (session, ISSUED authorization, storage). The records are
+ * the protocol's (docs/BLE_PROTOCOL.md 7.2, 7.3); manual_floor is the authorized slot's. */
+dsp_app_op_result_t dsp_app_get_status(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                       dsp_ble_status_rec_t *out);
+dsp_app_op_result_t dsp_app_get_diagnostics(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                            dsp_ble_diag_rec_t *out);
+dsp_app_op_result_t dsp_app_ack_rejections(dsp_app_t *app, const dsp_app_auth_t *auth);
+/* Decision C10: ends the whole service window (BLE stops after the current item). Only with an
+ * authorization issued for this connection (an unauthenticated END_SESSION closes only its own
+ * connection, dsp_link). Allowed while a recovery confirmation is pending and without loaded
+ * storage; not rate limited. Failed handshakes never end the window. */
+dsp_app_op_result_t dsp_app_end_service_session(dsp_app_t *app, const dsp_app_auth_t *auth);
+/* User-confirmed refill (dsp_dosing_refill): INVALID for bad values, STORAGE when not durable.
+ * *status (optional) afterwards. */
+dsp_app_op_result_t dsp_app_refill(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                   uint32_t capacity_ul, uint32_t remaining_ul,
+                                   dsp_ble_status_rec_t *status);
+/* READY only if every gate except the clock is open: REFUSED, detail = gates, aux = pump
+ * problems; SERVICE_REQUIRED always. */
+dsp_app_op_result_t dsp_app_set_readiness(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                          uint8_t readiness, dsp_ble_status_rec_t *status);
+
 /* ---- M1.10b.3: ownership (docs/OWNERSHIP_DESIGN.md, approved revision 2) --------------------
  *
  * Owner operations for the future dispatcher. Same session/role preconditions as above, and in
@@ -546,7 +554,9 @@ typedef struct {
     bool was_connected;
     uint8_t end;               /* dsp_app_ble_end_t */
     /* M1.10b.3: identity and session-local limits */
-    uint32_t session_id;       /* random per session (0 without a security layer) */
+    uint32_t session_id;       /* random per CONNECTION (security session, M1.10c.1); 0 = none */
+    uint32_t conn_gen;         /* generation of the current connection (0 = none) */
+    bool conn_active;
     uint16_t ops;
     uint16_t writes;
     uint16_t manual;
@@ -600,35 +610,35 @@ struct dsp_app {
     bool pump_fault;
     bool inhibited;
     bool accepting; /* queue open for producers (service session active) */
-    dsp_app_cmd_t q[DSP_APP_CMDQ_CAPACITY];
+    dsp_app_qitem_t q[DSP_APP_CMDQ_CAPACITY];
     size_t q_head;
     size_t q_count;
     bool storage_fault; /* M1.10b.1: an operation's write failed: no dosing in this wake */
     dsp_app_session_t ss; /* current service session (valid while accepting) */
     dsp_app_owner_t own;  /* M1.10b.3 */
+    dsp_link_t link;      /* M1.10c.1: protocol gate of the current connection */
+    dsp_app_qitem_t rx;   /* the queue item being processed (not on the stack) */
+    uint8_t tx[DSP_BLE_FRAME_MAX]; /* reply frame buffer */
     dsp_app_report_t rep;
 };
 
 /* Runs one complete wake (ends with the sleep or fail-safe port call). */
 dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg);
 
-/* Producer side of the bounded command queue. false: queue full, invalid command or no
- * session active -> the platform answers "busy".
+/* Producer side of the bounded queue (frames and connection events). false: queue full,
+ * invalid input or no session active -> the platform answers "busy" (plain EV_BUSY).
  *
  * Synchronization contract:
- *  - This is the ONLY function another task may call. It touches nothing but the queue
- *    (q[], q_head, q_count) and the session flag; it never reads or writes domain state.
- *  - The queue is accessed under cfg->sync (lock/unlock) on both sides: here, and where the
- *    application task pops a command. With cfg->sync == NULL the caller guarantees that the
- *    producer runs in the application task (host tests: the BLE fake posts from inside
- *    wait(), synchronously), so there is no concurrent access.
- *  - Posting is accepted only while a service session is active (between the BLE port's
- *    start and stop); the application resets the queue only outside a session. On hardware
- *    the platform must also not call it before dsp_app_run_wake() has started the session.
- *  - Commands are copied; responses go back only through the BLE port's respond(), called
- *    from the application task.
- *  The FreeRTOS lock and the BLE task belong to M1.9c / the BLE milestone. */
-bool dsp_app_post(dsp_app_t *app, const dsp_app_cmd_t *cmd);
+ *  - These and dsp_app_post_button are the ONLY functions another task may call. They touch
+ *    nothing but the queue (q[], q_head, q_count) and the session flag; never domain state.
+ *  - The queue is accessed under cfg->sync (lock/unlock) on both sides. With cfg->sync == NULL
+ *    the caller guarantees that the producer runs in the application task (host tests).
+ *  - Posting is accepted only while a service session is active (between the BLE port's start
+ *    and stop); the application resets the queue only outside a session.
+ *  - Items are copied; replies go back only through the BLE port's send_frame(), called from the
+ *    application task. */
+bool dsp_app_post_frame(dsp_app_t *app, uint32_t gen, const uint8_t *frame, size_t len);
+bool dsp_app_post_conn_event(dsp_app_t *app, bool connected, uint32_t gen, uint16_t mtu);
 
 #ifdef __cplusplus
 }

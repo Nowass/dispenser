@@ -20,6 +20,7 @@ set(DSP_DOMAIN_SRCS
     "src/dsp_history.c"
     "src/dsp_https_transport.c"
     "src/dsp_identity.c"
+    "src/dsp_link.c"
     "src/dsp_net.c"
     "src/dsp_notify.c"
     "src/dsp_notify_proto.c"

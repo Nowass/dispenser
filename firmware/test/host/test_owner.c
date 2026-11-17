@@ -39,7 +39,7 @@ static bool fake_random(void *ctx, uint8_t *out, size_t len)
     }
     return true;
 }
-static const dsp_app_security_t SEC = {NULL, fake_random};
+static const dsp_app_security_t SEC = {NULL, fake_random, NULL};
 
 static void k32(uint8_t out[32], uint8_t v)
 {
@@ -57,6 +57,9 @@ static uint8_t g_token[16];
 static uint8_t g_rtc_copy[DSP_POWER_RETAINED_BYTES];
 static size_t g_rtc_copy_len;
 static uint8_t TRANS[4][32];
+
+static const dsp_app_auth_t SLOT1 = {DSP_APP_ROLE_OWNER, 1, 0, 0};    /* harness re-issues */
+static const dsp_app_auth_t UNISSUED = {DSP_APP_ROLE_OWNER, 0, 1, 1}; /* never issued */
 
 static op_t hk(void (*h)(int), int a, int b)
 {
@@ -263,7 +266,15 @@ static void put_dosing(const dsp_dosing_state_t *d)
 /* Provisioned device (READY or not) with the fake security layer registered. */
 static void setup(bool ready)
 {
-    provision(ready);
+    provision(ready); /* provisioned through the harness phones (issued authorizations) ... */
+    {
+        /* ... then back to an unclaimed device: these tests claim and enroll themselves */
+        dsp_auth_t p;
+        dsp_auth_provisioned(&p);
+        uint8_t b[DSP_AUTH_RECORD_BYTES];
+        DSP_CHECK_EQ_INT(DSP_AUTH_RECORD_BYTES, dsp_codec_encode_auth(&p, b, sizeof b));
+        fake_kv_put_raw(&kv, "auth", b, sizeof b);
+    }
     CFG.security = &SEC;
     rng_state = 0x1234567u;
     rng_fail = false;
@@ -363,7 +374,15 @@ static dsp_power_retained_t rtc_block(void)
 
 static void test_no_security_layer(void)
 {
-    provision(true); /* CFG.security == NULL, as in every build before M1.10c */
+    provision(true);
+    CFG.security = NULL; /* as in every build before M1.10c */
+    {
+        dsp_auth_t p;
+        dsp_auth_provisioned(&p);
+        uint8_t b[DSP_AUTH_RECORD_BYTES];
+        DSP_CHECK_EQ_INT(DSP_AUTH_RECORD_BYTES, dsp_codec_encode_auth(&p, b, sizeof b));
+        fake_kv_put_raw(&kv, "auth", b, sizeof b);
+    }
     clear_script();
     advance(g_true + MINUTE);
     int first = sc.len;
@@ -512,19 +531,32 @@ static void test_handshake_evidence(void)
     step(g_true, hk(h_tamper, 2, 0)); /* session */
     r[n++] = step(g_true, hk(h_enroll, 0, 1));
     r[n++] = step(g_true, hk(h_admit, DSP_SEC_CLAIM, 0));
-    r[n++] = step(g_true + 31, hk(h_enroll, 0, 1)); /* expired (> 30 s) */
-    r[n++] = step(g_true + 40, hk(h_admit, DSP_SEC_CLAIM, 0));
-    r[n++] = step(g_true + 69, hk(h_enroll, 0, 1)); /* 29 s: in time */
-    r[n++] = step(g_true + 70, hk(h_enroll, 0, 1)); /* replay of the consumed handle */
+    r[n++] = step(g_true + 31, hk(h_enroll, 0, 1)); /* expired (> 30 s; the unauthenticated
+                                                       connection is also dropped at 30 s) */
+    DSP_CHECK(session());
+    res_t first[9];
+    for (int k = 0; k < 9; k++) {
+        first[k] = sc.res[r[k]];
+    }
+    /* a new connection: in time (29 s), then a replay of the consumed handle */
+    clear_script();
+    advance(g_true + MINUTE);
+    int r9 = step(g_true, hk(h_admit, DSP_SEC_CLAIM, 0));
+    int r10 = step(g_true + 29, hk(h_enroll, 0, 1));
+    int r11 = step(g_true + 29, hk(h_enroll, 0, 1));
     DSP_CHECK(session());
     const int want[] = {DSP_OP_OK,        DSP_OP_FORBIDDEN, DSP_OP_FORBIDDEN, DSP_OP_OK,
                         DSP_OP_FORBIDDEN, DSP_OP_OK,        DSP_OP_FORBIDDEN, DSP_OP_OK,
                         DSP_OP_FORBIDDEN, DSP_OP_OK,        DSP_OP_OK,        DSP_OP_FORBIDDEN};
-    for (int k = 0; k < n; k++) {
-        DSP_CHECK_EQ_INT(want[k], sc.res[r[k]].r.status);
+    for (int k = 0; k < 9; k++) {
+        DSP_CHECK_EQ_INT(want[k], first[k].r.status);
     }
+    DSP_CHECK_EQ_INT(want[9], sc.res[r9].r.status);
+    DSP_CHECK_EQ_INT(want[10], sc.res[r10].r.status);
+    DSP_CHECK_EQ_INT(want[11], sc.res[r11].r.status);
+
     for (int k = 1; k < 9; k++) {
-        DSP_CHECK_EQ_INT(0, sc.res[r[k]].writes);
+        DSP_CHECK_EQ_INT(0, first[k].writes);
     }
     bool ok;
     dsp_auth_t a = durable_auth(&ok);
@@ -732,7 +764,8 @@ static void test_revoke_and_slot_reuse(void)
     step(g_true, hk(h_session, 1, 0));
     int m[3];
     for (int k = 0; k < 3; k++) {
-        m[k] = step(g_true + 1 + k * 70, as(op_manual((uint64_t)k + 1, 9999999u), &g_auth[1]));
+        /* each 70 s apart: the phone re-authenticates on every new connection */
+        m[k] = step(g_true + 1 + k * 70, as(op_manual((uint64_t)k + 1, 9999999u), &SLOT1));
     }
     DSP_CHECK(session());
     for (int k = 0; k < 3; k++) {
@@ -775,8 +808,8 @@ static void test_revoke_and_slot_reuse(void)
     clear_script();
     advance(g_true + MINUTE);
     step(g_true, hk(h_session, 2, 0));
-    int fl = step(g_true + 1, as(op_floor(), &g_auth[2]));
-    int dup = step(g_true + 2, as(op_manual(2, 1000), &g_auth[2]));
+    int fl = step(g_true + 1, as(op_floor(), &SLOT1)); /* slot 1 now holds phone 2 */
+    int dup = step(g_true + 2, as(op_manual(2, 1000), &SLOT1));
     DSP_CHECK(session());
     DSP_CHECK_EQ_INT(4, sc.res[fl].floor);
     DSP_CHECK_EQ_INT(DSP_OP_DUPLICATE, sc.res[dup].r.status); /* decided by the old phone */
@@ -823,7 +856,9 @@ static void test_recovery_preserves_everything(void)
     advance(g_true + MINUTE);
     int v = step(g_true, hk(h_view, 0, 0));
     int b = step(g_true + 1, hk(h_recover_begin, 1, 0));
-    int busy = step(g_true + 2, as(op_floor(), &OWNER)); /* only END_SESSION while confirming */
+    /* during the confirmation no authorization exists on this connection: a request with an
+     * unissued authorization is refused, and the confirmation is not disturbed */
+    int busy = step(g_true + 2, as(op_floor(), &UNISSUED));
     step(g_true + 3, hk(h_press, 3, 0));
     int st = step(g_true + 6, hk(h_state, 0, 0));
     int ap = step(g_true + 7, hk(h_apply, 1, 5));
@@ -832,8 +867,7 @@ static void test_recovery_preserves_everything(void)
     DSP_CHECK(session());
     DSP_CHECK_EQ_INT(1, sc.res[v].detail & 1u);
     DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[b].r.status);
-    DSP_CHECK_EQ_INT(DSP_OP_BUSY, sc.res[busy].r.status);
-    DSP_CHECK_EQ_INT(DSP_OP_B_CONFIRMING, sc.res[busy].r.detail);
+    DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[busy].r.status);
     DSP_CHECK_EQ_INT(DSP_CONFIRM_CONFIRMED, sc.res[st].state);
     DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[ap].r.status);
     DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[l].r.status);
@@ -1155,8 +1189,9 @@ static void test_corrupt_credentials_block_dosing(void)
         DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[c1].r.status);
         DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[s1].r.status);
         DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[r1].r.status);
-        DSP_CHECK_EQ_INT(DSP_OP_REFUSED, sc.res[m1].r.status);
-        DSP_CHECK(sc.res[m1].r.detail & DSP_DOSING_G_CREDENTIALS);
+        /* M1.10c.1: no phone can authenticate with damaged credentials: no authorization */
+        DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[m1].r.status);
+        DSP_CHECK(dsp_dosing_gates(&app.dosing, true, NULL) & DSP_DOSING_G_CREDENTIALS);
         DSP_CHECK_EQ_INT(0, sc.res[m1].pumps);
         DSP_CHECK_EQ_INT(before, pump.calls);
         /* the damaged record is left as it is (never repaired or re-provisioned) */
@@ -1232,7 +1267,7 @@ static void test_key_fault_inhibits_immediately(void)
 
 static void test_manual_admission_durable(void)
 {
-    setup(true);
+    provision(true); /* harness phones: issued authorizations */
     CFG.manual_decisions_per_day = 3;
     clear_script();
     advance(g_true + MINUTE);
@@ -1292,7 +1327,7 @@ static void test_manual_admission_durable(void)
     DSP_CHECK(session());
     DSP_CHECK_EQ_INT(DSP_OP_BUSY, sc.res[rb].r.status);
     /* boundaries of the configured limit: 1 and 1000 (clamped above) */
-    setup(true);
+    provision(true); /* harness phones: issued authorizations */
     CFG.manual_decisions_per_day = 1;
     clear_script();
     advance(g_true + MINUTE);
@@ -1303,7 +1338,7 @@ static void test_manual_admission_durable(void)
     DSP_CHECK_EQ_INT(DSP_OP_BUSY, sc.res[b2].r.status);
     DSP_CHECK_EQ_INT(1, durable_dosing().adm_count);
     /* per-session limit (RAM, documented: a reconnect resets it) */
-    setup(true);
+    provision(true); /* harness phones: issued authorizations */
     CFG.session_manual_max = 2;
     clear_script();
     advance(g_true + MINUTE);
@@ -1324,7 +1359,7 @@ static void test_manual_admission_durable(void)
 
 static void test_session_write_limits(void)
 {
-    setup(true);
+    provision(true); /* harness phones: issued authorizations */
     CFG.session_writes_max = 4;
     CFG.writes_per_minute = 2;
     clear_script();
@@ -1353,7 +1388,7 @@ static void test_session_write_limits(void)
     DSP_CHECK(session());
     DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[again].r.status); /* documented v1 limitation */
     /* operations per session */
-    setup(true);
+    provision(true); /* harness phones: issued authorizations */
     CFG.session_ops_max = 3;
     clear_script();
     advance(g_true + MINUTE);

@@ -334,7 +334,7 @@ static bool valid_blob[MAX_VALID];
 static int n_valid;
 
 static int counts[16];
-enum { C_MSG, C_ENC, C_BAD, C_COMPAT, C_NEG, C_FRAG, C_RBAD, C_ROK, C_INFO, C_IBAD, C_ADV };
+enum { C_MSG, C_ENC, C_BAD, C_COMPAT, C_NEG, C_FRAG, C_RBAD, C_ROK, C_INFO, C_IBAD, C_ADV, C_ABAD };
 
 static dsp_ble_msg_t msg, msg2;
 static uint8_t frame[DSP_BLE_FRAME_MAX + 64], out[DSP_BLE_FRAME_MAX + 64];
@@ -525,6 +525,12 @@ static void run_record(char *line)
         DSP_CHECK_EQ_INT(DSP_BLE_OK, dsp_ble_advert_encode(&a, enc));
         DSP_CHECK(memcmp(enc, d, dl) == 0);
         counts[C_ADV]++;
+    } else if (strcmp(r.record, "advert_bad") == 0) {
+        uint8_t d[8];
+        size_t dl = unhex(get(&r, "data"), d, sizeof d);
+        dsp_ble_advert_t a;
+        DSP_CHECK_EQ_STR(get(&r, "expect"), dsp_ble_result_name(dsp_ble_advert_decode(d, dl, &a)));
+        counts[C_ABAD]++;
     } else {
         printf("unknown record %s\n", r.record);
         DSP_CHECK(false);
@@ -551,10 +557,11 @@ static void test_shared_vectors(void)
     }
     fclose(f);
     printf("vectors: %d msg, %d enc, %d bad, %d compat, %d negotiate, %d frag, %d reasm_bad, %d reasm_ok, "
-           "%d info, %d info_bad, %d advert\n",
+           "%d info, %d info_bad, %d advert, %d advert_bad\n",
            counts[C_MSG], counts[C_ENC], counts[C_BAD], counts[C_COMPAT], counts[C_NEG], counts[C_FRAG],
-           counts[C_RBAD], counts[C_ROK], counts[C_INFO], counts[C_IBAD], counts[C_ADV]);
-    DSP_CHECK(counts[C_MSG] >= 59 && counts[C_BAD] >= 56 && counts[C_FRAG] >= 6 && counts[C_RBAD] >= 5);
+           counts[C_RBAD], counts[C_ROK], counts[C_INFO], counts[C_IBAD], counts[C_ADV], counts[C_ABAD]);
+    DSP_CHECK(counts[C_MSG] >= 61 && counts[C_BAD] >= 56 && counts[C_FRAG] >= 6 && counts[C_RBAD] >= 5);
+    DSP_CHECK(counts[C_INFO] >= 3 && counts[C_ADV] >= 2 && counts[C_ABAD] >= 3);
 }
 
 /* ---- Properties ----------------------------------------------------------------------------------- */

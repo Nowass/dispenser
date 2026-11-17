@@ -22,6 +22,7 @@
 #   info      32-byte Info characteristic record <-> fields.
 #   info_bad  Info records rejected with reason "expect".
 #   advert    4-byte advertising Service Data payload <-> fields.
+#   advert_bad the advertising payload decoder rejects "data" with reason "expect".
 #
 # Reasons: truncated length_mismatch bad_major bad_flags unknown_type not_a_request trailing
 # bad_bool bad_enum bad_reserved bad_date bad_string too_large bad_encrypted bad_magic
@@ -31,6 +32,7 @@ msg name=hello_request kind=req type=0x01 txn=7 proto_min=1 proto_max=1 frame=01
 msg name=hello_request_future_range kind=req type=0x01 txn=1 proto_min=1 proto_max=3 frame=01000100010002000103
 msg name=hello_response kind=rsp type=0x01 txn=7 proto=1 claim_state=1 flags=0 caps=3 session_id=2712847316 device_id_hash=x:0102030405060708 frame=010001010700130001010003000000d4c3b2a10102030405060708
 msg name=hello_response_unclaimed_recovery kind=rsp type=0x01 txn=2 proto=1 claim_state=0 flags=1 caps=0 session_id=0 device_id_hash=x:ffffffffffffffff frame=01000101020013000100010000000000000000ffffffffffffffff
+msg name=hello_response_credentials_damaged kind=rsp type=0x01 txn=5 proto=1 claim_state=1 flags=3 caps=3 session_id=7 device_id_hash=x:5a5a5a5a5a5a5a5a frame=010001010500130001010303000000070000005a5a5a5a5a5a5a5a
 msg name=hs_request_claim kind=req type=0x02 txn=3 purpose=2 msg_index=0 noise=x:202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f frame=01000200030032000200202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f
 msg name=hs_request_empty_noise kind=req type=0x02 txn=4 purpose=1 msg_index=2 noise=x: frame=01000200040002000102
 msg name=hs_response kind=rsp type=0x02 txn=3 msg_index=1 noise=x:808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf frame=010002010300610001808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf
@@ -81,6 +83,7 @@ msg name=end_session_response kind=rsp type=0x7e txn=34 - frame=01007e0122000000
 msg name=error_unauthenticated kind=err type=0x10 txn=8 code=4 detail=0 aux=0 frame=0100100308000900040000000000000000
 msg name=error_refused_gates kind=err type=0x40 txn=12 code=7 detail=12 aux=16 frame=010040030c000900070c00000010000000
 msg name=error_unsupported_version kind=err type=0x01 txn=1 code=2 detail=257 aux=0 frame=0100010301000900020101000000000000
+msg name=error_unavailable_wifi kind=err type=0x60 txn=40 code=20 detail=0 aux=1 frame=0100600328000900140000000001000000
 msg name=error_conflict kind=err type=0x33 txn=18 code=11 detail=4 aux=0 frame=01003303120009000b0400000000000000
 msg name=ev_session_closing kind=evt type=0x80 txn=0 reason=2 seconds_left=30 frame=0100800400000300021e00
 msg name=ev_suspending_for_dose kind=evt type=0x81 txn=0 seconds_until=2 frame=01008104000002000200
@@ -115,8 +118,8 @@ bad name=readiness_0 frame=010043001600010000 expect=bad_enum
 bad name=readiness_3 frame=010043001600010003 expect=bad_enum
 bad name=battery_101 frame=0100100109003a0001000000000000000000a08601001c1f010014000100f0efff6a000000000100feff6a00000000020101ab00652b000000000000000000000000 expect=bad_enum
 bad name=error_code_0 frame=0100100308000900000000000000000000 expect=bad_enum
-bad name=error_code_20 frame=0100100308000900140000000000000000 expect=bad_enum
-bad name=hello_flags_bit1 frame=010001010700130001010200000000000000000000000000000000 expect=bad_enum
+bad name=error_code_21 frame=0100100308000900150000000000000000 expect=bad_enum
+bad name=hello_flags_bit2 frame=010001010700130001010400000000000000000000000000000000 expect=bad_enum
 bad name=caps_unknown_bit frame=010001010700130001010020000000000000000000000000000000 expect=bad_enum
 bad name=set_config_mask_bit10 frame=010021000d00360007000000000407000000a08601001c1f01001418001fb0040000709efe6a00000000204e000060ea0000307500003c00000060ea0000 expect=bad_enum
 bad name=factory_reset_wrong_confirm frame=01007d002100040053534554 expect=bad_enum
@@ -187,5 +190,10 @@ info name=unclaimed_recovery proto_min=1 proto_max=2 claim_state=0 flags=1 caps=
 info_bad name=bad_magic record=44535033010101000300000000010700efbe0000000000000000000000000000 expect=bad_magic
 info_bad name=short record=44535032010101000300000000010700efbe00000000000000000000000000 expect=truncated
 info_bad name=reserved_nonzero record=44535032010101000300000000010700efbe0000000000000000000000000001 expect=bad_reserved
-info_bad name=flags_bit1 record=44535032010101020300000000010700efbe0000000000000000000000000000 expect=bad_enum
+info_bad name=flags_bit2 record=44535032010101040300000000010700efbe0000000000000000000000000000 expect=bad_enum
+info name=credentials_damaged_armed proto_min=1 proto_max=1 claim_state=1 flags=3 caps=3 fw_major=0 fw_minor=1 fw_patch=7 device_tag=48879 record=44535032010101030300000000010700efbe0000000000000000000000000000
 advert name=claimed proto_major=1 flags=1 device_tag=48879 data=0101efbe
+advert name=claimed_armed_damaged proto_major=1 flags=7 device_tag=258 data=01070201
+advert_bad name=flags_bit3 data=0108efbe expect=bad_enum
+advert_bad name=short data=0101ef expect=truncated
+advert_bad name=long data=0101efbe00 expect=length_mismatch

@@ -130,7 +130,7 @@ object BleProtocol {
         f("weekday_mask", Kind.Mask(1, 0x7F)), f("has_end", Kind.Bool), f("end_date", Kind.Date("has_end")),
         f("name", Kind.Str(0, 32, StrKind.TEXT)),
     )
-    val ERROR = listOf(f("code", range(1, 19)), f("detail", Kind.U32), f("aux", Kind.U32))
+    val ERROR = listOf(f("code", range(1, 20)), f("detail", Kind.U32), f("aux", Kind.U32))
 
     data class TypeSpec(
         val type: Int,
@@ -149,7 +149,7 @@ object BleProtocol {
     val TYPES: Map<Int, TypeSpec> = listOf(
         TypeSpec(0x01, "HELLO", SecurityClass.PLAIN,
             listOf(f("proto_min", Kind.U8), f("proto_max", Kind.U8)),
-            listOf(f("proto", Kind.U8), f("claim_state", range(0, 1)), f("flags", Kind.Mask(1, 0x01)),
+            listOf(f("proto", Kind.U8), f("claim_state", range(0, 1)), f("flags", Kind.Mask(1, 0x03)),
                 f("caps", Kind.Mask(4, 0x1F)), f("session_id", Kind.U32), f("device_id_hash", Kind.Bytes(8))), null),
         TypeSpec(0x02, "HS", SecurityClass.PLAIN,
             listOf(f("purpose", range(1, 4)), f("msg_index", range(0, 2)), f("noise", Kind.Blob)),
@@ -519,14 +519,14 @@ object BleProtocol {
         val r = Reader(b, b.size).also { it.pos = 4 }
         val info = Info(r.le(1).toInt(), r.le(1).toInt(), r.le(1).toInt(), r.le(1).toInt(), r.le(4),
             r.le(1).toInt(), r.le(1).toInt(), r.le(2).toInt(), r.le(2).toInt())
-        if (info.claimState > 1 || info.flags and 0x01.inv() != 0 || info.caps and 0x1FL.inv() != 0L) {
+        if (info.claimState > 1 || info.flags and 0x03.inv() != 0 || info.caps and 0x1FL.inv() != 0L) {
             throw BleCodecException(BleResult.BAD_ENUM)
         }
         return info
     }
 
     fun encodeInfo(i: Info): ByteArray {
-        if (i.claimState > 1 || i.flags and 0x01.inv() != 0 || i.caps and 0x1FL.inv() != 0L) {
+        if (i.claimState > 1 || i.flags and 0x03.inv() != 0 || i.caps and 0x1FL.inv() != 0L) {
             throw BleCodecException(BleResult.BAD_ENUM)
         }
         val w = Writer()
@@ -543,12 +543,12 @@ object BleProtocol {
     fun decodeAdvert(b: ByteArray): Advert {
         if (b.size != ADVERT_LEN) throw BleCodecException(if (b.size < ADVERT_LEN) BleResult.TRUNCATED else BleResult.LENGTH_MISMATCH)
         val flags = b[1].toInt() and 0xFF
-        if (flags and 0x03.inv() != 0) throw BleCodecException(BleResult.BAD_ENUM)
+        if (flags and 0x07.inv() != 0) throw BleCodecException(BleResult.BAD_ENUM)
         return Advert(b[0].toInt() and 0xFF, flags, (b[2].toInt() and 0xFF) or ((b[3].toInt() and 0xFF) shl 8))
     }
 
     fun encodeAdvert(a: Advert): ByteArray {
-        if (a.flags and 0x03.inv() != 0) throw BleCodecException(BleResult.BAD_ENUM)
+        if (a.flags and 0x07.inv() != 0) throw BleCodecException(BleResult.BAD_ENUM)
         return byteArrayOf(a.protoMajor.toByte(), a.flags.toByte(), a.deviceTag.toByte(), (a.deviceTag shr 8).toByte())
     }
 

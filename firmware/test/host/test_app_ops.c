@@ -15,6 +15,7 @@
  * schedule's edit floor.
  */
 #include "dsp_app.h"
+#include "dsp_app_sec.h"
 #include "dsp_codec.h"
 #include "dsp_storage.h"
 #include "dsp_test.h"
@@ -312,8 +313,11 @@ enum {
     OP_UPDATE_CUR, /* expected revision = the stored one, record revision = + 1 */
     OP_DELETE,
     OP_DELETE_CUR,
-    OP_POST,
-    OP_END,
+    OP_FRAME,      /* M1.10c.1: post a raw protocol frame (o.frame) */
+    OP_END,        /* authorized end of the service window (C10: dsp_app_end_service_session) */
+    OP_END_TIMEOUT, /* no authorization at all: the window ends by its maximum (monotonic jump) */
+    OP_REFILL,     /* M1.10c.1: dsp_app_refill (formerly a queue command) */
+    OP_READINESS,  /* M1.10c.1: dsp_app_set_readiness */
     OP_MANUAL,     /* M1.10b.2 */
     OP_GET_RESULT,
     OP_FLOOR,
@@ -332,7 +336,10 @@ typedef struct {
     int64_t ms;
     uint32_t unc;
     char id[DSP_SCHEDULE_ID_MAX_LEN + 1];
-    dsp_app_cmd_t cmd;
+    uint32_t capacity, remaining; /* OP_REFILL */
+    uint8_t readiness;            /* OP_READINESS */
+    uint8_t frame[64];            /* OP_FRAME */
+    size_t frame_len;
     uint64_t seq;
     uint32_t volume;
     void (*hook)(int i); /* OP_HOOK */
@@ -363,16 +370,88 @@ static struct {
     int len, next;
     bool arm[MAX_STEPS]; /* power cuts allowed during this step */
     bool start_fails;
-    int starts, suspends, resumes, responses;
-    dsp_app_response_t resp[16];
+    int starts, suspends, resumes, responses, disconnects;
+    uint8_t resp[16][64]; /* frames sent by the device (first 64 bytes) */
+    size_t resp_len[16];
     int nresp;
+    uint32_t gen;         /* connection generation of the simulated phone */
 } sc;
+
+/* ---- M1.10c.1: issued authorizations ----------------------------------------------------------
+ * Every operation requires an authorization issued by the Application Service for the current
+ * connection. The harness plays the security layer: a hand-made {OWNER, k} in a step is replaced
+ * at execution time by an authorization obtained through dsp_app_sec_admit(SESSION) +
+ * dsp_app_sec_lookup() with slot k's enrolled public key from the durable record (as an IK
+ * handshake would produce). Authorizations that are malformed (NULL, NONE, bad slot or role)
+ * or already issued (token != 0) pass through unchanged; raw_auth disables the substitution. */
+static uint32_t harness_rng = 0x2468ACE1u;
+static bool harness_random(void *ctx, uint8_t *out, size_t len)
+{
+    (void)ctx;
+    for (size_t i = 0; i < len; i++) {
+        harness_rng = harness_rng * 1664525u + 1013904223u;
+        out[i] = (uint8_t)(harness_rng >> 24);
+    }
+    return true;
+}
+static const dsp_app_security_t HARNESS_SEC = {NULL, harness_random, NULL};
+static bool raw_auth;           /* a step's hand-made authorization is passed as it is */
+static dsp_app_auth_t issued;   /* the last authorization obtained by the harness */
+
+static const dsp_app_auth_t *issue_for(const dsp_app_auth_t *a)
+{
+    if (raw_auth || a == NULL || a->role != DSP_APP_ROLE_OWNER || a->slot >= DSP_APP_PHONE_SLOTS ||
+        a->token != 0) {
+        return a;
+    }
+    const dsp_app_owner_t *o = &app.own;
+    if (o->authz_valid && o->authz_slot == a->slot && o->authz_session == app.ss.session_id &&
+        app.ss.session_id != 0 && o->authz_epoch == o->epoch && issued.token == o->authz_token) {
+        return &issued;
+    }
+    if (o->cred != DSP_CRED_CLAIMED || !o->cache.slot[a->slot].used || !app.accepting) {
+        return a; /* nothing could authenticate this phone: the operation refuses it */
+    }
+    uint8_t pub[32];
+    memcpy(pub, o->cache.slot[a->slot].pub, sizeof pub);
+    dsp_app_sec_connection_begin(&app); /* the phone of slot k (re)connects */
+    dsp_app_hs_t hs;
+    if (dsp_app_sec_admit(&app, DSP_SEC_SESSION, &hs).status != DSP_OP_OK ||
+        dsp_app_sec_lookup(&app, &hs, pub, &issued).status != DSP_OP_OK) {
+        return a;
+    }
+    return &issued;
+}
+
+/* A claimed record with four harness phones (keys 0x31 + slot), written into the store. */
+static void harness_claim_record(void)
+{
+    dsp_auth_t a;
+    dsp_auth_provisioned(&a);
+    uint8_t ip[32], iu[32], p[32];
+    memset(ip, 0x71, sizeof ip);
+    memset(iu, 0x72, sizeof iu);
+    memset(p, 0x31, sizeof p);
+    (void)dsp_auth_claim(&a, ip, iu, p, "H0", 2, 0);
+    for (uint8_t k = 1; k < DSP_AUTH_SLOTS; k++) {
+        memset(p, 0x31 + k, sizeof p);
+        (void)dsp_auth_add(&a, p, "H", 1, 0, NULL);
+    }
+    uint8_t b[DSP_AUTH_RECORD_BYTES];
+    if (dsp_codec_encode_auth(&a, b, sizeof b) == DSP_AUTH_RECORD_BYTES) {
+        fake_kv_put_raw(&kv, "auth", b, sizeof b);
+    }
+    dsp_auth_wipe(&a);
+}
 
 static void exec_op(int i)
 {
     const op_t *o = &sc.op[i];
     res_t *r = &sc.res[i];
-    const dsp_app_auth_t *auth = o->no_auth ? NULL : o->auth;
+    /* hooks play the security layer themselves: never substitute for them */
+    /* hooks play the security layer themselves; frames and END carry no authorization */
+    bool no_issue = o->kind == OP_HOOK || o->kind == OP_FRAME || o->kind == OP_END_TIMEOUT;
+    const dsp_app_auth_t *auth = o->no_auth ? NULL : (no_issue ? o->auth : issue_for(o->auth));
     r->ran = true;
     long before = kv.sets;
     int pumps_before = pump.calls;
@@ -427,16 +506,22 @@ static void exec_op(int i)
         r->r = dsp_app_delete_schedule(&app, auth, o->id, cur.revision, &r->set_rev);
         break;
     }
-    case OP_POST:
-        r->r.status = dsp_app_post(&app, &o->cmd) ? DSP_OP_OK : DSP_OP_BUSY;
+    case OP_FRAME:
+        r->r.status = dsp_app_post_frame(&app, sc.gen, o->frame, o->frame_len) ? DSP_OP_OK : DSP_OP_BUSY;
         break;
-    case OP_END: {
-        dsp_app_cmd_t c;
-        memset(&c, 0, sizeof c);
-        c.kind = DSP_CMD_END_SESSION;
-        r->r.status = dsp_app_post(&app, &c) ? DSP_OP_OK : DSP_OP_BUSY;
+    case OP_END:
+        r->r = dsp_app_end_service_session(&app, auth);
         break;
-    }
+    case OP_END_TIMEOUT:
+        mono_ms += 24u * 3600u * 1000u; /* past any session maximum: an internal transition */
+        r->r.status = DSP_OP_OK;
+        break;
+    case OP_REFILL:
+        r->r = dsp_app_refill(&app, auth, o->capacity, o->remaining, NULL);
+        break;
+    case OP_READINESS:
+        r->r = dsp_app_set_readiness(&app, auth, o->readiness, NULL);
+        break;
     case OP_MANUAL:
         r->r = dsp_app_manual_dose(&app, auth, o->seq, o->volume, &r->manual);
         break;
@@ -464,6 +549,10 @@ static void exec_op(int i)
 static void run_due_steps(void)
 {
     while (sc.next < sc.len && sc.at[sc.next] <= g_true) {
+        if ((sc.op[sc.next].kind == OP_END || sc.op[sc.next].kind == OP_END_TIMEOUT) &&
+            app.q_count > 0) {
+            break; /* frames posted before the end are processed first (the loop drains them) */
+        }
         exec_op(sc.next);
         sc.next++;
     }
@@ -567,9 +656,8 @@ static op_t op_list(uint8_t page)
 }
 static op_t op_ready(void)
 {
-    op_t o = mk(OP_POST);
-    o.cmd.kind = DSP_CMD_SET_READINESS;
-    o.cmd.readiness = DSP_READINESS_READY;
+    op_t o = mk(OP_READINESS);
+    o.readiness = DSP_READINESS_READY;
     return o;
 }
 static op_t op_manual(uint64_t seq, uint32_t volume)
@@ -606,6 +694,7 @@ static bool ble_start(void *ctx)
         return false;
     }
     ble_on = true;
+    (void)dsp_app_post_conn_event(&app, true, ++sc.gen, 247); /* the phone connects */
     return true;
 }
 static bool ble_connected(void *ctx)
@@ -624,6 +713,7 @@ static bool ble_resume(void *ctx)
     (void)ctx;
     sc.resumes++;
     ble_on = true;
+    (void)dsp_app_post_conn_event(&app, true, ++sc.gen, 247); /* the phone reconnects */
     return true;
 }
 static void ble_stop(void *ctx)
@@ -646,16 +736,27 @@ static void ble_wait(void *ctx, uint32_t max_ms)
     advance(until);
     run_due_steps();
 }
-static void ble_respond(void *ctx, const dsp_app_response_t *r)
+static bool ble_send_frame(void *ctx, const uint8_t *f, size_t n)
 {
     (void)ctx;
     sc.responses++;
     if (sc.nresp < 16) {
-        sc.resp[sc.nresp++] = *r;
+        size_t c = n < sizeof sc.resp[0] ? n : sizeof sc.resp[0];
+        memcpy(sc.resp[sc.nresp], f, c);
+        sc.resp_len[sc.nresp++] = n;
     }
+    return true;
 }
-static const dsp_ble_port_t BLE = {NULL,     ble_start,  ble_connected, ble_suspend, ble_resume,
-                                   ble_stop, ble_is_off, ble_wait,      ble_respond};
+static void ble_disconnect(void *ctx)
+{
+    (void)ctx;
+    sc.disconnects++;
+    /* the simulated phone reconnects at once (e.g. after the 30 s unauthenticated limit) */
+    (void)dsp_app_post_conn_event(&app, true, ++sc.gen, 247);
+}
+static const dsp_ble_port_t BLE = {NULL,       ble_start,      ble_connected, ble_suspend,
+                                   ble_resume, ble_stop,       ble_is_off,    ble_wait,
+                                   ble_send_frame, ble_disconnect, NULL};
 
 /* ---- World ------------------------------------------------------------------------------------- */
 
@@ -705,6 +806,9 @@ static void world(void)
     CFG.ble = &BLE;
     CFG.mono = &MONO;
     CFG.random = 0x5EED1234u;
+    CFG.security = &HARNESS_SEC; /* M1.10c.1: authorizations are issued (see issue_for) */
+    raw_auth = false;
+    memset(&issued, 0, sizeof issued);
 }
 
 static void power_lost(void)
@@ -751,11 +855,16 @@ static bool wake(dsp_wake_cause_t cause)
     return false;
 }
 
-/* A button wake running the script; END_SESSION is posted after the last step. */
+/* A button wake running the script; the owner ends the window after the last step (authorized,
+ * C10) unless the script already ends it (OP_END / OP_END_TIMEOUT). */
 static bool session(void)
 {
     dsp_utc_t last = sc.len > 0 ? sc.at[sc.len - 1] : g_true;
-    step(last, mk(OP_END));
+    bool ends = sc.len > 0 && (sc.op[sc.len - 1].kind == OP_END ||
+                               sc.op[sc.len - 1].kind == OP_END_TIMEOUT);
+    if (!ends) {
+        step(last, mk(OP_END));
+    }
     bool ok = wake(DSP_CAUSE_BUTTON);
     return ok;
 }
@@ -904,10 +1013,9 @@ static dsp_config_t calibration(void)
 /* Fills the reservoir (REFILL is the only way to set the remaining estimate). */
 static op_t op_refill(uint32_t remaining)
 {
-    op_t o = mk(OP_POST);
-    o.cmd.kind = DSP_CMD_REFILL;
-    o.cmd.capacity_ul = CAP;
-    o.cmd.remaining_ul = remaining;
+    op_t o = mk(OP_REFILL);
+    o.capacity = CAP;
+    o.remaining = remaining;
     return o;
 }
 
@@ -916,7 +1024,9 @@ static void provision(bool ready)
 {
     world();
     DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
+    harness_claim_record(); /* M1.10c.1: enrolled phones for issued authorizations */
     DSP_CHECK(rep.slept);
+    harness_claim_record(); /* M1.10c.1: four enrolled harness phones (slots 0..3) */
     clear_script();
     advance(g_true + 5);
     int t = step(g_true, op_now());
@@ -1001,9 +1111,11 @@ static void test_degraded_storage_refuses_operations(void)
     int d = step(g_true, as(op_list(0), &NOBODY));
     DSP_CHECK(session());
     DSP_CHECK(rep.degraded);
-    DSP_CHECK_EQ_INT(DSP_OP_DEGRADED, sc.res[a].r.status);
-    DSP_CHECK_EQ_INT(DSP_OP_DEGRADED, sc.res[b].r.status);
-    DSP_CHECK_EQ_INT(DSP_OP_DEGRADED, sc.res[c].r.status);
+    /* M1.10c.1: with the storage unreadable the credential record is not loaded either, so no
+     * phone can be authenticated and no authorization exists: every operation is FORBIDDEN */
+    DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[a].r.status);
+    DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[b].r.status);
+    DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[c].r.status);
     DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[d].r.status);
     DSP_CHECK_EQ_INT(sets, kv.sets); /* nothing written */
     invariants();
@@ -1064,6 +1176,7 @@ static void test_phone_time_rejections_and_boundaries(void)
 {
     world();
     DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
+    harness_claim_record(); /* M1.10c.1: enrolled phones for issued authorizations */
     clear_script();
     const int64_t min_ms = (int64_t)1735689600 * 1000; /* 2025-01-01T00:00:00.000Z */
     const int64_t max_ms = (int64_t)DSP_UTC_MAX * 1000;
@@ -1091,6 +1204,7 @@ static void test_phone_time_rejections_and_boundaries(void)
     /* Exactly the plausibility floor is accepted on an untrusted clock. */
     world();
     DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
+    harness_claim_record(); /* M1.10c.1: enrolled phones for issued authorizations */
     clear_script();
     int e = step(g_true, op_time(min_ms, 0));
     DSP_CHECK(session());
@@ -1194,6 +1308,7 @@ static void test_phone_time_persist_failure_and_power_cuts(void)
     /* Write failure: nothing applied, dosing ends for the wake. */
     world();
     DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
+    harness_claim_record(); /* M1.10c.1: enrolled phones for issued authorizations */
     clear_script();
     strcpy(fail_set_key, "time");
     int64_t off = g_offset;
@@ -1209,6 +1324,7 @@ static void test_phone_time_persist_failure_and_power_cuts(void)
     /* Clock that cannot be set: metadata durable, trust UNKNOWN, no marker. */
     world();
     DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
+    harness_claim_record(); /* M1.10c.1: enrolled phones for issued authorizations */
     clear_script();
     clock_set_fails = true;
     int u = step(g_true, op_now());
@@ -1745,7 +1861,7 @@ static void test_config_extreme_values_are_overflow_safe(void)
     v.calibrated_at = DSP_UTC_MAX;
     int a = step(g_true, op_set_cfg_cur(CAL_MASK | DSP_CONFIG_F_LOW_STOCK, v));
     op_t refill = op_refill(UINT32_MAX);
-    refill.cmd.capacity_ul = UINT32_MAX;
+    refill.capacity = UINT32_MAX;
     step(g_true, refill);
     step(g_true, op_ready());
     int c1 = step(g_true, op_create(sched("max1", 8, 0, UINT32_MAX)));

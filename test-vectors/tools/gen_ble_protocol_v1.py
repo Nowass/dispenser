@@ -40,12 +40,12 @@ SCHEDULE = [("id", "str", (1, 64, "id")), ("revision", "u32", None), ("enabled",
             ("minute", "enum", tuple(range(60))), ("kind", "enum", (0, 1, 2)), ("interval", "u32", None),
             ("weekday_mask", "mask8", 0x7F), ("has_end", "bool", None), ("end_date", "date", None),
             ("name", "str", (0, 32, "text"))]
-ERROR = [("code", "enum", tuple(range(1, 20))), ("detail", "u32", None), ("aux", "u32", None)]
+ERROR = [("code", "enum", tuple(range(1, 21))), ("detail", "u32", None), ("aux", "u32", None)]
 
 # type: (name, request_fields or None, response_fields or None, event_fields or None)
 TYPES = {
     0x01: ("HELLO", [("proto_min", "u8", None), ("proto_max", "u8", None)],
-           [("proto", "u8", None), ("claim_state", "enum", (0, 1)), ("flags", "mask8", 0x01),
+           [("proto", "u8", None), ("claim_state", "enum", (0, 1)), ("flags", "mask8", 0x03),
             ("caps", "mask32", 0x1F), ("session_id", "u32", None), ("device_id_hash", "bytes", 8)], None),
     0x02: ("HS", [("purpose", "enum", (1, 2, 3, 4)), ("msg_index", "enum", (0, 1, 2)), ("noise", "blob", None)],
            [("msg_index", "enum", (0, 1, 2)), ("noise", "blob", None)], None),
@@ -205,6 +205,8 @@ MSGS = [
                                                session_id=0xA1B2C3D4, device_id_hash=list(range(1, 9)))),
     ("hello_response_unclaimed_recovery", 0x01, RESPONSE, 2, dict(proto=1, claim_state=0, flags=1, caps=0,
                                                                   session_id=0, device_id_hash=[0xFF] * 8)),
+    ("hello_response_credentials_damaged", 0x01, RESPONSE, 5, dict(proto=1, claim_state=1, flags=3, caps=0x03,
+                                                                   session_id=7, device_id_hash=[0x5A] * 8)),
     ("hs_request_claim", 0x02, 0, 3, dict(purpose=2, msg_index=0, noise=NOISE_MSG)),
     ("hs_request_empty_noise", 0x02, 0, 4, dict(purpose=1, msg_index=2, noise=[])),
     ("hs_response", 0x02, RESPONSE, 3, dict(msg_index=1, noise=list(range(0x80, 0x80 + 96)))),
@@ -259,6 +261,7 @@ MSGS = [
     ("error_unauthenticated", 0x10, RESPONSE | ERRORF, 8, dict(code=4, detail=0, aux=0)),
     ("error_refused_gates", 0x40, RESPONSE | ERRORF, 12, dict(code=7, detail=0x0C, aux=0x10)),
     ("error_unsupported_version", 0x01, RESPONSE | ERRORF, 1, dict(code=2, detail=0x0101, aux=0)),
+    ("error_unavailable_wifi", 0x60, RESPONSE | ERRORF, 40, dict(code=20, detail=0, aux=1)),
     ("error_conflict", 0x33, RESPONSE | ERRORF, 18, dict(code=11, detail=4, aux=0)),
     ("ev_session_closing", 0x80, EVENT, 0, dict(reason=2, seconds_left=30)),
     ("ev_suspending_for_dose", 0x81, EVENT, 0, dict(seconds_until=2)),
@@ -353,8 +356,8 @@ def bad_vectors():
     out.append(("readiness_3", frame(0x43, 0, 22, b"\x03").hex(), "bad_enum"))
     out.append(("battery_101", frame(0x10, RESPONSE, 9, sv[:44] + b"\x65" + sv[45:]).hex(), "bad_enum"))
     out.append(("error_code_0", frame(0x10, RESPONSE | ERRORF, 8, struct.pack("<BII", 0, 0, 0)).hex(), "bad_enum"))
-    out.append(("error_code_20", frame(0x10, RESPONSE | ERRORF, 8, struct.pack("<BII", 20, 0, 0)).hex(), "bad_enum"))
-    out.append(("hello_flags_bit1", frame(0x01, RESPONSE, 7, struct.pack("<BBBII", 1, 1, 2, 0, 0) + bytes(8)).hex(), "bad_enum"))
+    out.append(("error_code_21", frame(0x10, RESPONSE | ERRORF, 8, struct.pack("<BII", 21, 0, 0)).hex(), "bad_enum"))
+    out.append(("hello_flags_bit2", frame(0x01, RESPONSE, 7, struct.pack("<BBBII", 1, 1, 4, 0, 0) + bytes(8)).hex(), "bad_enum"))
     out.append(("caps_unknown_bit", frame(0x01, RESPONSE, 7, struct.pack("<BBBII", 1, 1, 0, 0x20, 0) + bytes(8)).hex(), "bad_enum"))
     out.append(("set_config_mask_bit10", frame(0x21, 0, 13, struct.pack("<IH", 7, 0x0400) + enc_fields(CONFIG, CONFIG_V)).hex(), "bad_enum"))
     out.append(("factory_reset_wrong_confirm", frame(0x7D, 0, 33, struct.pack("<I", 0x54455353)).hex(), "bad_enum"))
@@ -446,9 +449,17 @@ def info_records():
     w("info_bad name=bad_magic record=%s expect=bad_magic\n" % (b"DSP3" + rec[4:]).hex())
     w("info_bad name=short record=%s expect=truncated\n" % rec[:31].hex())
     w("info_bad name=reserved_nonzero record=%s expect=bad_reserved\n" % (rec[:31] + b"\x01").hex())
-    w("info_bad name=flags_bit1 record=%s expect=bad_enum\n" % (rec[:7] + b"\x02" + rec[8:]).hex())
+    w("info_bad name=flags_bit2 record=%s expect=bad_enum\n" % (rec[:7] + b"\x04" + rec[8:]).hex())
+    # M1.10c.1: credentials damaged (bit 1); a damaged device reports claim_state 1
+    rec3 = b"DSP2" + struct.pack("<BBBBIBBHH", 1, 1, 1, 3, 0x03, 0, 1, 7, 0xBEEF) + bytes(14)
+    w("info name=credentials_damaged_armed proto_min=1 proto_max=1 claim_state=1 flags=3 caps=3 fw_major=0 fw_minor=1 fw_patch=7 device_tag=48879 record=%s\n" % rec3.hex())
     adv = struct.pack("<BBH", 1, 0x01, 0xBEEF)
     w("advert name=claimed proto_major=1 flags=1 device_tag=48879 data=%s\n" % adv.hex())
+    adv2 = struct.pack("<BBH", 1, 0x07, 0x0102)
+    w("advert name=claimed_armed_damaged proto_major=1 flags=7 device_tag=258 data=%s\n" % adv2.hex())
+    w("advert_bad name=flags_bit3 data=%s expect=bad_enum\n" % struct.pack("<BBH", 1, 0x08, 0xBEEF).hex())
+    w("advert_bad name=short data=%s expect=truncated\n" % adv[:3].hex())
+    w("advert_bad name=long data=%s expect=length_mismatch\n" % (adv + b"\x00").hex())
 
 
 HEADER = """# BLE protocol v1 vectors (docs/BLE_PROTOCOL.md). Generated by tools/gen_ble_protocol_v1.py from a
@@ -475,6 +486,7 @@ HEADER = """# BLE protocol v1 vectors (docs/BLE_PROTOCOL.md). Generated by tools
 #   info      32-byte Info characteristic record <-> fields.
 #   info_bad  Info records rejected with reason "expect".
 #   advert    4-byte advertising Service Data payload <-> fields.
+#   advert_bad the advertising payload decoder rejects "data" with reason "expect".
 #
 # Reasons: truncated length_mismatch bad_major bad_flags unknown_type not_a_request trailing
 # bad_bool bad_enum bad_reserved bad_date bad_string too_large bad_encrypted bad_magic

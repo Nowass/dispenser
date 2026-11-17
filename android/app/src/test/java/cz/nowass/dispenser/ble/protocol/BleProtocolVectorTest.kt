@@ -173,6 +173,7 @@ class BleProtocolVectorTest {
                         r.get("device_tag").toInt()), a)
                     assertArrayEquals(where, d, BleProtocol.encodeAdvert(a))
                 }
+                "advert_bad" -> assertEquals(where, r.get("expect"), result { BleProtocol.decodeAdvert(hex(r.get("data"))) })
                 else -> fail("$where: unknown record ${r.record}")
             }
             counts[r.record] = (counts[r.record] ?: 0) + 1

@@ -130,12 +130,13 @@ static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
 static int responses_by_id[POSTS + 2];
 static int posted_ok, posted_busy;
 
+static uint64_t mono_skip_ms; /* application task only: jumps past the session maximum */
 static uint64_t real_ms(void *ctx)
 {
     (void)ctx;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u + mono_skip_ms;
 }
 static const dsp_monotonic_t MONO = {NULL, real_ms};
 static dsp_utc_t clk_now(void *ctx)
@@ -253,18 +254,31 @@ static void b_wait(void *ctx, uint32_t ms)
 {
     (void)ctx;
     (void)ms;
+    /* C10: the final unauthenticated END_SESSION closes only its connection; once it has been
+     * answered, the window is ended by its maximum duration (time jump, application task). */
+    if (responses_by_id[POSTS + 1] > 0) {
+        mono_skip_ms = 3600000u;
+    }
     struct timespec ts = {0, 200000}; /* 0.2 ms: the producer runs concurrently */
     nanosleep(&ts, NULL);
 }
-static void b_respond(void *ctx, const dsp_app_response_t *r)
+static bool b_send_frame(void *ctx, const uint8_t *f, size_t n)
 {
     (void)ctx;
-    if (r->id <= POSTS + 1) {
-        responses_by_id[r->id]++; /* application task only */
+    if (n >= 8) {
+        unsigned txn = (unsigned)(f[4] | (f[5] << 8));
+        if (txn <= POSTS + 1) {
+            responses_by_id[txn]++; /* application task only */
+        }
     }
+    return true;
 }
-static const dsp_ble_port_t BLE = {NULL, b_start, b_connected, b_suspend, b_resume,
-                                   b_stop, b_is_off, b_wait, b_respond};
+static void b_disconnect(void *ctx)
+{
+    (void)ctx;
+}
+static const dsp_ble_port_t BLE = {NULL,   b_start,  b_connected, b_suspend,    b_resume,
+                                   b_stop, b_is_off, b_wait,      b_send_frame, b_disconnect, NULL};
 static void m_lock(void *ctx)
 {
     (void)ctx;
@@ -280,23 +294,24 @@ static const dsp_app_sync_t SYNC = {NULL, m_lock, m_unlock};
 static void *producer(void *arg)
 {
     (void)arg;
+    /* M1.10c.1: opaque frames and connection events. Each iteration: a new connection (event),
+     * then one HELLO (txn i) on it; every accepted HELLO is answered exactly once. */
     for (int i = 1; i <= POSTS; i++) {
-        dsp_app_cmd_t c;
-        memset(&c, 0, sizeof c);
-        c.kind = DSP_CMD_STATUS;
-        c.id = (uint32_t)i;
-        while (!dsp_app_post(&app, &c)) {
+        while (!dsp_app_post_conn_event(&app, true, (uint32_t)i, 247)) {
             posted_busy++; /* full (or not yet open): the platform would answer busy; retry */
+            struct timespec ts = {0, 50000};
+            nanosleep(&ts, NULL);
+        }
+        const uint8_t hello[10] = {1, 0, 1, 0, (uint8_t)i, (uint8_t)(i >> 8), 2, 0, 1, 1};
+        while (!dsp_app_post_frame(&app, (uint32_t)i, hello, sizeof hello)) {
+            posted_busy++;
             struct timespec ts = {0, 50000};
             nanosleep(&ts, NULL);
         }
         posted_ok++;
     }
-    dsp_app_cmd_t end;
-    memset(&end, 0, sizeof end);
-    end.kind = DSP_CMD_END_SESSION;
-    end.id = POSTS + 1;
-    while (!dsp_app_post(&app, &end)) {
+    const uint8_t end[8] = {1, 0, 0x7E, 0, (uint8_t)(POSTS + 1), (uint8_t)((POSTS + 1) >> 8), 0, 0};
+    while (!dsp_app_post_frame(&app, POSTS, end, sizeof end)) {
         struct timespec ts = {0, 50000};
         nanosleep(&ts, NULL);
     }
@@ -325,12 +340,12 @@ static void test_queue_two_threads(void)
         pthread_join(producer_thread, NULL);
     }
     /* After the session: posting is refused (queue closed). */
-    dsp_app_cmd_t late;
-    memset(&late, 0, sizeof late);
-    late.kind = DSP_CMD_STATUS;
-    DSP_CHECK(!dsp_app_post(&app, &late));
+    const uint8_t late[8] = {1, 0, 0x7E, 0, 0, 0, 0, 0};
+    DSP_CHECK(!dsp_app_post_frame(&app, POSTS, late, sizeof late));
+    DSP_CHECK(!dsp_app_post_conn_event(&app, true, POSTS + 1, 247));
     DSP_CHECK(rep.ble_session);
-    DSP_CHECK_EQ_INT(DSP_BLE_END_COMMAND, rep.ble_end);
+    DSP_CHECK_EQ_INT(DSP_BLE_END_MAX, rep.ble_end); /* not ended by the unauthenticated END */
+    DSP_CHECK(rep.link_closes >= 1);
     DSP_CHECK_EQ_INT(1, slept);
     DSP_CHECK_EQ_INT(POSTS, posted_ok);
     /* Every accepted command answered exactly once, in a single owner (no loss, no dup). */
@@ -341,7 +356,8 @@ static void test_queue_two_threads(void)
     }
     DSP_CHECK_EQ_INT(0, missing);
     DSP_CHECK_EQ_INT(0, dup);
-    printf("queue: %d posted, %d busy retries, %zu responses\n", posted_ok, posted_busy, rep.responses);
+    DSP_CHECK_EQ_INT(0, (int)rep.frames_stale);
+    printf("queue: %d posted, %d busy retries, %zu frames sent\n", posted_ok, posted_busy, rep.frames_out);
 }
 
 int main(void)

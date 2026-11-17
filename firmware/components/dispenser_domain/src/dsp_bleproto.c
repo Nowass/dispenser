@@ -94,7 +94,7 @@ static const dsp_ble_field_t PHONE_ITEM_F[] = {
 LAYOUT(PHONE_ITEM_L, PHONE_ITEM_F);
 
 static const dsp_ble_field_t ERROR_F[] = {
-    F_ENUM(dsp_ble_error_body_t, code, 1, 19), F_U32(dsp_ble_error_body_t, detail),
+    F_ENUM(dsp_ble_error_body_t, code, 1, 20), F_U32(dsp_ble_error_body_t, detail),
     F_U32(dsp_ble_error_body_t, aux),
 };
 LAYOUT(ERROR_L, ERROR_F);
@@ -105,7 +105,7 @@ static const dsp_ble_field_t HELLO_REQ_F[] = {F_U8(dsp_ble_hello_req_t, proto_mi
 LAYOUT(HELLO_REQ_L, HELLO_REQ_F);
 static const dsp_ble_field_t HELLO_RSP_F[] = {
     F_U8(dsp_ble_hello_rsp_t, proto), F_ENUM(dsp_ble_hello_rsp_t, claim_state, 0, 1),
-    F_MASK8(dsp_ble_hello_rsp_t, flags, 0x01u), F_MASK32(dsp_ble_hello_rsp_t, caps, 0x1Fu),
+    F_MASK8(dsp_ble_hello_rsp_t, flags, DSP_BLE_HELLO_F_ALL), F_MASK32(dsp_ble_hello_rsp_t, caps, 0x1Fu),
     F_U32(dsp_ble_hello_rsp_t, session_id), F_BYTES(dsp_ble_hello_rsp_t, device_id_hash, 8),
 };
 LAYOUT(HELLO_RSP_L, HELLO_RSP_F);
@@ -880,7 +880,7 @@ dsp_ble_result_t dsp_ble_info_encode(const dsp_ble_info_t *in, uint8_t out[DSP_B
     if (in == NULL || out == NULL) {
         return DSP_BLE_ERR_ARG;
     }
-    if (in->claim_state > 1 || (in->flags & ~0x01u) != 0 || (in->caps & ~0x1Fu) != 0) {
+    if (in->claim_state > 1 || (in->flags & ~DSP_BLE_HELLO_F_ALL) != 0 || (in->caps & ~0x1Fu) != 0) {
         return DSP_BLE_ERR_BAD_ENUM;
     }
     memset(out, 0, DSP_BLE_INFO_LEN);
@@ -918,7 +918,7 @@ dsp_ble_result_t dsp_ble_info_decode(const uint8_t *buf, size_t len, dsp_ble_inf
     }
     dsp_ble_info_t v = {buf[4], buf[5], buf[6], buf[7], (uint32_t)get_le(buf + 8, 4), buf[12], buf[13],
                         (uint16_t)get_le(buf + 14, 2), (uint16_t)get_le(buf + 16, 2)};
-    if (v.claim_state > 1 || (v.flags & ~0x01u) != 0 || (v.caps & ~0x1Fu) != 0) {
+    if (v.claim_state > 1 || (v.flags & ~DSP_BLE_HELLO_F_ALL) != 0 || (v.caps & ~0x1Fu) != 0) {
         return DSP_BLE_ERR_BAD_ENUM;
     }
     *out = v;
@@ -930,7 +930,7 @@ dsp_ble_result_t dsp_ble_advert_encode(const dsp_ble_advert_t *in, uint8_t out[D
     if (in == NULL || out == NULL) {
         return DSP_BLE_ERR_ARG;
     }
-    if ((in->flags & ~0x03u) != 0) {
+    if ((in->flags & ~DSP_BLE_ADV_F_ALL) != 0) {
         return DSP_BLE_ERR_BAD_ENUM;
     }
     out[0] = in->proto_major;
@@ -947,7 +947,7 @@ dsp_ble_result_t dsp_ble_advert_decode(const uint8_t *buf, size_t len, dsp_ble_a
     if (len != DSP_BLE_ADVERT_LEN) {
         return len < DSP_BLE_ADVERT_LEN ? DSP_BLE_ERR_TRUNCATED : DSP_BLE_ERR_LENGTH_MISMATCH;
     }
-    if ((buf[1] & ~0x03u) != 0) {
+    if ((buf[1] & ~DSP_BLE_ADV_F_ALL) != 0) {
         return DSP_BLE_ERR_BAD_ENUM;
     }
     out->proto_major = buf[0];

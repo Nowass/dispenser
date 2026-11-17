@@ -12,6 +12,7 @@
  * (forced off after the last run), Wi-Fi stopped, BLE stopped, no HTTPS session.
  */
 #include "dsp_app.h"
+#include "dsp_app_sec.h"
 #include "dsp_codec.h"
 #include "dsp_power.h"
 #include "dsp_reservoir.h"
@@ -488,9 +489,43 @@ static const dsp_power_port_t POWER = {NULL, pw_cause, pw_load, pw_save, pw_slee
 static dsp_app_t app;
 
 #define MAX_SCRIPT 32
+/* M1.10c.1: the M1.9b queue commands are retired. The script keeps their meaning as test-local
+ * entries executed in the application task (from the BLE fake's wait(), like the future
+ * dispatcher): STATUS, REFILL and SET_READINESS as the authorized operations dsp_app_get_status /
+ * dsp_app_refill / dsp_app_set_readiness with an ISSUED authorization (issue_for), END_SESSION and
+ * FRAME_STATUS as protocol frames through the queue. Responses keep the former shape. */
+enum { T_STATUS = 1, T_REFILL = 3, T_READINESS = 4, T_END = 5, T_FRAME_STATUS = 6 };
+typedef struct {
+    uint8_t kind;
+    uint32_t id;
+    uint32_t capacity_ul;
+    uint32_t remaining_ul;
+    uint8_t readiness;
+} tcmd_t;
+typedef enum {
+    DSP_RESP_OK = 0,
+    DSP_RESP_REFUSED,
+    DSP_RESP_DEGRADED,
+    DSP_RESP_ERR_ARG,
+    DSP_RESP_STORAGE,
+    DSP_RESP_FAILED,
+} tresp_status_t;
+typedef struct {
+    uint32_t id;
+    uint8_t kind;
+    tresp_status_t status;
+    dsp_dosing_status_t dosing;
+    uint32_t gates, limits, pump_problems;
+    bool storage_available;
+    uint8_t readiness, dosing_flags;
+    uint32_t capacity_ul, remaining_ul;
+    bool next_due_known;
+    dsp_utc_t next_due_at;
+} tresp_t;
+
 static struct {
     dsp_utc_t at[MAX_SCRIPT]; /* true time at which the phone sends the command */
-    dsp_app_cmd_t cmd[MAX_SCRIPT];
+    tcmd_t cmd[MAX_SCRIPT];
     int len, next;
     /* Client connection intervals [from, to) in true time (while BLE is active). */
     dsp_utc_t conn_from[8], conn_to[8];
@@ -500,7 +535,7 @@ static struct {
     bool resume_fails;
     bool stop_fails;
     int starts, suspends, resumes, stops, waits, rejected_posts;
-    dsp_app_response_t resp[64];
+    tresp_t resp[64];
     int nresp;
 } ble;
 
@@ -512,14 +547,131 @@ static struct {
 #define TEST_MANUAL 200
 static const dsp_app_auth_t OWNER = {DSP_APP_ROLE_OWNER, 0, 0, 0};
 static uint64_t manual_seq;
-static void ble_respond(void *ctx, const dsp_app_response_t *r);
+static void ble_respond(void *ctx, const tresp_t *r);
+
+/* M1.10c.1: issued authorizations (see test_app_ops.c issue_for): the test plays the security
+ * layer with a fake RNG and four enrolled phones. */
+static uint32_t sec_rng = 0x13579BDFu;
+static bool sec_random(void *ctx, uint8_t *out, size_t len)
+{
+    (void)ctx;
+    for (size_t i = 0; i < len; i++) {
+        sec_rng = sec_rng * 1664525u + 1013904223u;
+        out[i] = (uint8_t)(sec_rng >> 24);
+    }
+    return true;
+}
+static const dsp_app_security_t SEC = {NULL, sec_random, NULL};
+static dsp_app_auth_t issued;
+static uint32_t conn_gen;
+static const dsp_app_auth_t *issue_for(const dsp_app_auth_t *a)
+{
+    const dsp_app_owner_t *o = &app.own;
+    if (o->authz_valid && o->authz_slot == a->slot && o->authz_session == app.ss.session_id &&
+        app.ss.session_id != 0 && o->authz_epoch == o->epoch && issued.token == o->authz_token) {
+        return &issued;
+    }
+    if (o->cred != DSP_CRED_CLAIMED || !o->cache.slot[a->slot].used || !app.accepting) {
+        return a;
+    }
+    uint8_t pub[32];
+    memcpy(pub, o->cache.slot[a->slot].pub, sizeof pub);
+    dsp_app_sec_connection_begin(&app);
+    dsp_app_hs_t hs;
+    if (dsp_app_sec_admit(&app, DSP_SEC_SESSION, &hs).status != DSP_OP_OK ||
+        dsp_app_sec_lookup(&app, &hs, pub, &issued).status != DSP_OP_OK) {
+        return a;
+    }
+    return &issued;
+}
+static void claim_record(void)
+{
+    dsp_auth_t a;
+    dsp_auth_provisioned(&a);
+    uint8_t ip[32], iu[32], pk[32];
+    memset(ip, 0x61, sizeof ip);
+    memset(iu, 0x62, sizeof iu);
+    memset(pk, 0x41, sizeof pk);
+    (void)dsp_auth_claim(&a, ip, iu, pk, "T", 1, 0);
+    uint8_t b[DSP_AUTH_RECORD_BYTES];
+    if (dsp_codec_encode_auth(&a, b, sizeof b) == DSP_AUTH_RECORD_BYTES) {
+        fake_kv_put_raw(&kv, "auth", b, sizeof b);
+    }
+    dsp_auth_wipe(&a);
+}
+static void status_to_resp(const dsp_ble_status_rec_t *st, tresp_t *r)
+{
+    r->storage_available = st->storage_ok || st->readiness != 0;
+    r->readiness = st->readiness;
+    r->dosing_flags = st->dosing_flags;
+    r->capacity_ul = st->capacity_ul;
+    r->remaining_ul = st->remaining_ul;
+    r->next_due_known = st->next_due_known;
+    r->next_due_at = st->next_due_at;
+    if (r->gates == 0) {
+        r->gates = st->gates;
+    }
+    r->pump_problems = st->pump_problems;
+}
+static tresp_status_t from_op(dsp_app_op_status_t st)
+{
+    switch (st) {
+    case DSP_OP_OK:
+        return DSP_RESP_OK;
+    case DSP_OP_REFUSED:
+    case DSP_OP_LIMIT:
+    case DSP_OP_NOT_COVERED:
+        return DSP_RESP_REFUSED;
+    case DSP_OP_INVALID:
+        return DSP_RESP_ERR_ARG;
+    case DSP_OP_STORAGE:
+        return DSP_RESP_STORAGE;
+    default:
+        return DSP_RESP_DEGRADED; /* FORBIDDEN (no credentials readable), DEGRADED, BUSY */
+    }
+}
+/* STATUS / REFILL / SET_READINESS as authorized operations. */
+static void run_op(const tcmd_t *c)
+{
+    tresp_t r;
+    memset(&r, 0, sizeof r);
+    r.id = c->id;
+    r.kind = c->kind;
+    dsp_ble_status_rec_t st;
+    memset(&st, 0, sizeof st);
+    const dsp_app_auth_t *auth = issue_for(&OWNER);
+    dsp_app_op_result_t res;
+    if (c->kind == T_REFILL) {
+        res = dsp_app_refill(&app, auth, c->capacity_ul, c->remaining_ul, &st);
+        r.dosing = res.status == DSP_OP_OK ? DSP_DOSING_OK
+                                           : (res.status == DSP_OP_INVALID ? DSP_DOSING_ERR_ARG
+                                                                           : DSP_DOSING_ERR_STORAGE);
+    } else if (c->kind == T_READINESS) {
+        res = dsp_app_set_readiness(&app, auth, c->readiness, &st);
+        r.dosing = res.status == DSP_OP_OK ? DSP_DOSING_OK
+                                           : (res.status == DSP_OP_REFUSED ? DSP_DOSING_REFUSED
+                                                                           : DSP_DOSING_ERR_ARG);
+        if (res.status == DSP_OP_REFUSED) {
+            r.gates = res.detail;
+        }
+    } else {
+        res = dsp_app_get_status(&app, auth, &st);
+    }
+    r.status = from_op(res.status);
+    if (res.status == DSP_OP_OK || res.status == DSP_OP_REFUSED || res.status == DSP_OP_INVALID ||
+        res.status == DSP_OP_STORAGE) {
+        status_to_resp(&st, &r);
+        r.storage_available = true;
+    }
+    ble_respond(NULL, &r);
+}
 static dsp_config_t peek_cfg(void);
 
-static void run_manual(const dsp_app_cmd_t *c)
+static void run_manual(const tcmd_t *c)
 {
     dsp_app_manual_result_t mr;
-    dsp_app_op_result_t res = dsp_app_manual_dose(&app, &OWNER, ++manual_seq, c->capacity_ul, &mr);
-    dsp_app_response_t r;
+    dsp_app_op_result_t res = dsp_app_manual_dose(&app, issue_for(&OWNER), ++manual_seq, c->capacity_ul, &mr);
+    tresp_t r;
     memset(&r, 0, sizeof r);
     r.id = c->id;
     r.kind = TEST_MANUAL;
@@ -558,15 +710,21 @@ static void run_manual(const dsp_app_cmd_t *c)
 static void ble_post_due(void)
 {
     while (ble.next < ble.len && ble.at[ble.next] <= g_true) {
-        if (ble.cmd[ble.next].kind == TEST_MANUAL) {
-            dsp_app_cmd_t c = ble.cmd[ble.next++];
+        tcmd_t c = ble.cmd[ble.next++];
+        if (c.kind == TEST_MANUAL) {
             run_manual(&c);
-            continue;
+        } else if (c.kind == T_STATUS || c.kind == T_REFILL || c.kind == T_READINESS) {
+            run_op(&c);
+        } else if (c.kind == T_END) {
+            /* C10: the owner ends the service window with its issued authorization */
+            (void)dsp_app_end_service_session(&app, issue_for(&OWNER));
+        } else {
+            /* T_FRAME_STATUS: a plain protocol frame through the queue */
+            const uint8_t f[8] = {1, 0, 0x10, 0, (uint8_t)c.id, 0, 0, 0};
+            if (!dsp_app_post_frame(&app, conn_gen, f, sizeof f)) {
+                ble.rejected_posts++;
+            }
         }
-        if (!dsp_app_post(&app, &ble.cmd[ble.next])) {
-            ble.rejected_posts++;
-        }
-        ble.next++;
     }
 }
 static bool ble_connected(void *ctx)
@@ -591,6 +749,7 @@ static bool ble_start(void *ctx)
     }
     ble_on = true;
     ev('B');
+    (void)dsp_app_post_conn_event(&app, true, ++conn_gen, 247); /* the phone's connection */
     return true;
 }
 static void ble_suspend(void *ctx)
@@ -612,6 +771,7 @@ static bool ble_resume(void *ctx)
     }
     ble_on = true;
     ev('r');
+    (void)dsp_app_post_conn_event(&app, true, ++conn_gen, 247);
     return true;
 }
 static void ble_stop(void *ctx)
@@ -657,15 +817,31 @@ static void ble_wait(void *ctx, uint32_t max_ms)
     g_true = until;
     ble_post_due();
 }
-static void ble_respond(void *ctx, const dsp_app_response_t *r)
+static void ble_respond(void *ctx, const tresp_t *r)
 {
     (void)ctx;
     if (ble.nresp < 64) {
         ble.resp[ble.nresp++] = *r;
     }
 }
-static const dsp_ble_port_t BLE = {NULL,     ble_start,  ble_connected, ble_suspend, ble_resume,
-                                   ble_stop, ble_is_off, ble_wait,      ble_respond};
+static int frames_sent, disconnects;
+static bool ble_send_frame(void *ctx, const uint8_t *f, size_t n)
+{
+    (void)ctx;
+    (void)f;
+    (void)n;
+    frames_sent++;
+    return true;
+}
+static void ble_disconnect(void *ctx)
+{
+    (void)ctx;
+    disconnects++;
+    (void)dsp_app_post_conn_event(&app, true, ++conn_gen, 247); /* the phone reconnects */
+}
+static const dsp_ble_port_t BLE = {NULL,       ble_start,      ble_connected, ble_suspend,
+                                   ble_resume, ble_stop,       ble_is_off,    ble_wait,
+                                   ble_send_frame, ble_disconnect, NULL};
 
 static void ble_connection(dsp_utc_t from, dsp_utc_t to)
 {
@@ -696,7 +872,7 @@ static void q_unlock(void *ctx)
 }
 static const dsp_app_sync_t SYNC = {NULL, q_lock, q_unlock};
 
-static void ble_script(dsp_utc_t at, dsp_app_cmd_t cmd)
+static void ble_script(dsp_utc_t at, tcmd_t cmd)
 {
     if (ble.len < MAX_SCRIPT) {
         ble.at[ble.len] = at;
@@ -704,23 +880,23 @@ static void ble_script(dsp_utc_t at, dsp_app_cmd_t cmd)
         ble.len++;
     }
 }
-static dsp_app_cmd_t cmd_of(uint8_t kind, uint32_t a, uint32_t b)
+static tcmd_t cmd_of(uint8_t kind, uint32_t a, uint32_t b)
 {
-    dsp_app_cmd_t c;
+    tcmd_t c;
     memset(&c, 0, sizeof c);
     c.kind = kind;
     c.id = (uint32_t)ble.len + 1;
     if (kind == TEST_MANUAL) {
         c.capacity_ul = a; /* volume */
-    } else if (kind == DSP_CMD_REFILL) {
+    } else if (kind == T_REFILL) {
         c.capacity_ul = a;
         c.remaining_ul = b;
-    } else if (kind == DSP_CMD_SET_READINESS) {
+    } else if (kind == T_READINESS) {
         c.readiness = (uint8_t)a;
     }
     return c;
 }
-static const dsp_app_response_t *resp_of(uint8_t kind)
+static const tresp_t *resp_of(uint8_t kind)
 {
     for (int i = ble.nresp - 1; i >= 0; i--) {
         if (ble.resp[i].kind == kind) {
@@ -809,6 +985,9 @@ static void world(void)
     CFG.sync = &SYNC;
     locks = unlocks = lock_depth = lock_violations = 0;
     CFG.random = 0x5EED1234u;
+    CFG.security = &SEC; /* M1.10c.1 */
+    memset(&issued, 0, sizeof issued);
+    frames_sent = disconnects = 0;
 }
 
 /* The power goes: abort the running wake. */
@@ -967,13 +1146,14 @@ static void boot_and_provision(uint32_t remaining, uint32_t min_interval, bool r
 {
     DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
     DSP_CHECK(rep.slept);
+    claim_record(); /* M1.10c.1: an enrolled phone for issued authorizations */
     configure(remaining, min_interval);
     if (ready) {
         ble.len = ble.next = 0;
-        ble_script(g_true, cmd_of(DSP_CMD_SET_READINESS, DSP_READINESS_READY, 0));
-        ble_script(g_true, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+        ble_script(g_true, cmd_of(T_READINESS, DSP_READINESS_READY, 0));
+        ble_script(g_true, cmd_of(T_END, 0, 0));
         DSP_CHECK(wake(DSP_CAUSE_BUTTON));
-        const dsp_app_response_t *r = resp_of(DSP_CMD_SET_READINESS);
+        const tresp_t *r = resp_of(T_READINESS);
         DSP_CHECK(r != NULL && r->status == DSP_RESP_OK);
         DSP_CHECK_EQ_INT(DSP_READINESS_READY, dosing_state().readiness);
         ble.len = ble.next = 0;
@@ -1264,17 +1444,17 @@ static void test_manual_dose_service_mode(void)
     world();
     boot_and_provision(CAP, 60, true);
     evlog_len = 0;
-    ble_script(g_true + 5, cmd_of(DSP_CMD_STATUS, 0, 0));
+    ble_script(g_true + 5, cmd_of(T_STATUS, 0, 0));
     ble_script(g_true + 10, cmd_of(TEST_MANUAL, 4000, 0));
-    ble_script(g_true + 30, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(g_true + 30, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK(rep.ble_session);
     DSP_CHECK_EQ_INT(1, rep.manual_doses);
     DSP_CHECK_EQ_INT(1, pump.calls);
     DSP_CHECK(pump.manual[0]);
-    const dsp_app_response_t *r = resp_of(TEST_MANUAL);
+    const tresp_t *r = resp_of(TEST_MANUAL);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_OK && r->remaining_ul == CAP - 4000);
-    r = resp_of(DSP_CMD_STATUS);
+    r = resp_of(T_STATUS);
     DSP_CHECK(r != NULL && r->storage_available && r->readiness == DSP_READINESS_READY);
     /* BLE suspended before the pump, resumed afterwards; Wi-Fi never during BLE. */
     DSP_CHECK(strstr(evlog, "BsPr") != NULL);
@@ -1284,7 +1464,7 @@ static void test_manual_dose_service_mode(void)
     ble.len = ble.next = 0;
     ble.nresp = 0;
     ble_script(g_true + 70, cmd_of(TEST_MANUAL, 30000, 0));
-    ble_script(g_true + 80, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(g_true + 80, cmd_of(T_END, 0, 0));
     g_true += 60;
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     r = resp_of(TEST_MANUAL);
@@ -1293,16 +1473,23 @@ static void test_manual_dose_service_mode(void)
     /* No button: no service mode on a timer wake even with commands pending. */
     DSP_CHECK(sleep_and_wake(0));
     DSP_CHECK(!rep.ble_session);
-    /* Bounded queue: the 9th command in a burst is rejected (answered busy by the platform). */
+    /* Bounded queue (M1.10c.1: opaque frames): one frame more than the capacity in a burst is
+     * rejected (answered busy by the platform). The accepted plain GET_STATUS frames get
+     * UNAUTHENTICATED until the third error closes the connection; the rest are stale. */
     ble.len = ble.next = 0;
     ble.nresp = 0;
+    int pumps_before_burst = pump.calls;
     for (int i = 0; i < DSP_APP_CMDQ_CAPACITY + 1; i++) {
-        ble_script(g_true + 1, cmd_of(DSP_CMD_STATUS, 0, 0));
+        ble_script(g_true + 1, cmd_of(T_FRAME_STATUS, 0, 0));
     }
-    ble_script(g_true + 2, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(g_true + 2, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK_EQ_INT(1, ble.rejected_posts);
-    DSP_CHECK_EQ_INT(DSP_APP_CMDQ_CAPACITY + 1, rep.responses); /* + END */
+    DSP_CHECK_EQ_INT(DSP_LINK_ERRORS_MAX, (int)rep.frames_out); /* 3 errors (END is an authorized op) */
+    DSP_CHECK_EQ_INT(DSP_BLE_END_COMMAND, rep.ble_end);
+    DSP_CHECK_EQ_INT(DSP_APP_CMDQ_CAPACITY - DSP_LINK_ERRORS_MAX, (int)rep.frames_stale);
+    DSP_CHECK_EQ_INT(1, (int)rep.link_closes);
+    DSP_CHECK_EQ_INT(pumps_before_burst, pump.calls); /* nothing privileged reached the domain */
     common_invariants();
 }
 
@@ -1320,10 +1507,10 @@ static void test_refill_readiness_blocked(void)
     /* READY over BLE: the plan is recalculated (dose wake for tomorrow 08:00 within the cap
      * is not reachable from 09:00; check the response's next due instead). */
     ble.len = ble.next = 0;
-    ble_script(g_true + 1, cmd_of(DSP_CMD_SET_READINESS, DSP_READINESS_READY, 0));
-    ble_script(g_true + 2, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(g_true + 1, cmd_of(T_READINESS, DSP_READINESS_READY, 0));
+    ble_script(g_true + 2, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
-    const dsp_app_response_t *r = resp_of(DSP_CMD_SET_READINESS);
+    const tresp_t *r = resp_of(T_READINESS);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_OK && r->next_due_known && r->next_due_at == T0 + DAY);
     /* Reservoir too low for the dose: BLOCKED latch at 08:00 next day, no further dose wakes. */
     dsp_config_t c = load_cfg();
@@ -1340,12 +1527,12 @@ static void test_refill_readiness_blocked(void)
     ble.len = ble.next = 0;
     ble.nresp = 0;
     ble_script(g_true + 1, cmd_of(TEST_MANUAL, 1000, 0));
-    ble_script(g_true + 2, cmd_of(DSP_CMD_REFILL, CAP, CAP));
-    ble_script(g_true + 3, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(g_true + 2, cmd_of(T_REFILL, CAP, CAP));
+    ble_script(g_true + 3, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     r = resp_of(TEST_MANUAL);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_REFUSED && r->dosing == DSP_DOSING_REFUSED);
-    r = resp_of(DSP_CMD_REFILL);
+    r = resp_of(T_REFILL);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_OK && r->remaining_ul == CAP);
     DSP_CHECK(!(dosing_state().flags & (DSP_DOSING_F_BLOCKED | DSP_DOSING_F_REFILL_PENDING)));
     DSP_CHECK(r != NULL && r->next_due_known); /* dose wakes back after the refill */
@@ -1353,8 +1540,8 @@ static void test_refill_readiness_blocked(void)
     DSP_CHECK_EQ_INT(1, pump.calls);
     /* Back to SERVICE_REQUIRED: dose wakes stop again. */
     ble.len = ble.next = 0;
-    ble_script(g_true + 1, cmd_of(DSP_CMD_SET_READINESS, DSP_READINESS_SERVICE_REQUIRED, 0));
-    ble_script(g_true + 2, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(g_true + 1, cmd_of(T_READINESS, DSP_READINESS_SERVICE_REQUIRED, 0));
+    ble_script(g_true + 2, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     run_until(T0 + 5 * DAY);
     DSP_CHECK_EQ_INT(1, pump.calls);
@@ -1426,8 +1613,8 @@ static void test_critical_notification_existing_wake(void)
     /* Button wakes within the hour: CRITICAL may not start Wi-Fi again (hourly limit). */
     g_true += 10 * 60;
     ble.len = ble.next = 0;
-    ble_script(g_true + 1, cmd_of(DSP_CMD_STATUS, 0, 0));
-    ble_script(g_true + 2, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(g_true + 1, cmd_of(T_STATUS, 0, 0));
+    ble_script(g_true + 2, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK_EQ_INT(connects, wifi_connects);
     common_invariants();
@@ -1445,9 +1632,9 @@ static void test_ble_interrupted_by_due_dose(void)
     ble.len = ble.next = 0;
     ble.nresp = 0;
     ble_script(T0 + 20, cmd_of(TEST_MANUAL, 2000, 0)); /* inside the interval */
-    ble_script(T0 + 30, cmd_of(DSP_CMD_STATUS, 0, 0));
+    ble_script(T0 + 30, cmd_of(T_STATUS, 0, 0));
     ble_script(T0 + 100, cmd_of(TEST_MANUAL, 2000, 0));
-    ble_script(T0 + 150, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(T0 + 150, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK(rep.ble_session);
     DSP_CHECK_EQ_INT(2, pump.calls);
@@ -1459,7 +1646,7 @@ static void test_ble_interrupted_by_due_dose(void)
     DSP_CHECK(strstr(evlog + 4, "sPr") != NULL);
     DSP_CHECK(strchr(evlog, 'W') == NULL || strchr(evlog, 'W') > strchr(evlog, 'b'));
     DSP_CHECK_EQ_INT(3, ble.nresp); /* the 180 s window ends before the scripted END */
-    const dsp_app_response_t *r = &ble.resp[0];
+    const tresp_t *r = &ble.resp[0];
     DSP_CHECK(r->kind == TEST_MANUAL && r->status == DSP_RESP_REFUSED &&
               (r->limits & DSP_DOSING_L_INTERVAL)); /* refused: right after the scheduled dose */
     r = &ble.resp[2];
@@ -1499,11 +1686,11 @@ static void test_ble_session_lifetime(void)
     ble.len = ble.next = 0;
     ble.nresp = 0;
     ble_connection(t + 20, t + 400);
-    ble_script(t + 300, cmd_of(DSP_CMD_STATUS, 0, 0)); /* after the first 180 s */
+    ble_script(t + 300, cmd_of(T_STATUS, 0, 0)); /* after the first 180 s */
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK_EQ_INT(DSP_BLE_END_IDLE, rep.ble_end);
     DSP_CHECK(g_true - t >= 580 && g_true - t <= 585);
-    DSP_CHECK(resp_of(DSP_CMD_STATUS) != NULL);
+    DSP_CHECK(resp_of(T_STATUS) != NULL);
     DSP_CHECK(rep.slept);
 
     /* 3. Reconnect after a disconnect: idle restarts each time; END ends at once. */
@@ -1513,7 +1700,7 @@ static void test_ble_session_lifetime(void)
     ble.len = ble.next = 0;
     ble_connection(t + 100, t + 200);
     ble_connection(t + 350, t + 500); /* within 180 s of the first disconnect */
-    ble_script(t + 450, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(t + 450, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK_EQ_INT(DSP_BLE_END_COMMAND, rep.ble_end);
     DSP_CHECK(g_true - t >= 450 && g_true - t <= 455);
@@ -1587,8 +1774,8 @@ static void test_ble_session_lifetime(void)
     /* 8. Queue boundary: posting outside a session is refused; every queue access locked. */
     world();
     boot_and_provision(CAP, 60, true);
-    dsp_app_cmd_t c = cmd_of(DSP_CMD_STATUS, 0, 0);
-    DSP_CHECK(!dsp_app_post(&app, &c)); /* no session active */
+    const uint8_t hello[10] = {1, 0, 1, 0, 1, 0, 2, 0, 1, 1};
+    DSP_CHECK(!dsp_app_post_frame(&app, conn_gen, hello, sizeof hello)); /* no session active */
     DSP_CHECK(locks > 0 && locks == unlocks);
     common_invariants();
 }
@@ -1608,9 +1795,9 @@ static void test_storage_failures(void)
     g_true = T0 + 10;
     ble.len = ble.next = 0;
     ble.nresp = 0;
-    ble_script(g_true + 1, cmd_of(DSP_CMD_STATUS, 0, 0));
+    ble_script(g_true + 1, cmd_of(T_STATUS, 0, 0));
     ble_script(g_true + 2, cmd_of(TEST_MANUAL, 1000, 0));
-    ble_script(g_true + 3, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(g_true + 3, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK(rep.degraded);
     DSP_CHECK_EQ_INT(0, pump.calls);
@@ -1618,8 +1805,10 @@ static void test_storage_failures(void)
     DSP_CHECK_EQ_INT(0, count_trace(DSP_STAGE_CONNECT));
     DSP_CHECK_EQ_INT(DSP_WAKE_MAX_SLEEP, rep.plan.reason);
     DSP_CHECK_EQ_INT(6 * HOUR, rep.plan.sleep_s);
-    const dsp_app_response_t *r = resp_of(DSP_CMD_STATUS);
-    DSP_CHECK(r != NULL && r->status == DSP_RESP_OK && !r->storage_available);
+    /* M1.10c.1: storage unreadable = credentials unreadable: no phone can be authenticated, so
+     * STATUS is refused too (HELLO still reports CREDENTIALS_DAMAGED) */
+    const tresp_t *r = resp_of(T_STATUS);
+    DSP_CHECK(r != NULL && r->status == DSP_RESP_DEGRADED && !r->storage_available);
     r = resp_of(TEST_MANUAL);
     DSP_CHECK(r != NULL && r->status == DSP_RESP_DEGRADED);
     DSP_CHECK(rep.slept && rep.retained_saved);
@@ -1791,7 +1980,7 @@ static void test_safe_shutdown_paths(void)
     boot_and_provision(CAP, 60, true);
     ble.stop_fails = true;
     ble.len = ble.next = 0;
-    ble_script(g_true + 1, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+    ble_script(g_true + 1, cmd_of(T_END, 0, 0));
     DSP_CHECK(wake(DSP_CAUSE_BUTTON));
     DSP_CHECK(rep.fail_safe && (last_failsafe & DSP_POWER_CHK_BLE));
     DSP_CHECK(!(last_failsafe & DSP_POWER_CHK_PUMP));
@@ -1860,7 +2049,7 @@ static dsp_wake_cause_t scenario_prepare(void)
     if (scenario == 1) {
         g_true = T0 - 120;
         ble_script(T0 - 100, cmd_of(TEST_MANUAL, 2000, 0));
-        ble_script(T0 + 150, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+        ble_script(T0 + 150, cmd_of(T_END, 0, 0));
         return DSP_CAUSE_BUTTON;
     }
     g_true = T0;
@@ -1993,8 +2182,8 @@ static void test_long_run_clean(void)
         (void)today;
         if (c.reservoir_remaining_ul < 30000) {
             ble.len = ble.next = 0;
-            ble_script(g_true + 1, cmd_of(DSP_CMD_REFILL, CAP, CAP));
-            ble_script(g_true + 2, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+            ble_script(g_true + 1, cmd_of(T_REFILL, CAP, CAP));
+            ble_script(g_true + 2, cmd_of(T_END, 0, 0));
             DSP_CHECK(wake(DSP_CAUSE_BUTTON));
             refills++;
             continue;
@@ -2060,14 +2249,14 @@ static void test_long_run_chaotic(void)
             ble.len = ble.next = 0;
             dsp_config_t c = load_cfg();
             if (c.reservoir_remaining_ul < 40000 || rnd(3) == 0) {
-                ble_script(g_true + 2, cmd_of(DSP_CMD_REFILL, CAP, CAP));
+                ble_script(g_true + 2, cmd_of(T_REFILL, CAP, CAP));
             }
             if (rnd(2) == 0) {
                 ble_script(g_true + 5, cmd_of(TEST_MANUAL, 1000 + rnd(3000), 0));
             }
-            ble_script(g_true + 6, cmd_of(DSP_CMD_STATUS, 0, 0));
+            ble_script(g_true + 6, cmd_of(T_STATUS, 0, 0));
             if (rnd(2) == 0) {
-                ble_script(g_true + 20, cmd_of(DSP_CMD_END_SESSION, 0, 0));
+                ble_script(g_true + 20, cmd_of(T_END, 0, 0));
             }
         } else {
             g_true += sleep_s + latency;

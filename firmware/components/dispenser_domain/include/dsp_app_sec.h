@@ -51,6 +51,14 @@ typedef struct {
     uint8_t id_pub[DSP_AUTH_KEY_BYTES]; /* public identity key (zero unless CLAIMED) */
 } dsp_app_sec_view_t;
 
+/* Connection boundaries (M1.10c.1): a security session lives exactly as long as one BLE
+ * connection. begin: a new random session ID (0 without a security layer); end: the handshake
+ * handle, the issued authorization and the recovery confirmation are dropped (a pending
+ * confirmation counts as a failed one). The Application Service calls them on transport events
+ * and on BLE suspension; the security layer and host tests may call them too. */
+void dsp_app_sec_connection_begin(dsp_app_t *app);
+void dsp_app_sec_connection_end(dsp_app_t *app);
+
 /* Public state for HELLO / Info / advertising (no authorization needed, nothing secret). */
 void dsp_app_sec_view(dsp_app_t *app, dsp_app_sec_view_t *out);
 

@@ -123,7 +123,7 @@ Error body (any type, flags `RESPONSE|ERROR`): `code u8, detail u32, aux u32`.
 | Field | Values |
 |---|---|
 | `claim_state` | 0 UNCLAIMED, 1 CLAIMED |
-| HELLO response `flags` | bit 0 RECOVERY_ARMED; others 0 (v1.0 wire format as implemented; **pending M1.10c amendment:** bit 1 CREDENTIALS_DAMAGED, approved decision O9, to be added to this table, the Info record and advertising flags, the vector generator and vectors, and the C and Kotlin codecs in one change) |
+| HELLO response `flags` | bit 0 RECOVERY_ARMED, bit 1 CREDENTIALS_DAMAGED (the stored ownership record is unreadable, inconsistent or key-faulted; `claim_state` is then 1, never 0; decision O9, M1.10c.1); bits 2–7 MUST be 0 |
 | `purpose` | 1 SESSION, 2 CLAIM, 3 ADD, 4 RECOVERY |
 | `msg_index` | 0–2 |
 | `readiness` | 1 READY, 2 SERVICE_REQUIRED |
@@ -133,7 +133,7 @@ Error body (any type, flags `RESPONSE|ERROR`): `code u8, detail u32, aux u32`.
 | `last_result` (WIFI_GET) | 0 UNKNOWN, 1 CONNECTED, 2 NO_AP, 3 AUTH, 4 TIMEOUT, 5 OTHER |
 | `reason` (EV_SESSION_CLOSING) | 1 IDLE, 2 MAX, 3 DOSE, 4 COMMAND |
 | `action` (EV_CONFIRM_ON_DEVICE) | 1 RECOVERY |
-| error `code` | 1 MALFORMED, 2 UNSUPPORTED_VERSION, 3 UNKNOWN_TYPE, 4 UNAUTHENTICATED, 5 FORBIDDEN, 6 BUSY, 7 REFUSED, 8 LIMIT, 9 NOT_COVERED, 10 INVALID, 11 CONFLICT, 12 NOT_FOUND, 13 STORAGE, 14 DEGRADED, 15 PUMP_FAILED, 16 SESSION_EXPIRED, 17 DUPLICATE, 18 HANDSHAKE_FAILED, 19 SLOTS_FULL |
+| error `code` | 1 MALFORMED, 2 UNSUPPORTED_VERSION, 3 UNKNOWN_TYPE, 4 UNAUTHENTICATED, 5 FORBIDDEN, 6 BUSY, 7 REFUSED, 8 LIMIT, 9 NOT_COVERED, 10 INVALID, 11 CONFLICT, 12 NOT_FOUND, 13 STORAGE, 14 DEGRADED, 15 PUMP_FAILED, 16 SESSION_EXPIRED, 17 DUPLICATE, 18 HANDSHAKE_FAILED, 19 SLOTS_FULL, 20 UNAVAILABLE (M1.10c.1; section 8.1) |
 | Schedule `kind` | 0 ONCE, 1 DAILY, 2 WEEKLY |
 
 Value ranges not listed (gates, limits, masks, revisions, volumes) are carried as-is; their
@@ -150,11 +150,12 @@ response type that has no request (ENROLL_RESULT) and events never appear as req
 ### 7.1 Info characteristic (public, 32 bytes)
 
 `magic bytes(4) = "DSP2" | proto_min u8 | proto_max u8 | claim_state u8 | flags u8 (bit 0
-RECOVERY_ARMED) | caps u32 | fw_major u8 | fw_minor u8 | fw_patch u16 | device_tag u16 |
+RECOVERY_ARMED, bit 1 CREDENTIALS_DAMAGED; as the HELLO response) | caps u32 | fw_major u8 | fw_minor u8 | fw_patch u16 | device_tag u16 |
 reserved(14)`.
 
 Advertising Service Data payload (4 bytes): `proto_major u8 | flags u8 (bit 0 CLAIMED, bit 1
-RECOVERY_ARMED) | device_tag u16`.
+RECOVERY_ARMED, bit 2 CREDENTIALS_DAMAGED; bits 3–7 MUST be 0) | device_tag u16`. A device with
+damaged credentials sets CLAIMED and CREDENTIALS_DAMAGED; it is never advertised as unclaimed.
 
 ### 7.2 Status (58 bytes)
 
@@ -211,6 +212,20 @@ When `has_end` is 0 the `end_date` bytes MUST be zero.
   are malformed. A sender never omits fields of its own minor.
 - `caps` (u32) announces optional features; v1.0 bits: 0 WIFI_PROVISIONING, 1 PHONE_TIME,
   2 HISTORY, 3 PRIMING, 4 VIEWER_ROLE (all others 0).
+
+### 8.1 Unknown versus unavailable operations (M1.10c.1, decision C5)
+
+- `UNKNOWN_TYPE` (3): the `type` byte is not defined by any protocol version this receiver
+  implements (an unlisted or reserved type). The error frame echoes the request's `type`; the
+  body is not decoded. Typical cause: a newer client talking to an older device.
+- `UNAVAILABLE` (20): the `type` is a recognized v1 operation, but this firmware does not provide
+  it (its optional feature is absent; the matching `caps` bit is clear), e.g. WIFI_SET/GET/CLEAR
+  without WIFI_PROVISIONING, or FACTORY_RESET. `detail` and `aux` are 0. It is permanent for this
+  firmware: retrying does not help, and nothing was executed. It is sent only inside an
+  authenticated session (before authentication every privileged type is `UNAUTHENTICATED`,
+  section 10.6), so it reveals nothing beyond the public `caps`.
+- `REFUSED` (7) stays reserved for a changeable state precondition of a provided operation
+  (section 10.1); `UNAVAILABLE` never depends on device state.
 
 ## 9. Examples
 
@@ -314,6 +329,18 @@ interval outside 24–48 h, 3 unknown notification bits, 4 calibration time neit
   last 8 results; older decided requests report 6 and still never execute. The app must never
   re-issue a dose with a new `seq` automatically after a lost response.
 
+### 10.4a Retries (summary; details in `docs/SECURITY_INTEGRATION_DESIGN.md` C4)
+
+Within one session a request MAY be retransmitted with the same `txn` and an identical body after
+a response timeout. The device answers it from its bounded response cache (the last 8 responses,
+bound to the authenticated connection, ownership epoch, phone slot and request identity) without
+executing the operation again. A `txn` reused with a different type or body is rejected with
+`MALFORMED` and not executed. The cache is cleared at disconnect, session end, any ownership
+change and reboot. It does **not** provide durable exactly-once semantics across reconnections:
+there the durable mechanisms decide (revisions, the manual-dose `seq`, which stays authoritative,
+and single-use invite tokens). A client uses the first response it receives for a `txn` and
+discards later ones.
+
 ### 10.5 Time
 
 `SET_TIME`: `phone_utc_ms` is truncated to seconds. `decision`:
@@ -327,3 +354,22 @@ interval outside 24–48 h, 3 unknown notification bits, 4 calibration time neit
 | 4 HOLD | a rollback hold is recorded, or the time is more than 7 days behind the highest trusted time; phone time never starts or ends a hold | no |
 
 `offset_s` = new minus previous device time when accepted from a trusted clock, else 0.
+
+### 10.6 Before authentication (M1.10c.1)
+
+Until a security session is established on a connection, the device accepts only:
+
+| Frame | State | Device action |
+|---|---|---|
+| HELLO (plain request) | connection open, no HELLO yet | version negotiation (section 8); HELLO response with the public state |
+| HS (plain request) | after HELLO | the handshake (M1.10c.2); until then `HANDSHAKE_FAILED` and the connection is closed |
+| END_SESSION (plain request) | any | empty response; **only this connection** is closed. The device's service window (button session) continues and accepts new connections (decision C10). Only an authenticated owner's END_SESSION ends the service window |
+
+Everything else is refused without decoding the body: any other request type → `UNAUTHENTICATED`;
+HS before HELLO or a second HELLO → `MALFORMED`; an undefined `type` → `UNKNOWN_TYPE`; a foreign
+`major` → `UNSUPPORTED_VERSION`; a frame with RESPONSE, ERROR or EVENT set, or an unparsable header
+→ `MALFORMED`; any frame with ENCRYPTED set → the connection is closed without a reply. The third
+error on a connection closes it, and an unauthenticated connection is closed after 30 s. These
+errors carry `detail` 0 (except `UNSUPPORTED_VERSION`, section 8) and never depend on secret state.
+No request in this phase reaches a device operation.
+

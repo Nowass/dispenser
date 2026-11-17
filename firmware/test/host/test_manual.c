@@ -40,9 +40,8 @@ static int manual_runs(uint8_t slot, uint64_t seq)
 }
 static op_t op_service_required(void)
 {
-    op_t o = mk(OP_POST);
-    o.cmd.kind = DSP_CMD_SET_READINESS;
-    o.cmd.readiness = DSP_READINESS_SERVICE_REQUIRED;
+    op_t o = mk(OP_READINESS);
+    o.readiness = DSP_READINESS_SERVICE_REQUIRED;
     return o;
 }
 /* After a power loss: power-on boot (recovery), then a session that re-establishes the time. */
@@ -127,11 +126,14 @@ static void test_accept_duplicate_invalid_floor(void)
 
 /* A duplicate arriving while the pump of the original runs (re-entrant call from the pump):
  * already decided (PENDING), never a second run. */
-static res_t during;
+static res_t during, during_stale;
 static void probe_during(void)
 {
     op_allows_pump = true;
-    during.r = dsp_app_manual_dose(&app, &OWNER, 7, VOL, &during.manual);
+    /* M1.10c.1: the pump suspended BLE, which ended the connection and its authorization */
+    during_stale.r = dsp_app_manual_dose(&app, &issued, 7, VOL, &during_stale.manual);
+    /* even a freshly authenticated duplicate (new connection) is already decided: PENDING */
+    during.r = dsp_app_manual_dose(&app, issue_for(&OWNER), 7, VOL, &during.manual);
 }
 static void test_duplicate_before_during_after(void)
 {
@@ -144,6 +146,7 @@ static void test_duplicate_before_during_after(void)
     int after = step(g_true, op_manual(7, VOL));
     DSP_CHECK(session());
     DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[a].r.status);
+    DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, during_stale.r.status);
     DSP_CHECK_EQ_INT(DSP_OP_DUPLICATE, during.r.status);
     DSP_CHECK_EQ_INT(DSP_MRES_PENDING, during.r.detail);
     DSP_CHECK_EQ_INT(DSP_OP_DUPLICATE, sc.res[after].r.status);
@@ -280,12 +283,23 @@ static void test_slots_exhaustion_and_authorization(void)
     uint64_t fl = 0;
     DSP_CHECK_EQ_INT(DSP_OP_BUSY, dsp_app_manual_dose(&app, &OWNER, 1000, VOL, &mr).status);
     DSP_CHECK_EQ_INT(DSP_OP_BUSY, dsp_app_manual_floor(&app, &OWNER, &fl).status);
+    /* M1.10c.1: the queue command is gone; a MANUAL_DOSE protocol frame without a security
+     * session is refused by the gate (UNAUTHENTICATED) and never reaches the Dosing Service. */
     clear_script();
-    op_t retired = mk(OP_POST);
-    retired.cmd.kind = DSP_CMD_RETIRED_MANUAL_DOSE;
-    int rp = step(g_true, retired);
+    op_t fr = mk(OP_FRAME);
+    const uint8_t md[8 + 12] = {1, 0, 0x40, 0, 0x34, 0x12, 12, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0xE8, 3, 0, 0};
+    memcpy(fr.frame, md, sizeof md);
+    fr.frame_len = sizeof md;
+    long sets0 = kv.sets;
+    int pumps0 = pump.calls;
+    int rp = step(g_true, fr);
     DSP_CHECK(session());
-    DSP_CHECK_EQ_INT(DSP_OP_BUSY, sc.res[rp].r.status); /* dsp_app_post() refused it */
+    DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[rp].r.status); /* posted */
+    DSP_CHECK(sc.nresp >= 1);
+    DSP_CHECK(sc.resp[0][2] == 0x40 && sc.resp[0][3] == (DSP_BLE_F_RESPONSE | DSP_BLE_F_ERROR) &&
+              sc.resp[0][8] == DSP_BLE_E_UNAUTHENTICATED);
+    DSP_CHECK_EQ_INT(pumps0, pump.calls);
+    DSP_CHECK_EQ_INT(sets0, kv.sets); /* no decision, nothing written */
     invariants();
 }
 
@@ -676,7 +690,8 @@ static void test_corrupt_and_unsupported_dosing_records(void)
         clear_script();
         int r = step(g_true, op_manual(77, VOL));
         DSP_CHECK(session());
-        DSP_CHECK_EQ_INT(DSP_OP_DEGRADED, sc.res[r].r.status);
+        /* storage unreadable: no credentials, no authorization (M1.10c.1) */
+        DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[r].r.status);
         DSP_CHECK_EQ_INT(0, sc.res[r].pumps);
     }
     /* A newer format: unsupported, fail closed, untouched. */
@@ -691,7 +706,7 @@ static void test_corrupt_and_unsupported_dosing_records(void)
     clear_script();
     int r3 = step(g_true, op_manual(78, VOL));
     DSP_CHECK(session());
-    DSP_CHECK_EQ_INT(DSP_OP_DEGRADED, sc.res[r3].r.status);
+    DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[r3].r.status);
     DSP_CHECK_EQ_INT(0, sc.res[r3].pumps);
     invariants();
 }
