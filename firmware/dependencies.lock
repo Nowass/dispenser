@@ -1,0 +1,17 @@
+dependencies:
+  esphome/libsodium:
+    component_hash: 39bee6f58d2d7fb8f2d30e04133afe60d0b642792196d36cde3a6dd07738fb08
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.10021.12
+  idf:
+    source:
+      type: idf
+    version: 6.1.0
+direct_dependencies:
+- esphome/libsodium
+manifest_hash: 20ece5c32eaf8295b8ada4f879156b02dd1be3356e7268a3d1da24b37f52bb9f
+target: esp32c3
+version: 3.0.0

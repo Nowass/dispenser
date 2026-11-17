@@ -35,15 +35,24 @@ if(NOT DSP_FW_VERSION_LINES EQUAL 1 OR
 endif()
 message(STATUS "Firmware version (version.txt): ${DSP_FW_VERSION}")
 
-add_compile_options(-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror)
 if(DSP_HOST_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer
                         -fno-sanitize-recover=all)
     add_link_options(-fsanitize=address,undefined)
 endif()
 
+# M1.10c.2a: the pinned, verified, patched noise-c and libsodium (decision C3; network access is
+# needed once per DSP_DEPS_CACHE). Added before the project's warning flags: third-party code is
+# built with its own warnings but under the same sanitizers.
+include("${FW_ROOT}/third_party/noise-c/noise_c_deps.cmake")
+dsp_noise_c_host()
+
+add_compile_options(-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror)
+
 # Domain library, built from the component's own CMake file (single source list).
 add_subdirectory("${FW_ROOT}/components/dispenser_domain" dispenser_domain)
+# Security layer (Noise sessions, dispatcher, response cache) over the domain.
+add_subdirectory("${FW_ROOT}/components/dispenser_security" dispenser_security)
 
 enable_testing()
 
@@ -95,6 +104,15 @@ dsp_add_host_test(test_session test_session.c support/fake_kv.c)
 target_compile_options(test_session PRIVATE -Wno-unused-function)
 dsp_add_host_test(test_owner test_owner.c support/fake_kv.c)
 target_compile_options(test_owner PRIVATE -Wno-unused-function)
+# M1.10c.2a: session-security derivations (independent vectors) and the Noise security session
+# end to end through the Application Service (a noise-c "phone" against dsp_blesec).
+dsp_add_host_test(test_secderive test_secderive.c)
+target_link_libraries(test_secderive PRIVATE dispenser_security sodium)
+target_compile_definitions(test_secderive PRIVATE DSP_VECTORS_DIR="${DSP_VECTORS_DIR}")
+dsp_add_host_test(test_blesec test_blesec.c support/fake_kv.c support/test_rng.c)
+target_link_libraries(test_blesec PRIVATE dispenser_security noise_c sodium)
+target_compile_options(test_blesec PRIVATE -Wno-unused-function)
+set_tests_properties(test_blesec PROPERTIES TIMEOUT 300)
 # M1.9c: the pure platform adapter logic (compiled unchanged into the firmware component;
 # no ESP-IDF headers) and a two-thread check of the command-queue boundary.
 set(DSP_PLATFORM_DIR "${CMAKE_CURRENT_LIST_DIR}/../../components/dispenser_platform")

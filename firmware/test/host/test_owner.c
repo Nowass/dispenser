@@ -39,7 +39,7 @@ static bool fake_random(void *ctx, uint8_t *out, size_t len)
     }
     return true;
 }
-static const dsp_app_security_t SEC = {NULL, fake_random, NULL};
+static const dsp_app_security_t SEC = {.ctx = NULL, .random = fake_random};
 
 static void k32(uint8_t out[32], uint8_t v)
 {

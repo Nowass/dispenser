@@ -109,6 +109,26 @@ these figures are **not** target measurements.
 | 8.3 | Handshake duration (X25519 in software) for XXpsk3 and IK, and per-frame encrypt/decrypt time | timestamps (`esp_timer_get_time`) | |
 | 8.4 | Hardware RNG quality with the radio on during a BLE session (ephemeral keys) | ESP-IDF RNG notes; entropy check | |
 
+### 8a. M1.10c.2b — hardware acceptance of the security integration (OPEN)
+
+M1.10c.2a (software integration) is verified on the host and by ESP32-C3 cross-builds only. None of
+that demonstrates the target RNG path, BLE runtime behavior, timing, stack or heap on the device:
+cross-build success and host interoperability are **not** evidence for these items. Design
+reference: `docs/SECURITY_INTEGRATION_DESIGN.md` section 6.1. No security-enabled firmware
+(`CONFIG_DSP_BLE_SECURITY`) is deployed before R1–R4 pass; the build refuses that option together
+with the production endpoint.
+
+| # | Check | Pass criterion | Result |
+|---|---|---|---|
+| R1 | RNG registration order | `dsp_esp_rng_name()` = `dsp_esp32c3_hw` after the first ready call; `dsp_esp_rng_registered_before_init()` true; no libsodium use before `dsp_esp_rng_register()` | |
+| R2 | RNG routing | with the BT controller enabled, a handshake raises `dsp_esp_rng_calls()`; libsodium's internal source never used | |
+| R3 | Refusal without RF | controller disabled: `dsp_esp_rng_ready()` false, HELLO session ID 0, HS message 0 answered HANDSHAKE_FAILED; the `abort()` path not reached | |
+| R4 | Live handshakes over BLE | CLAIM (XXpsk3), SESSION (IK), ADD and RECOVERY with a phone (or a host peer over BLE) succeed; two runs give different ephemeral keys and session IDs | |
+| R5 | RNG quality sample | ≥ 1 MiB from `esp_fill_random` with RF on, analyzed off-device (`ent`, dieharder or a NIST STS subset); recorded | |
+| R6 | PSK on target | the `test-vectors/ble_session_v1.txt` PSK vectors reproduce on the device through `dsp_psk_derive` (mbedTLS/TF-PSA-Crypto on the ESP32-C3) | |
+| R7 | Target resources | 8.1–8.3 with the real stack: peak heap per handshake, task stack high-water mark during a handshake and during dispatch, handshake and per-frame timing; the static estimates in the design's resource table replaced | |
+| R8 | Lifecycle on the device | pump suspension closes the security session (EV_SUSPENDING_FOR_DOSE best effort), reconnect needs a new IK handshake; EV_SESSION_CLOSING before the 15-minute maximum; a plain END_SESSION closes only its connection | |
+
 ## 9. Configuration limits and storage (M1.10b.1)
 
 The firmware accepts every representable value of the calibration and safety fields (only

@@ -373,3 +373,66 @@ error on a connection closes it, and an unauthenticated connection is closed aft
 errors carry `detail` 0 (except `UNSUPPORTED_VERSION`, section 8) and never depend on secret state.
 No request in this phase reaches a device operation.
 
+
+## 11. Session security (M1.10c.2a)
+
+Implementations: firmware `dispenser_security` (`dsp_blesec`, `dsp_secderive`); Android in M1.10e.
+Independent reference vectors for every derivation: `test-vectors/ble_session_v1.txt` (Python
+standard library). Noise: `Noise_XXpsk3_25519_ChaChaPoly_SHA256` for CLAIM, ADD and RECOVERY;
+`Noise_IK_25519_ChaChaPoly_SHA256` for SESSION; the phone is the initiator, the device the responder.
+
+### 11.1 Derivations
+
+- `device_id_hash` (HELLO response): the first 8 bytes of SHA-256(`"DSP2 id"` ‖ identity public key
+  (32)) when the device is CLAIMED; of SHA-256(`"DSP2 dev"` ‖ device ID (6-byte factory MAC)) when it
+  is UNCLAIMED or its credentials are damaged. Labels are ASCII without terminator.
+- Prologue (Noise prologue of every handshake): `"DSP2 BLE v1"` (11 ASCII bytes) ‖ major u8 ‖
+  minor u8 ‖ purpose u8 ‖ `device_id_hash` (8) ‖ `session_id` u32 LE — 26 bytes, the values of the
+  HELLO response of the same connection. A handshake cannot be replayed across connections,
+  devices, purposes or versions.
+- PSK (XXpsk3 only): `HKDF-SHA256(salt = "DSP2 psk" (8 ASCII bytes), ikm = setup code (16 bytes),
+  info = purpose u8 ‖ invite token (16 bytes, ADD only; empty for CLAIM and RECOVERY), L = 32)`
+  (RFC 5869). The context is in `info`; moving it into the salt gives a different key (negative
+  vectors). IK uses no PSK.
+
+### 11.2 Handshake messages
+
+Carried in plain HS frames (section 5) after HELLO on the same connection:
+
+| Step | Frame | Noise message | Payload |
+|---|---|---|---|
+| 1 | phone → HS request `{purpose, msg_index 0, noise}` | XX msg 1 (`e`) / IK msg 1 (`e, es, s, ss`) | empty |
+| 2 | device → HS response `{msg_index 1, noise}` | XX msg 2 (`e, ee, s, es`) / IK msg 2 (`e, ee, se`) | empty |
+| 3 (XX) | phone → HS request `{purpose, msg_index 2, noise}` | XX msg 3 (`s, se, psk`) | `name`: `len u8 (0..24)` ‖ UTF-8 bytes (no control characters), nothing else |
+| 4 (XX) | device → `ENROLL_RESULT` (0x08), RESPONSE ‖ ENCRYPTED, same `txn` as step 3 | first device transport message | `slot u8` |
+
+IK is complete after step 2 (the device authorizes the phone's static key before answering).
+RECOVERY: after step 3 the device sends the encrypted event `EV_CONFIRM_ON_DEVICE {action 1,
+seconds 20}`; requests other than END_SESSION are answered with encrypted `BUSY` detail 2 until the
+three presses are confirmed; then `ENROLL_RESULT {0}` (txn of step 3) follows, or an encrypted
+`REFUSED` error (confirmation aborted or timed out) and the connection is closed.
+
+Any deviation fails the handshake with a plain `HANDSHAKE_FAILED` error and closes the connection:
+wrong order or `msg_index`, a different purpose in step 3, a non-empty payload where none is
+allowed, a malformed name, a Noise authentication failure (wrong setup code, wrong invite token,
+prologue mismatch, unknown or revoked phone key, unexpected device key), an admission refusal
+(purpose not allowed in the device state), no hardware entropy source, or no step 3 within 10 s.
+The error never says which input was wrong.
+
+### 11.3 Transport
+
+- Every frame after the handshake is ENCRYPTED: the 8-byte header is the associated data, the body
+  is `ciphertext ‖ tag(16)` of the plain body (section 6); `len` is the ciphertext length. Nonces are
+  implicit and sequential per direction (Noise); at most 2^32 − 1 messages per direction.
+- Close without reply: a decryption failure (modified, truncated, replayed, reordered frame, wrong
+  key), an encrypted frame before the handshake completed, the nonce limit, a plain frame other than
+  END_SESSION after authentication.
+- A decrypted body that is malformed, or a type that is not an encrypted request type, is answered
+  with an encrypted `MALFORMED` error, then the connection is closed.
+- A plain END_SESSION is answered (plain) and closes only that connection in every state (C10). An
+  encrypted END_SESSION of an authenticated owner ends the device's service window; during a
+  RECOVERY confirmation (not yet authorized) it ends only the connection.
+- Events (encrypted, `txn` 0): `EV_SESSION_CLOSING {2 MAX, seconds_left}` once, 30 s before the
+  service window's maximum; `EV_SUSPENDING_FOR_DOSE {0}` (best effort) immediately before a pump run,
+  which closes the connection.
+- Retries: section 10.4a (response cache of eight entries per authenticated connection).

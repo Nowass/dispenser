@@ -158,6 +158,9 @@ static struct {
 static dsp_schedule_set_t durable_set(void);
 static bool pump_fail_next;
 static void (*pump_hook)(void); /* called while the pump runs (test-specific probes) */
+/* M1.10c.2a: manual doses arrive as encrypted BLE requests (dispatched after the hook that posted
+ * them), not as scripted OP_MANUAL steps; the durable-decision oracle below still applies. */
+static bool manual_via_ble;
 
 static dsp_pump_result_t pump_run(void *ctx, uint32_t runtime_ms)
 {
@@ -179,7 +182,7 @@ static dsp_pump_result_t pump_run(void *ctx, uint32_t runtime_ms)
             (ds.flags & DSP_DOSING_F_MANUAL_ACTIVE)) {
             const dsp_manual_result_t *e = dsp_dosing_state_find_result(&ds, ds.marker_slot, ds.marker_req);
             if (ds.marker_req == 0 || ds.manual_hw[ds.marker_slot] < ds.marker_req || e == NULL ||
-                e->state != DSP_MRES_PENDING || !op_allows_pump) {
+                e->state != DSP_MRES_PENDING || !(op_allows_pump || manual_via_ble)) {
                 pump.violations++;
                 fprintf(stderr, "manual pump run without a durable decision\n");
             }
@@ -394,7 +397,7 @@ static bool harness_random(void *ctx, uint8_t *out, size_t len)
     }
     return true;
 }
-static const dsp_app_security_t HARNESS_SEC = {NULL, harness_random, NULL};
+static const dsp_app_security_t HARNESS_SEC = {.ctx = NULL, .random = harness_random};
 static bool raw_auth;           /* a step's hand-made authorization is passed as it is */
 static dsp_app_auth_t issued;   /* the last authorization obtained by the harness */
 

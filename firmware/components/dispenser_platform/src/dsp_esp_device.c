@@ -106,6 +106,30 @@ static dsp_cred_status_t wifi_get(void *ctx, dsp_wifi_credentials_t *out)
     return b;
 }
 
+bool dsp_esp_setup_code_read(void *ctx, uint8_t out[DSP_SETUP_CODE_BYTES])
+{
+    (void)ctx;
+    if (out == NULL) {
+        return false;
+    }
+    memset(out, 0, DSP_SETUP_CODE_BYTES);
+    if (!s_secrets_ready) {
+        return false;
+    }
+    nvs_handle_t h;
+    if (nvs_open_from_partition(DSP_NVS_SEC_PARTITION, DSP_NVS_SEC_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    size_t len = DSP_SETUP_CODE_BYTES;
+    esp_err_t err = nvs_get_blob(h, DSP_NVS_SEC_KEY_SETUP_CODE, out, &len);
+    nvs_close(h);
+    if (err != ESP_OK || len != DSP_SETUP_CODE_BYTES) {
+        wipe(out, DSP_SETUP_CODE_BYTES);
+        return false;
+    }
+    return true;
+}
+
 static dsp_cred_status_t token_get(void *ctx, char *buf, size_t cap)
 {
     (void)ctx;

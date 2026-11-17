@@ -146,12 +146,24 @@ typedef struct {
  * ownership authorization can be produced at all (every dsp_app_sec_* call and every owner
  * operation is FORBIDDEN). random: the hardware RNG (esp_fill_random with RF on), used for
  * session IDs, authorization tokens, handshake nonces and invite tokens; false = unavailable. */
+struct dsp_app;
 typedef struct {
     void *ctx;
     bool (*random)(void *ctx, uint8_t *out, size_t len);
     /* Optional (M1.10c.2): HELLO/prologue device hash (SHA-256 based, docs/BLE_PROTOCOL.md);
      * id_pub NULL = unclaimed or damaged credentials (device-ID form). NULL: 8 zero bytes. */
     bool (*device_id_hash)(void *ctx, const uint8_t *id_pub, uint8_t out[8]);
+    /* Optional security session (M1.10c.2a, dsp_blesec). When on_frame is set, every frame of
+     * the current connection goes to it instead of the M1.10c.1 gate (dsp_link); it answers
+     * through dsp_app_sec_send / dsp_app_sec_drop. All hooks run in the application task.
+     *  on_connection: a connection opened (after dsp_app_sec_connection_begin) or is closing
+     *                 (before dsp_app_sec_connection_end; also on BLE suspension and session end);
+     *  on_tick:       every BLE loop iteration; returns the next monotonic deadline (0 = none);
+     *  on_suspend:    a pump run is about to suspend BLE (best-effort EV_SUSPENDING_FOR_DOSE). */
+    void (*on_connection)(void *ctx, struct dsp_app *app, bool open);
+    void (*on_frame)(void *ctx, struct dsp_app *app, const uint8_t *frame, size_t len);
+    uint64_t (*on_tick)(void *ctx, struct dsp_app *app, uint64_t now_ms);
+    void (*on_suspend)(void *ctx, struct dsp_app *app);
 } dsp_app_security_t;
 
 /* Public identity for the Info record and the HELLO hash (platform: factory MAC, version). */

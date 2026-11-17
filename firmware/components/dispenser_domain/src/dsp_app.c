@@ -195,9 +195,19 @@ static void stage_connect(dsp_app_t *app)
 
 /* ---- Service mode ------------------------------------------------------------------------ */
 
+/* M1.10c.2a: a registered security session takes over every frame of the connection. */
+static bool sec_session(const dsp_app_t *app)
+{
+    return app->cfg->security != NULL && app->cfg->security->on_frame != NULL;
+}
+
 static void ble_suspend(dsp_app_t *app)
 {
     if (app->ble_active) {
+        const dsp_app_security_t *sec = app->cfg->security;
+        if (app->ss.conn_active && sec_session(app) && sec->on_suspend != NULL) {
+            sec->on_suspend(sec->ctx, app); /* best effort, before the connection is closed */
+        }
         app->cfg->ble->suspend(app->cfg->ble->ctx);
         conn_end(app); /* the connection is closed: its security session ends */
         app->ble_active = false;
@@ -292,6 +302,10 @@ static void q_open(dsp_app_t *app, bool open)
 static void conn_end(dsp_app_t *app)
 {
     if (app->ss.conn_active) {
+        const dsp_app_security_t *sec = app->cfg->security;
+        if (sec_session(app) && sec->on_connection != NULL) {
+            sec->on_connection(sec->ctx, app, false); /* zeroize the security session first */
+        }
         app->ss.conn_active = false;
         dsp_link_close(&app->link);
         dsp_app_sec_connection_end(app);
@@ -380,6 +394,9 @@ static bool handle_item(dsp_app_t *app, dsp_app_session_t *ss)
         dsp_link_open(&app->link, it->gen, mono_ms(app));
         dsp_app_sec_connection_begin(app);
         publish_info(app);
+        if (sec_session(app) && app->cfg->security->on_connection != NULL) {
+            app->cfg->security->on_connection(app->cfg->security->ctx, app, true);
+        }
         return true;
     case DSP_QI_DISCONNECTED:
         if (ss->conn_active && it->gen == ss->conn_gen) {
@@ -396,6 +413,10 @@ static bool handle_item(dsp_app_t *app, dsp_app_session_t *ss)
             return true;
         }
         app->rep.frames_in++;
+        if (sec_session(app)) {
+            app->cfg->security->on_frame(app->cfg->security->ctx, app, it->bytes, it->len);
+            return true;
+        }
         dsp_link_hello_t h;
         fill_hello(app, &h);
         dsp_link_result_t r =
@@ -481,8 +502,17 @@ static void stage_ble(dsp_app_t *app)
             }
             continue;
         }
-        if (ss->conn_active && dsp_link_expired(&app->link, now)) {
-            link_drop(app); /* unauthenticated for 30 s (every connection in M1.10c.1) */
+        uint64_t sec_deadline = 0;
+        if (sec_session(app)) {
+            const dsp_app_security_t *sec = app->cfg->security;
+            if (sec->on_tick != NULL) {
+                sec_deadline = sec->on_tick(sec->ctx, app, now); /* step and window deadlines */
+            }
+            if (ss->end != DSP_BLE_END_NONE) {
+                break;
+            }
+        } else if (ss->conn_active && dsp_link_expired(&app->link, now)) {
+            link_drop(app); /* unauthenticated for 30 s (the M1.10c.1 gate) */
             continue;
         }
         uint64_t deadline =
@@ -496,7 +526,12 @@ static void stage_ble(dsp_app_t *app)
                 wait_ms = due_ms;
             }
         }
-        if (ss->conn_active) {
+        if (sec_deadline != 0) {
+            uint64_t left = sec_deadline > now ? sec_deadline - now : 0;
+            if (left < wait_ms) {
+                wait_ms = left;
+            }
+        } else if (ss->conn_active && !sec_session(app)) {
             /* wake at the unauthenticated-connection deadline (the gate drops it on time) */
             uint64_t expiry = app->link.opened_ms + DSP_LINK_UNAUTH_MS;
             uint64_t left = expiry > now ? expiry - now : 0;
@@ -1695,6 +1730,57 @@ void dsp_app_sec_connection_begin(dsp_app_t *app)
         id = 1;
     }
     app->ss.session_id = id;
+}
+
+bool dsp_app_sec_connected(const dsp_app_t *app)
+{
+    return app != NULL && app->cfg != NULL && app->accepting && app->ble_active && app->ss.conn_active;
+}
+
+void dsp_app_sec_hello(dsp_app_t *app, dsp_link_hello_t *out)
+{
+    if (app == NULL || app->cfg == NULL || out == NULL) {
+        return;
+    }
+    fill_hello(app, out);
+}
+
+bool dsp_app_sec_send(dsp_app_t *app, const uint8_t *frame, size_t len)
+{
+    if (!dsp_app_sec_connected(app) || frame == NULL || len == 0 || len > DSP_BLE_FRAME_MAX) {
+        return false;
+    }
+    if (!app->cfg->ble->send_frame(app->cfg->ble->ctx, frame, len)) {
+        return false;
+    }
+    app->rep.frames_out++;
+    return true;
+}
+
+void dsp_app_sec_drop(dsp_app_t *app)
+{
+    if (dsp_app_sec_connected(app)) {
+        link_drop(app);
+    }
+}
+
+uint64_t dsp_app_sec_now_ms(const dsp_app_t *app)
+{
+    return app != NULL && app->cfg != NULL && app->cfg->mono != NULL ? mono_ms(app) : 0;
+}
+
+uint32_t dsp_app_sec_window_seconds_left(const dsp_app_t *app)
+{
+    if (app == NULL || app->cfg == NULL || !app->accepting || app->cfg->mono == NULL) {
+        return 0;
+    }
+    uint64_t now = mono_ms(app);
+    return app->ss.max_ms > now ? (uint32_t)((app->ss.max_ms - now) / 1000u) : 0;
+}
+
+uint32_t dsp_app_sec_epoch(const dsp_app_t *app)
+{
+    return app != NULL ? app->own.epoch : 0;
 }
 
 void dsp_app_sec_connection_end(dsp_app_t *app)

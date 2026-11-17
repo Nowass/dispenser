@@ -14,6 +14,13 @@ include(${CMAKE_CURRENT_LIST_DIR}/third_party/nvs_flash/nvs_flash_override.cmake
 dsp_nvs_flash_override("${CMAKE_BINARY_DIR}/dsp_nvs_flash" DSP_NVS_FLASH_DIR)
 list(APPEND EXTRA_COMPONENT_DIRS "${DSP_NVS_FLASH_DIR}")
 
+# M1.10c.2a: the pinned noise-c 0.1.31 with the local patches (third_party/noise-c/README.md),
+# verified at configure time; libsodium comes from the ESP-IDF registry at the exact version
+# (components/dispenser_security/idf_component.yml, dependencies.lock).
+include(${CMAKE_CURRENT_LIST_DIR}/third_party/noise-c/noise_c_deps.cmake)
+dsp_noise_c_prepare("${CMAKE_BINARY_DIR}/dsp_noise_c" DSP_NOISE_C_DIR)
+list(APPEND EXTRA_COMPONENT_DIRS "${DSP_NOISE_C_DIR}")
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(dispenser)
 

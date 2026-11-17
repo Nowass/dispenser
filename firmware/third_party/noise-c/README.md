@@ -53,6 +53,29 @@ Applied identically to every build (host tests, Android NDK, ESP32-C3) by
 - **Integration:** the firmware uses the patched tree through ESP-IDF's `override_path` for the
   `esphome/noise-c` dependency (as `gate/esp32c3/main/idf_component.yml` does).
 
+## Firmware and host integration (M1.10c.2a)
+
+`noise_c_deps.cmake` delivers the same patched tree to both builds (decision C3):
+
+- It fetches noise-c by its full commit SHA, re-verifies the checked-out commit, applies 0001 and
+  0002 with GNU `patch --fuzz=0` and checks the SHA-256 of the two patched files
+  (`src/protocol/patterns.c`, `CMakeLists.txt`). Any mismatch stops the configuration.
+- **ESP-IDF:** `dsp_noise_c_prepare()` puts the tree into the build directory as the component
+  `esphome__noise-c` (`firmware/CMakeLists.txt`, `EXTRA_COMPONENT_DIRS`). libsodium comes from the
+  ESP-IDF registry at exactly `==1.10021.12` (`components/dispenser_security/idf_component.yml`,
+  hash in `firmware/dependencies.lock`).
+- **Host tests:** `dsp_noise_c_host()` also fetches the libsodium fork at commit
+  `95c5e60d…`, verifies its upstream submodule (`d24faf56…`) and applies the fork's own patches.
+  For the host cross-check only, it compiles libsodium's `kdf_hkdf_sha256.c` and
+  `auth_hmacsha256.c` from that tree as `dsp_sodium_hkdf` (not in the fork's curated list; the
+  library is not modified).
+- Downloads are cached in `DSP_DEPS_CACHE` (default `<build>/_dsp_deps`); a fresh cache needs
+  network access once.
+- Randomness: noise-c's default `NOISE_USE_CUSTOM_RAND` applies in every build. The firmware
+  supplies `noise_rand_bytes()` (`dispenser_security/src/dsp_noise_rand.c`) as libsodium's
+  `randombytes_buf()`, i.e. the single implementation registered before `sodium_init()`:
+  the ESP32-C3 hardware adapter, or the deterministic test implementation in host tests.
+
 ## Removing the patches after an upstream release
 
 1. When `esphome/noise-c` releases a version that bounds the pattern search (0001) and, if

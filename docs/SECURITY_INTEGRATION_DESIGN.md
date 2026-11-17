@@ -1,11 +1,19 @@
 # Dispenser V2 — BLE security integration (M1.10c, revision 2)
 
-Status: **revision 3.** Architecture approved in principle (2026-11-17). C1–C9 approved (C5 as
-revised), and C10 decided (2026-11-17: an unauthenticated END_SESSION ends only its own
-connection). **M1.10c.1 is implemented** (authorization boundary, opaque frame queue, protocol
-changes, C10; section 13). It is approved in principle and awaits final review; not committed.
-**M1.10c.2 (Noise integration) is blocked** until the ESP32-C3 hardware RNG runtime test
-(section 6.1) passes on the board. Compilation and host RNG tests do not satisfy it. Baseline: `docs/BLE_PROTOCOL_DESIGN.md`
+Status: **revision 4 (2026-11-17).** C1–C10 decided; M1.10c.1 committed (`613f146`).
+
+Because no ESP32-C3 hardware is available yet, M1.10c.2 is split (approved 2026-11-17):
+
+- **M1.10c.2a, software integration:** implemented, under review, not committed (section 14).
+  Verified on the host and by ESP32-C3 cross-builds only.
+- **M1.10c.2b, hardware acceptance:** OPEN. It covers the physical RNG validation (6.1), live BLE
+  handshakes, and target stack, heap and timing (`firmware/HARDWARE_ACCEPTANCE.md` 8a). Neither
+  cross-build success nor host interoperability is evidence for these items.
+- Until 2b passes, the security layer is build-only (`CONFIG_DSP_BLE_SECURITY`, default off; the
+  build refuses it together with the production endpoint), and nothing is reachable without the
+  M1.10d transport. Deterministic randomness exists only in isolated host-test sources.
+
+Baseline: `docs/BLE_PROTOCOL_DESIGN.md`
 revision 3 (D2 Noise XXpsk3/IK 25519/ChaChaPoly/SHA256, D3 no pairing, D15 pinned
 `esphome/noise-c` 0.1.31 + `esphome/libsodium` 1.10021.12 with local patches 0001/0002),
 `docs/BLE_PROTOCOL.md` v1.0, `docs/OWNERSHIP_DESIGN.md` revision 2 (implemented, `3ae2592`), and the
@@ -267,7 +275,20 @@ operation. The three are never interchanged.
 3. **Explicit ESP32-C3 runtime acceptance test** (section 6.1); successful compilation is not
    sufficient.
 
-### 6.1 Target RNG acceptance test (gate for M1.10c.2; requires the board)
+**Refinements found in M1.10c.2a (implemented in `dispenser_platform/src/dsp_esp_rng.c`):**
+
+- `sodium_init()` itself draws randomness (libsodium's allocation canary). The implementation is
+  therefore registered at runtime start (`dsp_esp_rng_register`, no randomness drawn), and
+  `sodium_init()` runs only at the first moment the hardware entropy source is active
+  (`dsp_esp_rng_ready`), never at boot with RF off.
+- The hardware entropy source counts as active only while the Bluetooth controller is enabled
+  (`esp_bt_controller_get_status`). This is stricter than "BT or Wi-Fi": every handshake happens
+  over BLE. Without `CONFIG_BT_ENABLED` in the build, nothing is ever ready (fail closed).
+- noise-c's default `NOISE_USE_CUSTOM_RAND` applies in every build, so the firmware supplies
+  `noise_rand_bytes()` as `randombytes_buf()`. There is exactly one randomness path, through the
+  registered implementation.
+
+### 6.1 Target RNG acceptance test (M1.10c.2b; requires the board)
 
 A build-only check does not count. A dedicated test configuration runs on an ESP32-C3 and records:
 
@@ -280,11 +301,13 @@ A build-only check does not count. A dedicated test configuration runs on an ESP
 | R5 | quality sample | ≥ 1 MiB from `esp_fill_random` with RF on, analyzed off-device (e.g. `ent`, dieharder or the NIST STS subset): no failure beyond the expected rate. Recorded, not a gate on its own |
 | R6 | PSK on target | the C1 reference vectors (section 7.1) reproduce on the device through the production derivation code |
 
-Status: **not done** (M1.10c.1 has no board step). It is a **mandatory gate**: M1.10c.2 starts
-only after R1–R4 pass on an ESP32-C3. Successful compilation and host RNG tests do not count. R6
-needs the first `dsp_psk_derive()` code, so it runs inside M1.10c.2 and is part of its
-acceptance. The results go to `firmware/HARDWARE_ACCEPTANCE.md` as a new item.
-Hardware acceptance 9.4 is not affected and stays open.
+Status: **open (M1.10c.2b)**. Checklist items R1–R8 are in `firmware/HARDWARE_ACCEPTANCE.md` 8a.
+No firmware with the security layer enabled is deployed before R1–R4 pass. M1.10c.2a provides the
+code these checks exercise (`dsp_esp_rng_name`, `dsp_esp_rng_registered_before_init`,
+`dsp_esp_rng_calls`) and the PSK vectors for R6, but it has run none of them on a device. The host
+check of the device HKDF provider (`firmware/test/psk_linux`, ESP-IDF linux target) runs the same
+mbedTLS sources on the host CPU, so it is not R6. Hardware acceptance 9.4 is not affected and stays
+open.
 
 ---
 
@@ -485,7 +508,7 @@ unless every client applies "first response for a `txn` wins".
 
 ---
 
-## 9. Resources (estimates; measured in the implementation)
+## 9. Resources (estimates of revision 1; measured values: section 14.3)
 
 | Item | Estimate | Basis |
 |---|---|---|
@@ -521,6 +544,15 @@ init (checked in M1.10d with the real stack).
 
 ### 10.2 Acceptance criteria (M1.10c)
 
+**Software (M1.10c.2a) vs hardware (M1.10c.2b) verification.** Criteria 1–3, 5 (host part), 6, 8 and
+10–13 are verified in software: host tests under ASan/UBSan, the independent vectors, the
+linux-target provider check, mutation tests, cross-builds and static analysis. Criterion 4 is
+verified by host tests (close rules, zeroization scan of the session state). Criterion 7 is split:
+the cross-build part (0 warnings, measured flash and DRAM, static stack) is software; the target
+measurements are hardware (R7). Criterion 9 is software for the host behavior (failing source,
+session ID 0, no handshake, no token) and hardware for the target RNG path (R1–R4). The hardware
+items are in `firmware/HARDWARE_ACCEPTANCE.md` 8a. Status per criterion: section 14.2.
+
 1. All existing suites pass; new suites pass with 0 skipped vectors.
 2. No unauthenticated frame reaches any privileged `dsp_app_*` call (spy proves 0 calls).
 3. Every `dsp_app_*` operation refuses a caller-built authorization (FORBIDDEN, no storage access).
@@ -549,6 +581,8 @@ init (checked in M1.10d with the real stack).
   decision). A reused `txn` with different content is rejected unexecuted. No hit after a
   disconnect, reconnect, epoch change (except the changing request's own entry), session end
   or reboot. Entries are zeroized when cleared. RAM is re-measured (prototype 4,612 B).
+- New 14 (M1.10e, **open**): Android JNI interoperability, verified independently of the
+  host tests (section 14.4). It is not met by M1.10c.2a host interoperation.
 - New 13 (C10): an unauthenticated END_SESSION, failed handshakes, protocol errors and
   unauthenticated timeouts close only their connection. The service window continues and the
   owner is served afterwards. A forged or unissued authorization cannot end the window. Repeated
@@ -584,8 +618,8 @@ init (checked in M1.10d with the real stack).
 | Step | Content | Exit |
 |---|---|---|
 | M1.10c.1 (**implemented, section 13**) | Protocol: flag bit 1/advert bit 2, error 20, pre-authentication rules (`device_id_hash` and the session-security section moved to M1.10c.2: they depend on C1); generator, vectors, C and Kotlin codecs. Domain: issued-authorization check in every operation, new status/diagnostics/ack/refill/readiness operations, retire unauthenticated queue kinds, frame queue + transport events + port change, connection-scoped security session. Tests migrated to issued authorizations (fake security layer). | host suites, Kotlin codec tests, vectors |
-| gate | C1 and C4 approved (done); target RNG test 6.1 R1–R4 passed on an ESP32-C3 (R6 with the first PSK code) | review |
-| M1.10c.2 | Source delivery (C3), `dispenser_security` with `dsp_blesec` and `dsp_dispatch`, RNG registration (platform), prologue/PSK, handshakes and transport, close rules, lifetime integration; vectors, negative and fuzz tests; target build-only configuration and measurements | section 10.2 |
+| M1.10c.2a (**implemented, section 14**) | Source delivery (C3), `dispenser_security` with `dsp_blesec` and `dsp_dispatch`, RNG registration (platform), prologue/PSK, handshakes and transport, close rules, lifetime integration; vectors, negative and fuzz tests; target build-only configuration and measurements | section 10.2 (software part) |
+| M1.10c.2b (**open**) | ESP32-C3: RNG R1–R6, live BLE handshakes (with M1.10d), target stack, heap and timing, lifecycle on the device | `HARDWARE_ACCEPTANCE.md` 8a |
 | M1.10d | NimBLE adapter (byte transport, Info/advert publication, fragmentation), button driver, budget gate | as planned |
 
 ---
@@ -645,3 +679,88 @@ NimBLE/GATT (M1.10d), Android behavior (M1.10e). Hardware acceptance 9.4 stays o
   It is measured on the board.
 - Nothing in the runtime configurations registers a BLE port or security layer yet (M1.10d), so
   M1.10c.1 has no field-visible effect beyond code size.
+
+---
+
+## 14. M1.10c.2a implementation record (software integration; for review, not committed)
+
+### 14.1 What was built
+
+| Area | Implementation |
+|---|---|
+| Source delivery (C3) | `firmware/third_party/noise-c/noise_c_deps.cmake`: noise-c `62c2fdca…` and the libsodium fork `95c5e60d…` (upstream `d24faf56…`) fetched by full SHA, commits re-verified, patches 0001/0002 at zero fuzz, patched-file SHA-256 pinned. ESP-IDF: `EXTRA_COMPONENT_DIRS` (`esphome__noise-c`) + registry `esphome/libsodium ==1.10021.12` (`firmware/dependencies.lock`). Host: the same trees as CMake targets. Any mismatch stops the configuration |
+| HKDF (C1) | `dsp_secderive.c` (PSK, prologue) over `dsp_hkdf_sha256()`: `dsp_hkdf_psa.c` (mbedTLS / TF-PSA-Crypto, device) and `dsp_hkdf_sodium.c` (libsodium, host and Android provider). `dsp_idhash.c` (SHA-256, libsodium). Intermediates cleared on every path; PSA derivation aborted on every path; the secret is passed as bytes, so there is no key object to destroy |
+| Session (`dsp_blesec`) | Per connection: the M1.10c.1 gate for HELLO, END_SESSION and errors; XXpsk3 (CLAIM, ADD, RECOVERY) and IK (SESSION) as the Noise responder; prologue binding; the identity-key consistency check (KEY_FAULT on mismatch); the evidence handle kept from admission to commit; IK authorizes the phone key before answering; ENROLL_RESULT as the encrypted response to message 3; CONFIRMING with encrypted BUSY 2 and the three-press confirmation; encrypted frames with the header as AD; per-direction message limit; close on every security error; encrypted MALFORMED then close (C6); class check of decrypted types; plain END_SESSION closes only the connection (C10); events EV_SESSION_CLOSING, EV_SUSPENDING_FOR_DOSE, EV_CONFIRM_ON_DEVICE; zeroization and freeing of every Noise object at each close |
+| Dispatcher | `dsp_dispatch.c`: one `dsp_app_*` call per request with the issued authorization; 1:1 error mapping; UNAVAILABLE for WIFI_* and FACTORY_RESET (C5); the encrypted END_SESSION calls `dsp_app_end_service_session` (C10) |
+| Response cache (C4) | `dsp_rescache.c`: 8 entries bound to (session ID, connection generation, epoch, slot, txn, type, SHA-256 of the plaintext); an identical duplicate gets the original response re-encrypted; a reused txn with different content gets MALFORMED, not executed; purged on an epoch change before lookup and after dispatch; cleared and zeroized at every close |
+| Domain hooks | `dsp_app_security_t` gains `on_connection`, `on_frame`, `on_tick`, `on_suspend`. The restricted `dsp_app_sec.h` gains `connected`, `hello`, `send`, `drop`, `now_ms`, `window_seconds_left`, `epoch`. Without hooks the M1.10c.1 behavior is unchanged |
+| Target RNG adapter (C2) | `dispenser_platform/src/dsp_esp_rng.c` (section 6 refinements); setup-code reader `dsp_esp_setup_code_read` (`nvs_sec`); runtime registration under `CONFIG_DSP_BLE_SECURITY` (default off, build-only; refused with `CONFIG_DSP_APP_ALLOW_PRODUCTION`) |
+| Deterministic randomness | only `firmware/test/host/support/test_rng.c`, registered through the same libsodium interface; `dsp_blesec.c` and `dsp_esp_rng.c` refuse `DSP_TEST_DETERMINISTIC_RNG` on ESP-IDF (`#error`) |
+| Protocol | `docs/BLE_PROTOCOL.md` section 11 (normative session security); vectors `test-vectors/ble_session_v1.txt` + generator |
+
+### 14.2 Verification (software only)
+
+| Check | Result |
+|---|---|
+| Independent vectors | the Python standard library generator self-checks RFC 5869 test cases 1–3; OpenSSL reproduces all 24 PSK records; libsodium (host, `test_secderive`: 24 psk, 12 psk_not, 24 prologue, 6 idhash) and mbedTLS/TF-PSA-Crypto PSA (`test/psk_linux`, ESP-IDF linux target: 24 + 12) are byte-identical. The prologue-length constant was wrong (28 instead of 26) and was caught by these vectors |
+| Host suites (ASan + UBSan, `-Werror`) | 26/26, 1,520,845 checks, 0 failed. `test_blesec` 953 checks |
+| `test_blesec` scenarios | CLAIM → SESSION → dispatch of 7 operation types; ADD in the same window after A's plain END; RECOVERY with confirmation; handshake negatives (wrong setup code, prologue session ID, msg_index 0/2, message-3 index, no entropy, unknown key, wrong device identity, CLAIM on a claimed device, RECOVERY not armed, step timeout, inconsistent identity key → KEY_FAULT, name too long, consumed invite); transport manipulations (ciphertext, tag and AD bit flips, truncation, replay, plain request after auth, encrypted HELLO); cache (identical duplicate, conflicting txn of a different type and of the same type, epoch purge); C10 (plain END, forged authorized end, failed handshakes, END during confirmation); lifecycle (EV_SESSION_CLOSING, manual dose → EV_SUSPENDING_FOR_DOSE and session gone); pre-auth fuzz (240 frames, 0 operations); zeroization scan after every close |
+| Mutation (blesec, rescache, dispatch) | 15 mutants caught (prologue binding, decrypt failure, cache hit and conflict, plain request after auth, tokens without entropy, key consistency, name length, type class, IK lookup, message-3 index and purpose, END during confirmation, cache digest, UNAVAILABLE, both epoch defenses removed). Equivalent by layered design: removing either epoch defense alone (entry binding or purge); an authorized end attempted in CONFIRMING (no authorization exists, the domain refuses it). Removing both epoch defenses is caught |
+| ThreadSanitizer (`test_platform`) | 3 runs, 0 races |
+| Static analysis | `gcc -fanalyzer` on all security sources and `dsp_link.c`: 0 findings (cppcheck and clang-tidy not installed) |
+| ESP32-C3 cross-builds (7 configurations) | all exit 0, 0 warnings (section 14.3) |
+| Not verified (M1.10c.2b) | target RNG path (R1–R5), PSK on the device (R6), BLE runtime and live handshakes, target stack, heap and timing (R7), device lifecycle (R8) |
+| Not verified (M1.10e) | Android JNI interoperability (vectors, handshakes, negatives from the Android side) |
+| Manual-dose oracle with BLE dispatch | `manual_via_ble` replaces only the "scripted OP_MANUAL step running" clause. The durable-decision checks (marker, high-water mark, ring entry PENDING before the pump) are still evaluated on every manual pump run. Evidence: the encrypted MANUAL_DOSE runs the pump with 0 violations (asserted). A domain mutant writing the decision as DONE instead of PENDING is caught with the flag set. With the flag off the same oracle fires (the flag only marks the BLE path). Only `test_blesec` sets it, around one window |
+
+### 14.3 Measured resources (ESP32-C3, ESP-IDF v6.1)
+
+Baseline: the committed `origin/main` `c650153`. Its firmware tree is identical to `613f146`
+(M1.10c.1); `c650153` changed only Android build files. Each configuration was built from the
+committed sources and from the working tree with the same scratch `sdkconfig` defaults.
+
+| Configuration | Image | DRAM | vs committed baseline (`c650153` = `613f146` firmware) |
+|---|---|---|---|
+| default / diag | 148,480 / 1,042,432 B | 50,059 / 108,552 B | identical |
+| rt / rtc (no security) | 250,480 / 1,116,960 B | 87,463 / 143,140 B | +288 B image (domain hooks), DRAM unchanged |
+| sec (rt + `CONFIG_DSP_BLE_SECURITY`) | 436,768 B (23.8 % of the 1.75 MiB slot) | 96,069 B | +186,288 B vs rt: TF-PSA-Crypto 81.2 KB (the PSA core with ESP-IDF's enabled algorithms, absent from rt), libsodium 39.0 KB, noise-c 12.5 KB, `dispenser_security` 9.8 KB, domain +23.3 KB (dispatcher reaches every operation and the codec), main +7.1 KB; DRAM +8,606 B |
+| rtcsec (rtc + security; TLS already present) | 1,202,592 B (65.5 % of the slot) | 150,220 B | +85,632 B vs rtc; DRAM +7,080 B |
+| secbt (sec + BT/NimBLE enabled, compile check of the adapter's BT path) | 440,464 B | 98,439 B | not representative before M1.10d |
+
+- `dsp_blesec_t` is 6,808 B of static state, including the response cache at 4,420 B (measured,
+  RISC-V). The C4 prototype figure was 4,612 B.
+- Static stack (RISC-V call graph): the worst chain from `on_frame` is the encrypted MANUAL_DOSE
+  dispatch, 5,344 B (dose path 3,472 B + security frames). The handshake path is `on_frame` 576 B
+  + `hs_first` 640 B + noise-c and X25519 behind function pointers, which the static graph can't
+  see (gate estimate ≈ 1.9 KB), ≈ 3.5 KB. All within the 12 KiB application task stack. These are
+  estimates; target high-water marks are R7.
+- The flash estimate of revision 1 (+65–75 KB) is exceeded in images without TLS, because of the
+  PSA core. With TLS present the increment is 85.6 KB. Both are well inside the 85 % budget gate.
+  **Decision (2026-11-17): the PSA configuration is not optimized just to meet the old estimate.**
+  These figures are the recorded baseline for the security-enabled images.
+- Stack and heap on the target stay **open hardware items** (`HARDWARE_ACCEPTANCE.md` 8.1–8.3, R7).
+  The figures above are static estimates and host measurements only.
+
+### 14.4 Findings and risks
+
+- **Host Noise interoperability is not independent Noise conformance.** The host "phone" uses the
+  same pinned noise-c. Noise conformance rests on the upstream cacophony vectors (M1.10a gate:
+  XXpsk3 and IK executed, 0 skipped). Our derivations have independent vectors. Stored transcript
+  vectors for the Android re-run are M1.10e.
+- **Android interoperability: OPEN acceptance item for M1.10e.** Host interoperability with the
+  same noise-c implementation does not substitute for independent Android verification. M1.10e
+  must show all of the following:
+  - the Android JNI build (noise-c + libsodium, FORTIFY on) reproduces `ble_session_v1.txt`
+    byte for byte with its libsodium HKDF;
+  - CLAIM, ADD, SESSION and RECOVERY interoperate with the firmware's `dsp_blesec` (stored
+    transcript vectors, then the device in M1.10c.2b/M1.10d);
+  - the negative and transport-manipulation cases run from the Android side.
+  The host test phone uses the provider function libsodium exposes to Android, but it is not the
+  Android build.
+- **Single BLE connection** (M1.10c.1 residual risk) unchanged; M1.10d.
+- **Window-ending clock discontinuities clear RTC overlays** (invites, arm). This is correct domain
+  behavior; recorded because host tests must not end a window by a monotonic jump before checking
+  overlays.
+- Deterministic randomness, production firmware: none. The security layer is not linked unless
+  `CONFIG_DSP_BLE_SECURITY` is set; default and diagnostic images are byte-identical to
+  `613f146`.

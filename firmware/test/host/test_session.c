@@ -340,7 +340,7 @@ static bool rng_down(void *ctx, uint8_t *out, size_t len)
     memset(out, 0, len);
     return false;
 }
-static const dsp_app_security_t SEC_RNG_DOWN = {NULL, rng_down, NULL};
+static const dsp_app_security_t SEC_RNG_DOWN = {.ctx = NULL, .random = rng_down};
 static dsp_app_op_result_t admit_res[4];
 static void h_admit_all(int i)
 {

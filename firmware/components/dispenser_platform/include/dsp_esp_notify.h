@@ -64,6 +64,9 @@ void dsp_esp_monotonic(dsp_monotonic_t *out);
 bool dsp_esp_secrets_init(void);
 const dsp_wifi_credentials_provider_t *dsp_esp_wifi_credentials(void);
 const dsp_token_provider_t *dsp_esp_api_token(void);
+/* M1.10c.2a: the 16-byte setup code (nvs_sec blob) for the security layer's PSK; false if absent
+ * or unreadable (out cleared). The caller wipes it after use; it is never logged. */
+bool dsp_esp_setup_code_read(void *ctx, uint8_t out[DSP_SETUP_CODE_BYTES]);
 
 #ifdef __cplusplus
 }

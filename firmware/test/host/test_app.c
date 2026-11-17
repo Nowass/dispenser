@@ -561,7 +561,7 @@ static bool sec_random(void *ctx, uint8_t *out, size_t len)
     }
     return true;
 }
-static const dsp_app_security_t SEC = {NULL, sec_random, NULL};
+static const dsp_app_security_t SEC = {.ctx = NULL, .random = sec_random};
 static dsp_app_auth_t issued;
 static uint32_t conn_gen;
 static const dsp_app_auth_t *issue_for(const dsp_app_auth_t *a)

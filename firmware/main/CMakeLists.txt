@@ -9,6 +9,14 @@ if(dsp_endpoint_error)
     message(FATAL_ERROR "Dispenser endpoint guard: ${dsp_endpoint_error}")
 endif()
 
+# M1.10c.2a: the security layer is build-only until the ESP32-C3 hardware RNG acceptance
+# (M1.10c.2b) has passed; never together with the production endpoint.
+if(CONFIG_DSP_BLE_SECURITY AND CONFIG_DSP_APP_ALLOW_PRODUCTION)
+    message(FATAL_ERROR "CONFIG_DSP_BLE_SECURITY is build-only until the M1.10c.2b hardware RNG "
+            "acceptance passes; it cannot be combined with CONFIG_DSP_APP_ALLOW_PRODUCTION")
+endif()
+
 idf_component_register(SRCS "main.c"
                        INCLUDE_DIRS "."
-                       REQUIRES dispenser_domain dispenser_platform esp_app_format log freertos esp_hw_support)
+                       REQUIRES dispenser_domain dispenser_platform dispenser_security esp_app_format log
+                                freertos esp_hw_support)

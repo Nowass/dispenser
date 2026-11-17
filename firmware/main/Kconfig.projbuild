@@ -83,6 +83,17 @@ config DSP_APP_ALLOW_PRODUCTION
         Separate explicit approval for DSP_APP_NOTIFY_URL pointing to the
         production Worker. Leave off during hardware bring-up.
 
+config DSP_BLE_SECURITY
+    bool "Link the BLE security layer (BUILD-ONLY until M1.10c.2b hardware acceptance)"
+    default n
+    depends on DSP_APP_RUNTIME
+    help
+        Registers the Noise security session (dispenser_security) and the ESP32-C3
+        RNG adapter with the application runtime. Without a BLE transport (M1.10d)
+        nothing is reachable; this exists for cross-builds and resource measurement.
+        The target RNG path has NOT been validated on hardware (M1.10c.2b, design
+        6.1): the build refuses this option together with the production endpoint.
+
 config DSP_APP_SIM_HW_MAX_RUNTIME_MS
     int "Simulated pump hardware runtime maximum (ms, 0 = never actuate)"
     range 0 60000

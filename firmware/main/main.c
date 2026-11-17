@@ -50,6 +50,10 @@
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#if CONFIG_DSP_BLE_SECURITY
+#include "dsp_blesec.h"
+#include "dsp_esp_rng.h"
+#endif
 #endif
 
 static const char *TAG = "dispenser";
@@ -212,6 +216,10 @@ static dsp_app_sync_t s_sync;
 static dsp_wifi_manager_t s_wifi;
 static dsp_https_transport_t s_https;
 #endif
+#if CONFIG_DSP_BLE_SECURITY
+static dsp_blesec_t s_blesec;          /* build-only until M1.10c.2b */
+static dsp_app_security_t s_security;
+#endif
 static StaticTask_t s_task;
 static StackType_t s_stack[CONFIG_DSP_APP_TASK_STACK / sizeof(StackType_t)];
 
@@ -263,6 +271,27 @@ static void app_runtime(void)
     s_cfg.ble = NULL; /* no BLE stack yet: no service mode */
     s_cfg.random = esp_random();
     s_cfg.max_sleep_s = CONFIG_DSP_APP_MAX_SLEEP_S;
+#if CONFIG_DSP_BLE_SECURITY
+    /* C2: the libsodium RNG implementation is registered before any libsodium use; sodium_init
+     * runs only once the hardware entropy source is active (dsp_esp_rng_ready). Without the
+     * registration no security layer exists and no ownership authorization can be issued. */
+    uint64_t did = 0;
+    (void)dsp_esp_secrets_init();
+    if (dsp_esp_rng_register() && dsp_esp_device_id(&did)) {
+        dsp_blesec_config_t bc;
+        memset(&bc, 0, sizeof bc);
+        bc.entropy_ready = dsp_esp_rng_ready;
+        bc.random = dsp_esp_rng_bytes;
+        bc.read_setup_code = dsp_esp_setup_code_read;
+        for (int i = 0; i < 6; i++) {
+            bc.device_id[i] = (uint8_t)(did >> (8 * (5 - i)));
+        }
+        dsp_blesec_init(&s_blesec, &bc, &s_security);
+        s_cfg.security = &s_security;
+    } else {
+        ESP_LOGW(TAG, "app: security layer not registered (RNG registration or device ID failed)");
+    }
+#endif
 #if CONFIG_DSP_APP_CONNECTIVITY
     bool secrets = dsp_esp_secrets_init();
     uint64_t device_id = 0;

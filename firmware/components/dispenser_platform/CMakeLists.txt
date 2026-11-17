@@ -17,8 +17,14 @@ idf_component_register(SRCS "src/dsp_nvs_kv.c"
                             "src/dsp_esp_sntp.c"
                             "src/dsp_esp_http.c"
                             "src/dsp_esp_device.c"
+                            "src/dsp_esp_rng.c"
                        INCLUDE_DIRS "include"
                        REQUIRES dispenser_domain
                        PRIV_REQUIRES nvs_flash esp_wifi esp_netif esp_event lwip esp_rom
                                      esp_http_client esp-tls mbedtls esp_timer esp_hw_support
-                                     esp_system freertos log)
+                                     esp_system freertos log esphome__libsodium)
+# M1.10c.2a: the RNG adapter asks the Bluetooth controller whether the RF entropy source runs.
+if(CONFIG_BT_ENABLED)
+    idf_component_get_property(_dsp_bt_lib bt COMPONENT_LIB)
+    target_link_libraries(${COMPONENT_LIB} PRIVATE ${_dsp_bt_lib})
+endif()

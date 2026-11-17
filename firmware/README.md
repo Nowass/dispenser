@@ -75,7 +75,14 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   [Platform adapters and application runtime](#platform-adapters-and-application-runtime-m19c).
 - (M1.10a) **BLE protocol v1 codec** and the Noise feasibility gate (see
   [BLE protocol codec and Noise gate](#ble-protocol-codec-and-noise-gate-m110a)).
-- (M1.10c.1, under review) **BLE authorization boundary**: the BLE queue carries opaque frames
+- (M1.10c.2a, under review) **BLE security session** (`components/dispenser_security`): Noise
+  XXpsk3 (claim, add, recovery) and IK (sessions) over the pinned, patched noise-c 0.1.31 and
+  libsodium 1.10021.12 (`third_party/noise-c/noise_c_deps.cmake`), the PSK by HKDF-SHA256
+  (mbedTLS/TF-PSA-Crypto on the device), the authorization-bound dispatcher, the eight-response
+  cache and the ESP32-C3 RNG adapter (fail closed without an active RF entropy source). Build-only
+  (`CONFIG_DSP_BLE_SECURITY`, default off) until the hardware acceptance (M1.10c.2b,
+  `HARDWARE_ACCEPTANCE.md` 8a); nothing is reachable before the NimBLE transport (M1.10d).
+- (M1.10c.1) **BLE authorization boundary**: the BLE queue carries opaque frames
   (capacity 4, connection generation) plus connect/disconnect/button events; the BLE port is
   byte-only (`send_frame`, `disconnect`, `publish_info`); a pre-authentication gate (`dsp_link`)
   answers HELLO (public state incl. CREDENTIALS_DAMAGED), refuses every privileged request
@@ -280,7 +287,10 @@ firmware/
 │   ├── test_owner.c               ownership through wakes, power cuts, admission (M1.10b.3)
 │   ├── test_sec_header_guard.cmake  restricted-header check (M1.10b.3)
 │   ├── test_link.c                pre-authentication gate, every privileged type, fuzzing (M1.10c.1)
-│   └── test_session.c             authorization boundary through wakes, HELLO/Info state (M1.10c.1)
+│   ├── test_session.c             authorization boundary through wakes, HELLO/Info state (M1.10c.1)
+│   ├── test_secderive.c           PSK / prologue / device hash against ble_session_v1 (M1.10c.2a)
+│   └── test_blesec.c              Noise sessions end to end: noise-c phone vs dsp_blesec (M1.10c.2a)
+├── test/psk_linux/             device HKDF provider (PSA) on the ESP-IDF linux target (M1.10c.2a)
 ├── test/integration/           local end-to-end harness (M1.8, see its README)
 │   ├── notify_harness.c           real domain code driven over stdin
 │   ├── posix_https_port.[ch]      host HTTP port: real TLS (OpenSSL), test CA, timeouts

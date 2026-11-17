@@ -62,6 +62,22 @@ void dsp_app_sec_connection_end(dsp_app_t *app);
 /* Public state for HELLO / Info / advertising (no authorization needed, nothing secret). */
 void dsp_app_sec_view(dsp_app_t *app, dsp_app_sec_view_t *out);
 
+/* ---- Transport primitives for the security session (M1.10c.2a) ----------------------------
+ * Only meaningful while a connection is active (dsp_app_sec_connected). */
+bool dsp_app_sec_connected(const dsp_app_t *app);
+/* The HELLO response values of this connection (claim state, flags, caps, session ID, hash). */
+void dsp_app_sec_hello(dsp_app_t *app, dsp_link_hello_t *out);
+/* Sends one complete frame on the current connection; false if not sent. */
+bool dsp_app_sec_send(dsp_app_t *app, const uint8_t *frame, size_t len);
+/* Closes the current connection (counted; disconnect; dsp_app_sec_connection_end). The service
+ * window continues (C10). on_connection(false) runs before this returns. */
+void dsp_app_sec_drop(dsp_app_t *app);
+/* Monotonic milliseconds and the service window's remaining seconds. */
+uint64_t dsp_app_sec_now_ms(const dsp_app_t *app);
+uint32_t dsp_app_sec_window_seconds_left(const dsp_app_t *app);
+/* The durable ownership epoch (DSP_OWNER_EPOCH_DEGRADED when damaged): cache binding (C4). */
+uint32_t dsp_app_sec_epoch(const dsp_app_t *app);
+
 /* HS message 1: checks the purpose against the device state and issues the evidence handle.
  * SESSION: CLAIMED; CLAIM: UNCLAIMED (valid record); ADD: CLAIMED, valid invite, free slot;
  * RECOVERY: valid arm (CLAIMED or CRED_DEGRADED). Replaces any earlier unconsumed handle. */
