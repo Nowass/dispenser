@@ -28,8 +28,35 @@ Product and architecture sources of truth live in [`../docs`](../docs).
 | Test: OkHttp MockWebServer | 4.12.0 (test only) |
 | Test: kotlinx-coroutines-test / espresso | 1.9.0 / 3.6.1 |
 | Test: Robolectric / androidx.test core | 4.17 / 1.6.1 (Robolectric runs on SDK 35) |
+| Android NDK (M1.10e.1, native Noise provider) | r30 `30.0.16248370` (`android.ndkVersion`) |
+| SDK CMake | 3.31.6 (`externalNativeBuild.cmake.version`) |
+| Native sources | `esphome/noise-c` 0.1.31 (`62c2fdca…`) + `esphome/libsodium` 1.10021.12 (`95c5e60d…`), fetched by commit, verified and patched by `../firmware/third_party/noise-c/noise_c_deps.cmake` (same pins and patches as the firmware); ABIs arm64-v8a, armeabi-v7a, x86_64 |
 
 All versions are pinned in [`gradle/libs.versions.toml`](gradle/libs.versions.toml).
+
+## Native Noise provider (M1.10e.1)
+
+`app/src/main/cpp` builds `libdspnoise.so`: the pinned noise-c + libsodium and a thin C core +
+JNI glue (no cryptographic logic of its own), used by `cz.nowass.dispenser.crypto`
+(`NativeNoiseProvider`, `SecretBytes`, `SetupLabel`, `Invitation`, `credentials/CredentialStore`
+with Android Keystore wrapping). Not used by any screen yet: the app behaves exactly as before
+(DEMO). Design: `../docs/ANDROID_BLE_DESIGN.md`.
+
+- **First build needs network once:** noise-c and the libsodium fork are fetched by commit into
+  `app/build/dsp_deps` (re-verified on every configure). Requires the NDK and SDK CMake above
+  (`sdkmanager "ndk;30.0.16248370" "cmake;3.31.6"`), plus `git`, `patch`, a host C compiler and
+  Ninja (bundled with SDK CMake) for the host test library.
+- **Release safety:** the APK library offers only the initiator role with CSPRNG ephemerals
+  (libsodium `randombytes_buf`). A post-build check (`src/main/cpp/check_symbols.cmake`) fails the
+  build if a test-only symbol (fixed ephemerals, test hooks) appears or anything but the JNI entry
+  points is exported. FORTIFY stays enabled (patch 0001 makes noise-c FORTIFY-clean).
+- **Tests:** `./gradlew test` also builds `libdspnoise_hosttest` (the same sources + test-only
+  hooks for the responder role and fixed ephemerals) and runs the native vector runner on the
+  host; `./gradlew nativeAndroidTest` builds the runner with the NDK as a static x86_64 executable
+  (bionic, FORTIFY) and runs it on a Linux x86_64 host. Vectors: official Noise (conformance),
+  `../test-vectors/ble_session_v1.txt`, `ble_handshake_v1.txt` (Dispenser framing, Rust `snow`),
+  `qr_formats_v1.txt`. Instrumented (emulator or test phone): Keystore wrapping and the APK
+  library on ART (`KeystoreKeyWrapperTest`, `NativeNoiseInstrumentedTest`).
 
 ## Build, test, run
 

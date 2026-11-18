@@ -1,0 +1,7 @@
+/* libdspnoise exports only the JNI entry points (M1.10e.1). */
+{
+  global:
+    Java_cz_nowass_dispenser_crypto_NativeNoise_*;
+  local:
+    *;
+};

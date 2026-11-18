@@ -1,0 +1,32 @@
+# Post-build check of libdspnoise (M1.10e.1, docs/ANDROID_BLE_DESIGN.md 2.4 and 3.4):
+#  - no deterministic-randomness, fixed-ephemeral or test-hook symbol anywhere in the library;
+#  - the dynamic symbol table exports only Java_cz_nowass_dispenser_crypto_NativeNoise_* (plus the
+#    linker's own undefined imports from libc/libdl).
+# Usage: cmake -DNM=<llvm-nm> -DLIB=<libdspnoise.so> -P check_symbols.cmake
+execute_process(COMMAND "${NM}" --defined-only "${LIB}" OUTPUT_VARIABLE all RESULT_VARIABLE rc ERROR_VARIABLE err)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "check_symbols: llvm-nm failed: ${err}")
+endif()
+foreach(bad "fixed_ephemeral" "TestHooks" "test_rng" "DSPN_TEST" "dspn_hs_new_test")
+    string(FIND "${all}" "${bad}" pos)
+    if(NOT pos EQUAL -1)
+        message(FATAL_ERROR "check_symbols: forbidden symbol '${bad}' in ${LIB}")
+    endif()
+endforeach()
+execute_process(COMMAND "${NM}" -D --defined-only "${LIB}" OUTPUT_VARIABLE dyn RESULT_VARIABLE rc)
+string(REPLACE "\n" ";" lines "${dyn}")
+set(n 0)
+foreach(l IN LISTS lines)
+    if(l STREQUAL "")
+        continue()
+    endif()
+    string(REGEX REPLACE "^[0-9a-fA-F]* [A-Za-z] " "" sym "${l}")
+    if(NOT sym MATCHES "^Java_cz_nowass_dispenser_crypto_NativeNoise_")
+        message(FATAL_ERROR "check_symbols: unexpected export '${sym}' in ${LIB}")
+    endif()
+    math(EXPR n "${n} + 1")
+endforeach()
+if(n LESS 10)
+    message(FATAL_ERROR "check_symbols: only ${n} JNI exports in ${LIB}")
+endif()
+message(STATUS "check_symbols: ${LIB}: ${n} JNI exports, no test-only symbols")

@@ -63,7 +63,20 @@ fun spdxOf(l: PomLicense): String? {
 val genericLicenseTexts = setOf("Apache-2.0")
 
 /** Licenses whose terms require reproducing a specific copyright notice per library. */
-val attributionRequired = setOf("BSD-3-Clause", "MIT")
+val attributionRequired = setOf("BSD-3-Clause", "MIT", "ISC")
+
+/**
+ * Native code compiled into the APK (M1.10e.1, libdspnoise) that is not a Gradle dependency: the
+ * pinned noise-c and libsodium sources (firmware/third_party/noise-c/noise_c_deps.cmake). Their
+ * upstream LICENSE files are bundled verbatim as notices.
+ */
+data class NativeComponent(val artifact: String, val version: String, val name: String, val url: String, val notice: String, val spdx: List<String>)
+val nativeComponents = listOf(
+    NativeComponent("noise-c", "0.1.31 (62c2fdca7a874ea898761147bb062ca1cde9f36d)", "Noise-C (ESPHome fork)",
+        "https://github.com/esphome/noise-c", "notices/noise-c.txt", listOf("MIT")),
+    NativeComponent("libsodium", "1.10021.12 (95c5e60d991b3f735619da8a307951c0483ef567; libsodium 1.0.21)", "libsodium (ESPHome packaging)",
+        "https://github.com/esphome-libs/libsodium", "notices/libsodium.txt", listOf("ISC", "MIT")),
+)
 
 /**
  * Per-library notices (assets/licenses/notices/...), verbatim from the artifact and its upstream
@@ -124,6 +137,15 @@ fun buildLicenseReport(): String {
         }
         entries += """  {"group":${m.group.json()},"artifact":${m.module.json()},"version":${m.version.json()},""" +
             """"name":${(pom.name ?: m.module).json()},"url":${pom.url?.json() ?: "null"},"licenseSource":${source.json()},"notice":${notice?.json() ?: "null"},"licenses":[$licJson]}"""
+    }
+    for (n in nativeComponents) {
+        if (!layout.projectDirectory.file("src/main/assets/licenses/${n.notice}").asFile.exists()) {
+            unknown += "native ${n.artifact} (notice file ${n.notice} missing)"
+            continue
+        }
+        val licJson = n.spdx.joinToString(",") { """{"spdx":${it.json()},"name":${it.json()},"url":null}""" }
+        entries += """  {"group":"native","artifact":${n.artifact.json()},"version":${n.version.json()},""" +
+            """"name":${n.name.json()},"url":${n.url.json()},"licenseSource":"upstream LICENSE file","notice":${n.notice.json()},"licenses":[$licJson]}"""
     }
     if (unknown.isNotEmpty()) {
         throw GradleException("License could not be determined for:\n  " + unknown.joinToString("\n  ") +

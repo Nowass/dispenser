@@ -86,6 +86,17 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        // M1.10e.1: native Noise provider (libdspnoise). arm64-v8a and armeabi-v7a for phones,
+        // x86_64 for emulators; x86 is not shipped (decision E16).
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=none")
+            }
+        }
+
         resValue("string", "github_owner", githubOwner)
         resValue("string", "github_repo", githubRepo)
         resValue("bool", "github_source_link_enabled", githubSourceLinkEnabled)
@@ -126,6 +137,18 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+    // M1.10e.1: pinned NDK and SDK CMake (docs/ANDROID_BLE_DESIGN.md section 9).
+    ndkVersion = "30.0.16248370"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.31.6"
+        }
+    }
+    sourceSets {
+        // Shared vectors for the instrumented JNI test (read from assets on the device/emulator).
+        getByName("androidTest").assets.srcDir(rootProject.file("../test-vectors"))
+    }
     buildFeatures {
         compose = true
         resValues = true
@@ -161,6 +184,86 @@ tasks.withType<Test>().configureEach {
         .withPathSensitivity(PathSensitivity.NAME_ONLY)
     systemProperty("robolectric.offline", "true")
     systemProperty("robolectric.dependency.dir", robolectricDepsDir.get().asFile.absolutePath)
+}
+
+// ---- M1.10e.1: native test builds (never part of the APK) -----------------------------------
+// The JVM unit tests load libdspnoise_hosttest: the app's JNI sources plus test hooks (responder
+// role, fixed ephemerals), built for this host with the pinned SDK CMake and the system C compiler.
+// `nativeAndroidTest` builds the vector runner with the NDK (x86_64, static, bionic + FORTIFY) and
+// runs it on the Linux host (CI). Downloads (pinned noise-c/libsodium) are cached in build/dsp_deps.
+val sdkDir = androidComponents.sdkComponents.sdkDirectory
+val cmakeExe = sdkDir.map { it.file("cmake/3.31.6/bin/cmake").asFile.absolutePath }
+val ninjaExe = sdkDir.map { it.file("cmake/3.31.6/bin/ninja").asFile.absolutePath }
+val ndkDir = sdkDir.map { it.dir("ndk/30.0.16248370").asFile.absolutePath }
+val nativeTestSrc = layout.projectDirectory.dir("src/test/native")
+val hostNativeDir = layout.buildDirectory.dir("native-test/host")
+val ndkNativeDir = layout.buildDirectory.dir("native-test/android-x86_64")
+val depsCache = layout.buildDirectory.dir("dsp_deps")
+val testJdk = javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(25)) }
+    .map { it.metadata.installationPath.asFile.absolutePath }
+
+val configureHostNativeTest = tasks.register<Exec>("configureHostNativeTest") {
+    description = "Configures the host build of the native Noise test library (M1.10e.1)."
+    inputs.dir(nativeTestSrc)
+    inputs.dir(layout.projectDirectory.dir("src/main/cpp"))
+    outputs.file(hostNativeDir.map { it.file("build.ninja") })
+    environment("DSP_DEPS_CACHE", depsCache.get().asFile.absolutePath)
+    commandLine(cmakeExe.get(), "-S", nativeTestSrc.asFile.absolutePath, "-B", hostNativeDir.get().asFile.absolutePath,
+        "-G", "Ninja", "-DCMAKE_MAKE_PROGRAM=${ninjaExe.get()}", "-DCMAKE_BUILD_TYPE=Release",
+        "-DDSP_JDK_HOME=${testJdk.get()}")
+}
+val buildHostNativeTest = tasks.register<Exec>("buildHostNativeTest") {
+    description = "Builds libdspnoise_hosttest and the native vector runner for this host (M1.10e.1)."
+    dependsOn(configureHostNativeTest)
+    inputs.dir(nativeTestSrc)
+    inputs.dir(layout.projectDirectory.dir("src/main/cpp"))
+    outputs.file(hostNativeDir.map { it.file("libdspnoise_hosttest.so") })
+    commandLine(cmakeExe.get(), "--build", hostNativeDir.get().asFile.absolutePath)
+}
+val hostNativeVectors = tasks.register<Exec>("hostNativeVectors") {
+    description = "Runs the native vector runner (host build): official Noise, ble_session, ble_handshake."
+    dependsOn(buildHostNativeTest)
+    inputs.dir(rootProject.file("../test-vectors"))
+    commandLine(hostNativeDir.get().file("dspnoise_vectors").asFile.absolutePath,
+        depsCache.get().dir("noise-c-62c2fdca7a874ea898761147bb062ca1cde9f36d/tests/vector").asFile.absolutePath,
+        rootProject.file("../test-vectors").absolutePath)
+}
+val configureNdkNativeTest = tasks.register<Exec>("configureNdkNativeTest") {
+    description = "Configures the NDK x86_64 static build of the native vector runner (M1.10e.1)."
+    inputs.dir(nativeTestSrc)
+    outputs.file(ndkNativeDir.map { it.file("build.ninja") })
+    environment("DSP_DEPS_CACHE", depsCache.get().asFile.absolutePath)
+    commandLine(cmakeExe.get(), "-S", nativeTestSrc.asFile.absolutePath, "-B", ndkNativeDir.get().asFile.absolutePath,
+        "-G", "Ninja", "-DCMAKE_MAKE_PROGRAM=${ninjaExe.get()}", "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_TOOLCHAIN_FILE=${ndkDir.get()}/build/cmake/android.toolchain.cmake",
+        "-DANDROID_ABI=x86_64", "-DANDROID_PLATFORM=android-26")
+}
+val buildNdkNativeTest = tasks.register<Exec>("buildNdkNativeTest") {
+    description = "Builds the NDK x86_64 static native vector runner and checks that FORTIFY is on."
+    dependsOn(configureNdkNativeTest)
+    inputs.dir(nativeTestSrc)
+    inputs.dir(layout.projectDirectory.dir("src/main/cpp"))
+    outputs.file(ndkNativeDir.map { it.file("dspnoise_vectors") })
+    commandLine(cmakeExe.get(), "--build", ndkNativeDir.get().asFile.absolutePath)
+    val commands = ndkNativeDir.map { it.file("compile_commands.json").asFile }
+    doLast {
+        check("-D_FORTIFY_SOURCE" in commands.get().readText()) { "the Android build of the vector runner is not compiled with FORTIFY" }
+    }
+}
+tasks.register<Exec>("nativeAndroidTest") {
+    description = "Runs the NDK x86_64 static vector runner (bionic, FORTIFY) on this Linux x86_64 host."
+    dependsOn(buildNdkNativeTest)
+    inputs.dir(rootProject.file("../test-vectors"))
+    commandLine(ndkNativeDir.get().file("dspnoise_vectors").asFile.absolutePath,
+        depsCache.get().dir("noise-c-62c2fdca7a874ea898761147bb062ca1cde9f36d/tests/vector").asFile.absolutePath,
+        rootProject.file("../test-vectors").absolutePath)
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(buildHostNativeTest, hostNativeVectors)
+    systemProperty("dsp.native.hostlib", hostNativeDir.get().file("libdspnoise_hosttest.so").asFile.absolutePath)
+    systemProperty("dsp.vectors.dir", rootProject.file("../test-vectors").absolutePath)
+    systemProperty("dsp.noise.vectors.dir", depsCache.get().dir("noise-c-62c2fdca7a874ea898761147bb062ca1cde9f36d/tests/vector").asFile.absolutePath)
+    systemProperty("dsp.source.dir", layout.projectDirectory.dir("src/main/java").asFile.absolutePath)
 }
 
 dependencies {

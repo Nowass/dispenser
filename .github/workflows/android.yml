@@ -42,16 +42,25 @@ jobs:
           cache-provider: basic
           cache-read-only: ${{ github.event_name == 'pull_request' }}
 
-      - name: Install Android SDK platform 37
+      # M1.10e.1: the native Noise provider needs the pinned NDK and SDK CMake (app/build.gradle.kts).
+      - name: Install Android SDK platform 37, NDK r30 and CMake 3.31.6
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.0" > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-37.0" "ndk;30.0.16248370" "cmake;3.31.6" > /dev/null
+
+      # Pinned noise-c / libsodium sources fetched by commit and verified by
+      # firmware/third_party/noise-c/noise_c_deps.cmake (re-verified on every configure).
+      - name: Cache pinned native sources
+        uses: actions/cache@v6
+        with:
+          path: android/app/build/dsp_deps
+          key: dsp-deps-${{ hashFiles('firmware/third_party/noise-c/noise_c_deps.cmake', 'firmware/third_party/noise-c/patches/*') }}
 
       - name: Build, unit tests, lint, instrumented test compilation, unsigned release, licenses
         run: >-
           ./gradlew --no-daemon --stacktrace
           assembleDebug test lintDebug assembleDebugAndroidTest assembleRelease
-          checkThirdPartyLicenses
+          checkThirdPartyLicenses nativeAndroidTest
 
       - name: Verify the release build is unsigned (no credentials in CI)
         run: test -f app/build/outputs/apk/release/app-release-unsigned.apk
@@ -71,6 +80,7 @@ jobs:
           print("## Android CI")
           print(f"- JVM unit tests: **{tests} executed**, {failures} failed, {errors} errors, {skipped} skipped")
           print("- Instrumented tests: **compiled, NOT executed** (no device/emulator in CI)")
+          print("- Native Noise vectors: host JNI build (JVM tests) and NDK x86_64 static build (bionic, FORTIFY) executed on the runner")
           print("- Release APK: built **unsigned** (no signing secrets in CI)")
           PY
 
