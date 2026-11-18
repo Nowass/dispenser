@@ -2182,6 +2182,13 @@ Harness (`support/dsp_test.h`, header-only, about 80 lines):
 - Each test file is its own executable and CTest process (isolation between files).
   The exit status is non-zero if any check failed **or if no check ran at all**;
   crashes and sanitizer reports also fail the test. Each test has a 30 s CTest timeout.
+- **Open stability item (recorded 2026-11-18, M1.10e.2b):** `test_app` takes 17–19 s alone
+  (sanitizers on, `ctest -j4`), so its margin to the 30 s timeout is small. Run concurrently
+  with the full Android Gradle build on the same machine it exceeded the timeout once; run alone
+  it passed (32/32). No GitHub workflow runs the host suite today (the Android CI does not), so
+  CI is not affected yet. The timeout is deliberately unchanged: before a host-test CI job is
+  added, either split `test_app` or set a measured per-test timeout with the justification
+  recorded here; never weaken the test.
 - Every executable prints `[PASS]`/`[FAIL]` per test function and a
   `N checks, M failed` summary (`ctest -V` shows it).
 

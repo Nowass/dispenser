@@ -66,6 +66,17 @@ handling) and `device.link.FrameLink` (fragmentation/reassembly). Tested on the 
 deterministic `FakeGatt`; not wired into the app and no manifest permission is declared yet (the
 app behaves exactly as before). Only `device/transport/AndroidGattPort.kt` uses `android.bluetooth`.
 
+## Secure session (M1.10e.2b)
+
+`cz.nowass.dispenser.device.session`: `SecureSession` (HELLO, IK SESSION, XXpsk3 CLAIM/ADD/RECOVERY,
+staged-enrollment confirmation, encrypted requests and events) and the process-wide
+`DeviceSessionManager`. Integration-tested against the real firmware application/security/transport
+logic compiled for the host (`../firmware/test/fwsim`, built by `./gradlew buildFirmwareSim`, run by
+`./gradlew test`). Not wired into the app. A request without a response is
+`RequestResult.Uncertain` (it may have been executed; reconcile in a new session, never retry a dose
+with a new `seq` or repeat REFILL automatically — `docs/BLE_PROTOCOL.md` 10.4a,
+`docs/ANDROID_BLE_DESIGN.md` 14.3).
+
 ## Build, test, run
 
 From this `android/` directory:

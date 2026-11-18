@@ -1,7 +1,7 @@
 # Dispenser V2 — Android BLE client integration (M1.10e)
 
-Status: **revision 5. M1.10e.1 committed (`6a73441`). M1.10e.2a (Android BLE transport) implemented
-and JVM-tested, uncommitted, awaiting review (section 13); M1.10e.2b (secure session) not started.**
+Status: **revision 7. M1.10e.1 (`6a73441`), M1.10e.2a (`a7bce87`) and M1.10e.2b (secure session +
+firmware-in-the-loop, retry decision option 1 — section 14.3) committed. Next: M1.10e.3.**
 M1.10d.2, M1.10c.2b and M1.10e.5 stay OPEN; nothing here is evidence for radio behavior.
 
 Baseline: `docs/BLE_PROTOCOL.md` v1.0 as amended by M1.10d.1 (sections 2, 3, 10.4a, 11.3),
@@ -127,8 +127,9 @@ interface DeviceSessionManager {
 
 `DeviceRequest<R>` is a typed message (e.g. `GetStatus`, `UpdateSchedule(expected, schedule)`,
 `ManualDose(seq, volumeUl)`), encoded through the existing `BleProtocol` maps; `OpResult` is
-`Ok(value) | DeviceError(code, detail, aux) | Lost(reason)` (no exception crosses into the
-repository for protocol outcomes).
+`Ok(value) | DeviceError(code, detail, aux) | NotSent(reason) | Uncertain(reason)` (no exception
+crosses into the repository for protocol outcomes; `Uncertain` is never mapped to a failure —
+section 14.3).
 
 ### 2.3 Demo mode coexistence
 
@@ -371,7 +372,8 @@ Request fragment is one write-with-response; the next fragment only after `onCha
   counter, pending requests) are bound to one generation and closed with it — a reconnect always
   needs a new HELLO + IK handshake (C7); nothing of an old session can encrypt or answer on a
   new one.
-- Pending request continuations of a closed generation resume with `Lost(Disconnected)`.
+- Pending request continuations of a closed generation resume with `Uncertain` (the request may
+  have been executed); requests issued after the close return `NotSent`.
 
 ### 4.4 Session state machine (`DeviceSessionManager`)
 
@@ -417,7 +419,8 @@ Request fragment is one write-with-response; the next fragment only after `onCha
 - **Lost final responses (BLE_PROTOCOL 11.3):** the client never infers execution from a missing
   or a received final reply. END_SESSION + disconnect = done, never repeated. A missing response
   to any mutation is resolved only by reading durable state in the next session (table 5.1);
-  MANUAL_DOSE by `GET_RESULT{seq}`.
+  MANUAL_DOSE by `GET_RESULT{seq}`. A timeout or a connection failure never proves that the
+  operation was not executed (section 14.3).
 
 ## 5. Error handling and retry policy
 
@@ -425,7 +428,11 @@ Request fragment is one write-with-response; the next fragment only after `onCha
 
 Retransmission rule (protocol 10.4a): within one session, after a timeout, the **same `txn` and
 identical body** may be resent; the device answers from its 8-entry cache. A new session never
-reuses an old `txn` or assumes the cache.
+reuses an old `txn` or assumes the cache. Because the transport nonces are implicit, this recovers
+a *delayed* response only; a request dropped before decryption or a lost encrypted response puts
+the nonces out of step and the session closes. Every request that ends without a response is
+reported as **uncertain** and reconciled in a new session by the column on the right (section
+14.3); nothing is retransmitted across sessions automatically.
 
 | Operation | In-session retransmit (same txn) | After disconnect / new session |
 |---|---|---|
@@ -531,8 +538,10 @@ firmware application and security logic compiled for the host:
   SESSION, RECOVERY (arm + presses via `fwsim_press`); every operation of section 7 with
   read-back; manual dose through the real suspend-and-close path and `GET_RESULT` after reconnect,
   including a power cut at each dosing write; revoked phone; three failed handshakes end the
-  window; session limits (EV_SESSION_CLOSING, 15 min); T3b drops under queue pressure answered by
-  same-`txn` retransmission from the real response cache; T13 lost final replies; transcript
+  window; session limits (EV_SESSION_CLOSING, 15 min); a request dropped before decryption (T3b)
+  and a lost encrypted response: the same-`txn` retransmission meets the nonce desynchronization,
+  the session closes and the outcome is reconciled in a new session (14.3); a delayed response
+  answered by retransmission from the real response cache; T13 lost final replies; transcript
   vectors (E7) replayed through the same library.
 - **Distinction:** these results are reported as *firmware-in-the-loop (host)*, never as
   Android ↔ ESP32-C3 interoperability, radio behavior or target-RNG evidence.
@@ -544,7 +553,7 @@ firmware application and security logic compiled for the host:
 | Vectors | all `ble_protocol_v1` (existing), all `ble_session_v1` PSK/psk_not/prologue/idhash on JVM-JNI and native; cacophony XXpsk3 1/1, IK 2/2, 0 skipped, Android build; `ble_handshake_v1` on Android and firmware; `qr_formats_v1` (valid, invalid, check-character, expiry cases) |
 | Handshakes | CLAIM, ADD, SESSION, RECOVERY success; negatives: wrong setup code, wrong/expired/used invite, wrong device key in ADD (abort before XX3), unknown/revoked phone key (IK), prologue mismatch (session ID of another connection, purpose, hash), `msg_index` order, step timeout, HANDSHAKE_FAILED ×3, decrypt failure after auth, plaintext after auth |
 | Link | fragmentation at every MTU 23…247 and 517 (clamped) × boundary lengths; reassembly faults; 2 s gap |
-| Faults | duplicate, lost, reordered fragments/frames; disconnect during each handshake step and during each command; stale callbacks of generation n−1 after n connected; response after timeout (discarded by txn); device silent drop (T3b) → same-txn retransmit served from cache |
+| Faults | duplicate, lost, reordered fragments/frames; disconnect during each handshake step and during each command; stale callbacks of generation n−1 after n connected; response after timeout (discarded by txn); delayed response → same-txn retransmit served from cache; device silent drop (T3b) or lost encrypted response → nonce desync, session closed, outcome uncertain, reconciled in a new session without duplicate execution |
 | Authorization | requests before auth not sent; FORBIDDEN after revocation; role checks |
 | Manual dose | seq durable before send; process death between persist and send; suspend-close → reconnect → GET_RESULT for every state 0–6; never a new seq automatically; floor resync after reinstall (`manual_floor`) |
 | Persistence | credential save/load, Keystore key loss → LOST (never regenerated), tamper → unreadable, export excludes credentials, process restart with pending ops |
@@ -1006,6 +1015,89 @@ no Bluetooth-off mapping, unserialized frame sends, unhandled SecurityException 
   `bluetooth_le` feature are added when BLE is wired into the app (M1.10e.4), so the installed app
   stays unchanged until then. `BLUETOOTH_ADMIN` is not needed for GATT connections; it would only be
   needed by the fallback scan (E8).
+
+## 14. Implementation notes (M1.10e.2b — secure session and firmware-in-the-loop)
+
+### 14.1 Implemented
+
+| Part | Implemented |
+|---|---|
+| `device/session/SecureSession` | one session per connection: HELLO, then IK SESSION, XXpsk3 CLAIM / ADD / RECOVERY, or the confirmation of a staged enrollment (11.7) with IK + `PHONES_LIST` (`is_self`) → `confirmPending`; frames routed by `txn`; plain responses accepted only before authentication (HELLO, HS, the HANDSHAKE_FAILED answer to message 3); plaintext after authentication, an undecryptable or malformed encrypted frame, a fragment error or a device-originated request closes the session; encrypted requests one in flight, ≤ 8 waiting (`Busy`), retransmitted with the same `txn` and plaintext after a timeout, first response wins; results `Ok`, `DeviceError`, `NotSent`, `Busy` or `Uncertain` (14.3); a request whose every attempt timed out closes the session; events delivered (EV_SESSION_CLOSING, EV_SUSPENDING_FOR_DOSE, EV_CONFIRM_ON_DEVICE — the latter captured even if it arrives before the recovery step listens); `end()` = encrypted END_SESSION (best effort) + close; every close frees the native Noise state |
+| Enrollment rules | HELLO checks before any handshake (CLAIM: unclaimed hash of the label's device ID; ADD: invitation's identity hash and device ID; RECOVERY: armed; SESSION: pinned identity hash); ADD aborts before message 3 when the message-2 key differs from the invitation's; the enrollment is **staged before message 3** and committed on ENROLL_RESULT; ENROLL_RESULT lost → `EnrollmentUnconfirmed` (staged kept); HANDSHAKE_FAILED to message 3 (unauthenticated) → staged kept until the user discards it |
+| `DeviceSessionManager` | process-wide owner of the single live session (`AlreadyActive` otherwise), `StateFlow<SessionState>` (Idle, Connecting, Handshaking, ConfirmingOnDevice, Authenticated(generation, slot)), events of the live session only, `request`, `end(graceful)`; a closed session is never reused |
+| Firmware-in-the-loop (E10) | `firmware/test/fwsim/` (test-only JNI library `libdsp_fwsim`): the unmodified `dsp_app`, `dsp_blesec`, `dsp_ble_transport`, domain and libsodium/noise-c, in the host harness world (fake storage, pump, clocks), the application task on its own thread, a simulated radio with per-connection event queues and virtual time; built by the Gradle task `buildFirmwareSim`; Android side `FirmwareSim` + `FirmwareGattPortFactory` (test source set) drive the app's real `GattTransport` → `FrameLink` → `SecureSession` |
+
+### 14.2 Tests
+
+`FirmwareInTheLoopTest` (10, against the real firmware logic): CLAIM → SESSION + GET_STATUS +
+INVITE_CREATE → ADD with the invitation → RECOVERY with three presses (identity replaced, other phones
+removed, the old phone's credential then fails at HELLO); authentication failures (no credential,
+wrong setup code → HANDSHAKE_FAILED with the staged key kept and explicitly discarded, foreign
+invitation, forged credential → HANDSHAKE_FAILED; nothing enrolled); lost ENROLL_RESULT + process
+death → `ConfirmStaged` in a new manager over the same files; disconnect during a request
+(`Uncertain`, old session refuses with `NotSent`, new generation and session ID); a delayed response
+retransmitted and answered from the device's response cache (late duplicate discarded); concurrent
+requests serialized; EV_SESSION_CLOSING and cleanup at the window maximum; and the 14.3 regressions:
+- MANUAL_DOSE (never answered: BLE is suspended for the pump) → `Uncertain`; new session:
+  `GET_RESULT{seq}` = DONE; re-sending the same `seq` → `DUPLICATE` (state DONE); one pump run;
+- a MANUAL_DOSE request dropped before decryption (the frame is discarded before the firmware, the
+  GATT write acknowledged — the device's receive nonce does not advance, as with a T3b drop) → the
+  same-`txn` retransmission fails the device's decryption (nonce desynchronization), the device
+  closes → `Uncertain` (2 attempts); new session: `GET_RESULT{seq}` = NOT_DECIDED, floor unchanged,
+  no pump run; the **same `seq`** then runs exactly once;
+- a REFILL response lost on an open link → the retransmission is answered from the cache under the
+  device's next nonce, the phone fails to decrypt it and closes → `Uncertain`; never repeated; the
+  new session reads the applied values back.
+The harness pump oracle (a pump run without a durable decision, or a duplicate run of one manual
+request) is asserted zero after every test.
+
+`SecureSessionTest` (17, scripted IK/XX peer over the fake GATT): plaintext after authentication,
+tampered ciphertext (no retry), fragment error, device-originated request, duplicate response, all
+attempts unanswered → `Uncertain` + session closed, with one `txn` and byte-identical plaintext
+(the original manual-dose `seq`) on every attempt and nothing sent afterwards; a single unanswered
+attempt closes; an undecryptable response while waiting → `Uncertain`, never failure; the
+`NotSent`/`Uncertain` boundary (failed write and refused write start → `Uncertain`; a request queued
+when the session closes → `NotSent` while the sent one is `Uncertain`; cancellation after sending
+closes the session); bounded
+waiting (`Busy`), events, HELLO error / wrong device, ADD impostor with the invitation's hash but
+another static key (abort before message 3, nothing staged). Mutation checks: the 7 security rules
+of revision 6 plus 4 retry rules (no close after a timeout, an uncertain outcome reported as
+`NotSent`, a retransmission with a new `seq`, a failed send reported as `NotSent`) — all caught.
+
+### 14.3 Retries and uncertain outcomes (decision: option 1, approved)
+
+Implicit sequential Noise nonces and the wire protocol stay unchanged (no explicit nonces). The
+client rules, matching BLE_PROTOCOL.md 10.4a as clarified:
+
+1. Same-`txn` retransmission within one session (identical plaintext, so the same manual-dose
+   `seq`) may recover a delayed response; it cannot guarantee recovery from a lost encrypted
+   message — a request the device dropped before decrypting it (T3b) or a response lost on an open
+   link puts the nonces out of step.
+2. A request timeout or connection failure never proves that the operation was not executed.
+3. Nonce state inconsistent (a decryption failure on either side) or unknown (every attempt timed
+   out): the session is closed; work continues only after a new handshake.
+4. A request without a response is `RequestResult.Uncertain` — reported as "result unknown", never as
+   failure or success — and reconciled against durable device state in a new session
+   (`GET_RESULT{seq}`, revisions, Status). `NotSent` / `Busy` only while no attempt has entered
+   `FrameLink.send` (no live authenticated session, queued behind a request when the session
+   closed, or no transport keys / encryption failure on the first attempt). Once a send has
+   started, every outcome without a response is `Uncertain` — including a refused or failed write
+   (the session is closed) — and a caller cancelled after that point gets no result, so the
+   session is closed ("request cancelled: outcome unknown").
+5. Never automatically allocate a new manual-dose `seq` to retry an uncertain dose; re-sending the
+   same `seq` is safe (decided exactly once).
+6. Never automatically repeat REFILL after an uncertain outcome.
+7. The device's response cache and the durable anti-replay rules (manual-dose `seq` floor,
+   revisions, single-use invite tokens) are unchanged.
+
+Nothing in the session layer retries across sessions; the typed operations, journal and repository
+(M1.10e.3) apply rules 4–6 at the operation level (table 5.1).
+
+### 14.4 Not in M1.10e.2b
+
+CDM discovery and onboarding UI (M1.10e.4); typed operations, journal and
+repository (M1.10e.3); manifest permissions (M1.10e.4). The firmware simulator is test code: it is
+not built by the firmware CTest and never enters a firmware image or the APK.
 
 ---
 

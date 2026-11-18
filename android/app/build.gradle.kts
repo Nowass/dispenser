@@ -230,6 +230,8 @@ val hostNativeVectors = tasks.register<Exec>("hostNativeVectors") {
 }
 val configureNdkNativeTest = tasks.register<Exec>("configureNdkNativeTest") {
     description = "Configures the NDK x86_64 static build of the native vector runner (M1.10e.1)."
+    // the configure steps share DSP_DEPS_CACHE, whose unlocked git checkout must not run concurrently
+    mustRunAfter(configureHostNativeTest)
     inputs.dir(nativeTestSrc)
     outputs.file(ndkNativeDir.map { it.file("build.ninja") })
     environment("DSP_DEPS_CACHE", depsCache.get().asFile.absolutePath)
@@ -258,8 +260,31 @@ tasks.register<Exec>("nativeAndroidTest") {
         depsCache.get().dir("noise-c-62c2fdca7a874ea898761147bb062ca1cde9f36d/tests/vector").asFile.absolutePath,
         rootProject.file("../test-vectors").absolutePath)
 }
+// Firmware-in-the-loop (M1.10e.2b, E10): the real firmware logic as a host JNI library for the tests.
+val fwsimSrc = rootProject.layout.projectDirectory.dir("../firmware/test/fwsim")
+val fwsimDir = layout.buildDirectory.dir("native-test/fwsim")
+val configureFirmwareSim = tasks.register<Exec>("configureFirmwareSim") {
+    description = "Configures libdsp_fwsim (firmware domain/security/transport on the host, test-only)."
+    mustRunAfter(configureHostNativeTest, configureNdkNativeTest) // shared DSP_DEPS_CACHE (see above)
+    inputs.dir(fwsimSrc)
+    outputs.file(fwsimDir.map { it.file("build.ninja") })
+    environment("DSP_DEPS_CACHE", depsCache.get().asFile.absolutePath)
+    commandLine(cmakeExe.get(), "-S", fwsimSrc.asFile.absolutePath, "-B", fwsimDir.get().asFile.absolutePath,
+        "-G", "Ninja", "-DCMAKE_MAKE_PROGRAM=${ninjaExe.get()}", "-DCMAKE_BUILD_TYPE=Release",
+        "-DDSP_JDK_HOME=${testJdk.get()}")
+}
+val buildFirmwareSim = tasks.register<Exec>("buildFirmwareSim") {
+    description = "Builds libdsp_fwsim for the firmware-in-the-loop tests."
+    dependsOn(configureFirmwareSim)
+    inputs.dir(rootProject.layout.projectDirectory.dir("../firmware/components"))
+    inputs.dir(rootProject.layout.projectDirectory.dir("../firmware/test/host"))
+    inputs.dir(fwsimSrc)
+    outputs.file(fwsimDir.map { it.file("libdsp_fwsim.so") })
+    commandLine(cmakeExe.get(), "--build", fwsimDir.get().asFile.absolutePath)
+}
 tasks.withType<Test>().configureEach {
-    dependsOn(buildHostNativeTest, hostNativeVectors)
+    dependsOn(buildHostNativeTest, hostNativeVectors, buildFirmwareSim)
+    systemProperty("dsp.fwsim.lib", fwsimDir.get().file("libdsp_fwsim.so").asFile.absolutePath)
     systemProperty("dsp.native.hostlib", hostNativeDir.get().file("libdspnoise_hosttest.so").asFile.absolutePath)
     systemProperty("dsp.vectors.dir", rootProject.file("../test-vectors").absolutePath)
     systemProperty("dsp.noise.vectors.dir", depsCache.get().dir("noise-c-62c2fdca7a874ea898761147bb062ca1cde9f36d/tests/vector").asFile.absolutePath)

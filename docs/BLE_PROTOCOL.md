@@ -80,8 +80,9 @@ notification (device → client).
   any reply**: the device never sends a plaintext error once a handshake started.
 - Replies sent just before the device closes the connection are best effort (section 11.3).
 - A complete frame the device cannot accept at the moment (its bounded queue is full or no
-  service window is open) is dropped without a reply; the client retries after its timeout
-  (section 10.4a).
+  service window is open) is dropped without a reply. Before a handshake the client simply
+  repeats it; a dropped encrypted frame is never decrypted, so the transport nonces fall out of
+  step and the session cannot continue (section 10.4a).
 
 ## 4. Frame
 
@@ -368,6 +369,25 @@ change and reboot. It does **not** provide durable exactly-once semantics across
 there the durable mechanisms decide (revisions, the manual-dose `seq`, which stays authoritative,
 and single-use invite tokens). A client uses the first response it receives for a `txn` and
 discards later ones.
+
+Limits and client obligations (clarification, M1.10e.2b; the wire format is unchanged). The Noise
+transport nonces are implicit and sequential per direction, and every retransmission is encrypted
+under the sender's next nonce:
+
+- A same-`txn` retransmission MAY recover a **delayed** response. It cannot guarantee recovery
+  from a **lost** encrypted message: after an encrypted request the device dropped before
+  decrypting it (section 3) or an encrypted response lost while the connection stays up, the two
+  sides' nonces differ, the next encrypted frame fails decryption and the session closes.
+- A request timeout or a connection failure does **not** prove that the operation was not
+  executed.
+- When the nonce state becomes inconsistent (a decryption failure) or cannot be known (no response
+  to any attempt), the client closes the session and starts a new handshake.
+- An unknown operation result MUST be reconciled against durable device state in a new session
+  (`GET_RESULT` with the same `seq`; revisions for configuration and schedules; Status after
+  REFILL) and reported as unknown until then, never as failed.
+- A client MUST NOT automatically allocate a new manual-dose `seq` to retry an uncertain dose
+  (re-sending the same `seq` is safe: it is decided exactly once, section 10.4), and MUST NOT
+  automatically repeat REFILL after an uncertain outcome.
 
 ### 10.5 Time
 

@@ -32,6 +32,8 @@ build/
 *.bin
 *.elf
 *.map
+# a linker version script (source), not a map output
+!test/fwsim/fwsim.map
 # Generated in the build directory
 flasher_args.json
 sdkconfig.old
