@@ -1,0 +1,20 @@
+[package]
+name = "gen_ble_handshake_v1"
+version = "1.0.0"
+edition = "2021"
+publish = false
+description = "Independent generator of the Dispenser BLE handshake vectors (test tooling only)"
+
+# Exact pins; every transitive dependency is pinned by the committed Cargo.lock (build with --locked).
+[dependencies]
+# "risky-raw-split": the split keys are needed to encrypt with the frame header as associated
+# data (snow's transport API has no AD); the generator self-checks this path against snow's own
+# transport encryption (empty AD) before writing anything.
+snow = { version = "=0.10.0", features = ["risky-raw-split"] }
+chacha20poly1305 = "=0.10.1"
+hkdf = "=0.12.4"
+sha2 = "=0.10.9"
+serde_json = "=1.0.145"
+
+[profile.release]
+debug = false

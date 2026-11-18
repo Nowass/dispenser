@@ -25,4 +25,12 @@ bool test_rng_bytes(void *ctx, uint8_t *out, size_t len);
 /* Number of randombytes calls served (proves libsodium routes through this implementation). */
 uint64_t test_rng_calls(void);
 
+/* Scripted draws (M1.10e handshake transcripts): a request of exactly `len` bytes is served from
+ * the oldest queued entry of that length (FIFO per length); other requests come from the stream.
+ * Used to make the device draw the vector's session IDs, keys, ephemerals and invite token. */
+bool test_rng_script(const uint8_t *bytes, size_t len);
+void test_rng_script_clear(void);
+/* Queued entries not consumed yet. */
+size_t test_rng_script_pending(void);
+
 #endif

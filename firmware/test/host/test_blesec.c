@@ -33,7 +33,7 @@ static dsp_blesec_t SECS;
 static dsp_app_security_t BSEC;
 static bool g_entropy = true;
 static uint8_t g_dev_setup[16];
-static const uint8_t DEV_ID[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};
+static uint8_t DEV_ID[6] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60}; /* vector tests replace it */
 
 static bool cfg_entropy(void *ctx)
 {
@@ -1754,6 +1754,7 @@ static void test_fuzz_pre_auth(void)
     invariants();
 }
 
+#ifndef DSP_BLESEC_NO_MAIN
 int main(void)
 {
     if (!test_rng_install(0xD15EA5E5u)) {
@@ -1784,3 +1785,4 @@ int main(void)
 #endif
     return dsp_test_finish();
 }
+#endif /* DSP_BLESEC_NO_MAIN */
