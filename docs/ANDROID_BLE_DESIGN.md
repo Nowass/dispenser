@@ -1,10 +1,8 @@
 # Dispenser V2 — Android BLE client integration (M1.10e)
 
-Status: **revision 4. Design approved (revision 3, all decisions E1–E17). M1.10e.1 (native Noise
-provider, vectors, credential storage) implemented and verified on host, NDK and emulator;
-uncommitted, awaiting review (section 12). The RNG-gate diagnostic firmware (Appendix B) is
-implemented and cross-built, not flashed.** M1.10d.2 and M1.10c.2b stay OPEN; nothing here is
-evidence for them.
+Status: **revision 5. M1.10e.1 committed (`6a73441`). M1.10e.2a (Android BLE transport) implemented
+and JVM-tested, uncommitted, awaiting review (section 13); M1.10e.2b (secure session) not started.**
+M1.10d.2, M1.10c.2b and M1.10e.5 stay OPEN; nothing here is evidence for radio behavior.
 
 Baseline: `docs/BLE_PROTOCOL.md` v1.0 as amended by M1.10d.1 (sections 2, 3, 10.4a, 11.3),
 `docs/BLE_PROTOCOL_DESIGN.md` rev. 3 (approved D1 setup code, D2 Noise, D5 four owner slots, D15
@@ -956,6 +954,58 @@ Deviations from the design text (none changes a decision):
   the 34 existing Compose UI tests fail before reaching app code because Espresso 3.6.1 calls the
   removed `InputManager.getInstance` on API 37 — a test-dependency issue unrelated to this change,
   not fixed here (no toolchain upgrade in this milestone).
+
+## 13. Implementation notes (M1.10e.2a — Android BLE transport)
+
+| Part | Implemented |
+|---|---|
+| `device/transport/ByteTransport.kt` | the transport contract: `generation`, `mtu`, `info`, `events` (notifications, then one `Closed`), `closeReason`, `writeFragment`, `close`; `CloseReason` (Local, Disconnected(status), BluetoothOff, PermissionRevoked, Timeout(step), GattFailure(step, status), NotADispenser, NotificationOverflow); `ConnectResult`; `TransportTimeouts` (connect 15 s, discovery 10 s, MTU 5 s, Info 5 s, subscribe 5 s, write 5 s) |
+| `GattPort` + `DispenserGatt` | the thin port interface (non-blocking calls, callbacks into a per-port sink) and the normative UUIDs |
+| `GattTransport` (pure Kotlin) | setup connect → high priority → discovery (service + Info read / Request write / Response notify + CCCD) → MTU 517 requested, reported value clamped to 23..517, 23 on refusal, failure or timeout → Info read and decoded (`NotADispenser` otherwise) → notifications enabled; exactly one GATT operation in flight; every step with a timeout; callbacks of any thread through one channel and one coroutine; per-port sinks, so callbacks of an earlier connection can never reach a newer one, and callbacks after close are dropped; unsolicited MTU changes used for the next frame; bounded notification buffer (128 unconsumed fragments, then `NotificationOverflow`); SecurityException → `PermissionRevoked`; link drop while Bluetooth is off → `BluetoothOff`; cancellation of a connect closes the attempt |
+| `GattTransportFactory` | prerequisite check (`NotReady` without any attempt), process-wide generations, address format check (the address is a locator only) |
+| `device/link/FrameLink` | fragmentation at the MTU in effect when a frame starts (`BleProtocol.fragment`), one fragment per write response, frames serialized; reassembly with the shared `Reassembler` (2 s gap); fragment errors reported as `FragmentError` (the session decides); one `Closed` |
+| `AndroidGattPort`, `AndroidGattPortFactory`, `AndroidBluetoothPrerequisites` | the only `android.bluetooth` code: API 33+ and pre-33 signatures of read/write/notify/descriptor calls, `getRemoteLeDevice(…, ADDRESS_TYPE_PUBLIC)` on 33+, `TRANSPORT_LE`, `autoConnect = false`; readiness = BLE feature, adapter, `BLUETOOTH_CONNECT` on 31+, adapter enabled |
+
+**Tests (JVM, deterministic `FakeGatt` + virtual time):** `GattTransportTest` (13: setup order and
+values, MTU cases incl. refusal/failure/timeout/clamping/unsolicited change, every setup failure
+releases the GATT client, not-ready attempts nothing, SecurityException at every step and during a
+write, link drop vs Bluetooth off, stale callbacks of an older generation after reconnect, one write
+in flight, write failure and timeout, disconnect during a write, notification overflow, duplicate
+and unexpected callbacks, cancelled connect, 4 real threads × 2,000 notifications + concurrent
+writes with no loss or duplication and one `Closed` — 5/5 repeated runs); `FrameLinkTest` (7: echo at
+MTU 23/24/64/185/247/517 × boundary lengths up to 520, flow control fragment by fragment, concurrent
+sends never interleave, every fragment error class + recovery, MTU change mid-frame, single
+`Closed`, size limits); `AndroidBluetoothPrerequisitesTest` (Robolectric: feature, permission,
+adapter state; the API 26–30 path via injected SDK level); `ArchitectureRulesTest` now also covers
+the transport package. Mutation checks: no one-operation lock, no notification bound, no MTU clamp,
+no Bluetooth-off mapping, unserialized frame sends, unhandled SecurityException — all caught.
+
+**Review checks (2026-11-18):**
+1. *Write start vs completion (API 33+):* `writeCharacteristic(…)` must return
+   `BluetoothStatusCodes.SUCCESS` to start; the write completes only with `onCharacteristicWrite`
+   status 0. A refused start → `GattFailure(WRITE, -1)`; a failing completion →
+   `GattFailure(WRITE, status)`; both close. Tests: `write_start_failure_and_completion_failure_are_both_handled`
+   (fake), `AndroidGattPortTest` (Robolectric: refused start returns false; completion reported only
+   from the callback, including a failing status).
+2. *Subscription = CCCD write:* `setCharacteristicNotification` (refusal → not started) **and** the
+   CCCD write of `0x0001`, completed only by `onDescriptorWrite` status 0; no callback → timeout,
+   failing status → `GattFailure(SUBSCRIBE, status)`. Tests: `subscription_requires_the_cccd_write_callback`,
+   `AndroidGattPortTest.subscription_is_the_cccd_write_and_its_callback`.
+3. *Negotiated MTU:* the value reported by `onMtuChanged` is used (517 requested, smaller agreed →
+   that value); an unsolicited report (Android 14+ negotiating by itself) is kept even when the app's
+   own request is refused or unanswered; fragments are cut at that MTU. Tests:
+   `actually_negotiated_mtu_is_used`, `FrameLinkTest.fragments_follow_the_negotiated_mtu` (MTU 185,
+   23, and an unsolicited 100).
+
+**Not in M1.10e.2a / deviations:**
+- `AndroidGattPort` is compiled and lint-checked but not run against a radio (no BLE peer on the
+  emulator); its runtime behavior is part of M1.10e.5.
+- CDM discovery (`DeviceDiscovery`) moves to M1.10e.2b/M1.10e.4 together with the session manager
+  and onboarding, where an association is first needed.
+- Manifest permissions (`BLUETOOTH_CONNECT`; `BLUETOOTH` with `maxSdkVersion 30`) and the
+  `bluetooth_le` feature are added when BLE is wired into the app (M1.10e.4), so the installed app
+  stays unchanged until then. `BLUETOOTH_ADMIN` is not needed for GATT connections; it would only be
+  needed by the fallback scan (E8).
 
 ---
 

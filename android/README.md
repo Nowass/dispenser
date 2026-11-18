@@ -58,6 +58,14 @@ with Android Keystore wrapping). Not used by any screen yet: the app behaves exa
   `qr_formats_v1.txt`. Instrumented (emulator or test phone): Keystore wrapping and the APK
   library on ART (`KeystoreKeyWrapperTest`, `NativeNoiseInstrumentedTest`).
 
+## BLE transport (M1.10e.2a)
+
+`cz.nowass.dispenser.device.transport` (GATT transport: `GattTransport` over the thin
+`AndroidGattPort`, generations, MTU, timeouts, bounded notifications, permission and Bluetooth-off
+handling) and `device.link.FrameLink` (fragmentation/reassembly). Tested on the JVM with the
+deterministic `FakeGatt`; not wired into the app and no manifest permission is declared yet (the
+app behaves exactly as before). Only `device/transport/AndroidGattPort.kt` uses `android.bluetooth`.
+
 ## Build, test, run
 
 From this `android/` directory:
