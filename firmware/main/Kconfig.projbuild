@@ -143,4 +143,46 @@ config DSP_APP_TASK_STACK
         Static stack of the single application task (measured worst-case
         call-chain frame sum plus margin; see firmware/README.md).
 
+config DSP_RNG_GATE_DIAGNOSTIC
+    bool "RNG-gate diagnostic image (M1.10c.2b evidence R1-R3, R5, R6; no BLE host)"
+    default n
+    depends on BT_ENABLED && BT_CONTROLLER_ONLY && !DSP_APP_RUNTIME && !DSP_BLE_SECURITY && !DSP_BLE_TRANSPORT && !DSP_APP_CONNECTIVITY && !DSP_STORAGE_SMOKE_TEST && !DSP_TIME_SYNC_DIAGNOSTIC && !DSP_NOTIFY_HTTPS_DIAGNOSTIC
+    help
+        Separate diagnostic image (sdkconfig.rnggate.defaults; design
+        docs/ANDROID_BLE_DESIGN.md Appendix B). Once per boot it registers the
+        libsodium RNG adapter (R1), checks that the adapter refuses while the
+        Bluetooth controller is off (R3), enables the BT controller alone (no
+        host stack: no GATT, no advertising, scanning or connections) so that
+        the RF entropy source is active, checks the adapter routing (R2),
+        streams DSP_RNG_GATE_SAMPLE_BYTES from esp_fill_random and the same
+        amount through libsodium randombytes_buf as framed Base64 lines with
+        CRC-32 over the console (R5, captured by tools/rng_capture.py),
+        optionally derives the public PSK vectors (R6), disables the
+        controller again (R3) and then idles. No Noise service, no NVS
+        access (PHY calibration storage must be off), no credentials, no
+        eFuse writes, no GPIO output. Refused together with the production
+        endpoint. Not validated on hardware.
+
+config DSP_RNG_GATE_SAMPLE_BYTES
+    int "RNG-gate sample size per source (bytes)"
+    range 4096 8388608
+    default 1048576
+    depends on DSP_RNG_GATE_DIAGNOSTIC
+    help
+        Bytes streamed from each source (esp_fill_random, then libsodium
+        randombytes_buf) in 4096-byte blocks; the last block may be shorter.
+        Default 1 MiB (the R5 minimum), at most 8 MiB. At the default 115200
+        baud UART console 1 MiB per source takes about 2 minutes.
+
+config DSP_RNG_GATE_PSK_VECTORS
+    bool "RNG-gate: derive the PSK vectors of ble_session_v1.txt on the device (R6)"
+    default n
+    depends on DSP_RNG_GATE_DIAGNOSTIC
+    help
+        Embeds the public "psk" and "psk_not" records of
+        test-vectors/ble_session_v1.txt (CMake-generated header) and derives
+        each through dsp_psk_derive (mbedTLS / TF-PSA-Crypto PSA HKDF). Logs
+        pass/fail counts only, never key bytes. Links only dsp_secderive.c and
+        dsp_hkdf_psa.c of dispenser_security (no Noise, no dsp_blesec).
+
 endmenu

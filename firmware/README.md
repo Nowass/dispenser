@@ -1916,6 +1916,44 @@ static DRAM to the security image (transport + adapter ≈ 6.1 KB code, 3.2 KB s
 already linked the increase is 197,536 B. Heap after NimBLE init, stack high-water marks,
 throughput and current are hardware items (H5, H7, H8).
 
+## RNG gate diagnostic (M1.10c.2b evidence)
+
+A separate, off-by-default diagnostic image that produces the ESP32-C3 RNG evidence R1, R2, R3, R5
+and R6 of [`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md) section 8a.1 (design:
+`docs/ANDROID_BLE_DESIGN.md` Appendix B). `CONFIG_DSP_RNG_GATE_DIAGNOSTIC` (fragment
+`sdkconfig.rnggate.defaults`) enables the Bluetooth controller only (`CONFIG_BT_CONTROLLER_ONLY`, no
+host), registers the libsodium RNG adapter, checks it refuses with the controller off, streams
+1 MiB (configurable up to 8 MiB) from `esp_fill_random` and the same through `randombytes_buf` as
+framed Base64 lines with CRC-32, derives the public PSK vectors through `dsp_psk_derive` (counts
+only), disables the controller and idles. Code: `main/main.c` (`rng_gate_task`); the R6 header is
+generated at configure time from `test-vectors/ble_session_v1.txt` by `main/CMakeLists.txt`.
+
+```sh
+idf.py -B build-rnggate -D SDKCONFIG=build-rnggate/sdkconfig \
+       -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.rnggate.defaults" build
+# after an approved flash (command in HARDWARE_ACCEPTANCE.md 8a.1):
+python firmware/tools/rng_capture.py --port /dev/ttyACM0 --reset --out-dir rng-out --log rng-out/console.log
+python3 firmware/tools/test_rng_capture.py      # host tests of the capture tool (synthetic logs)
+```
+
+Safety notes:
+
+- Not a deployment image. No Noise service, `dsp_blesec`, GATT, NimBLE/Bluedroid host,
+  advertising, scanning or connections; no application runtime, dosing or GPIO output; no
+  credentials, setup code or `nvs_sec` access; NVS is never initialized and PHY calibration is
+  never stored (`CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=n`); no eFuse writes. Antenna
+  attached before running (RF calibration).
+- Kconfig excludes it with the runtime, BLE security/transport, connectivity and the other
+  diagnostics; the configure step refuses it with `CONFIG_DSP_APP_ALLOW_PRODUCTION` and fails when
+  `sdkconfig.rnggate.defaults` was requested but the result is not a valid RNG-gate image.
+- The capture tool's chi-square/monobit figures are sanity checks only; run `ent`, dieharder or a
+  NIST STS subset on the captured `.bin` files. Neither proves that the entropy source is enabled
+  (that is R1–R3). R4 (live handshakes over BLE) is not covered by this image: it runs in the
+  controlled security-enabled bring-up that may start only after R1–R3 and R5 pass, and
+  security-enabled firmware is accepted for normal use only after R4 passes
+  (`HARDWARE_ACCEPTANCE.md` 8a, gate sequence).
+- Cross-built only; not run on hardware. Flashing needs explicit approval.
+
 ## HTTPS notification transport and connectivity session (M1.7)
 
 Pure domain code (`dsp_notify_proto`, `dsp_https_transport`, `dsp_connectivity`, extensions

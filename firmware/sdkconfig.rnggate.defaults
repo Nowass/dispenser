@@ -1,0 +1,25 @@
+# M1.10c.2b RNG-gate DIAGNOSTIC image (docs/ANDROID_BLE_DESIGN.md Appendix B; record sheet
+# HARDWARE_ACCEPTANCE.md section 8a R1, R2, R3, R5, R6). Use on top of sdkconfig.defaults:
+#   idf.py -B build-rnggate -D SDKCONFIG=build-rnggate/sdkconfig \
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.rnggate.defaults" build
+# Not a deployment image. No Noise service, no dsp_blesec, no GATT, no NimBLE/Bluedroid host,
+# no advertising/scanning/connections, no NVS writes, no credentials, no eFuse writes, no GPIO
+# output. Refused at configure time together with CONFIG_DSP_APP_ALLOW_PRODUCTION. Everything
+# not listed here keeps its default (application runtime, BLE security, BLE transport,
+# connectivity and the other diagnostics stay off; Wi-Fi is never started).
+CONFIG_DSP_RNG_GATE_DIAGNOSTIC=y
+# R5: bytes per source (esp_fill_random, then libsodium randombytes_buf); 1 MiB = R5 minimum.
+CONFIG_DSP_RNG_GATE_SAMPLE_BYTES=1048576
+# R6: derive the public PSK vectors of test-vectors/ble_session_v1.txt (counts only in the log).
+# Links dsp_secderive.c and dsp_hkdf_psa.c (PSA HKDF) only.
+CONFIG_DSP_RNG_GATE_PSK_VECTORS=y
+
+# Bluetooth controller only (host "Disabled"): the RF entropy source of esp_fill_random is
+# active while the controller is enabled; without a host no GATT service, advertising,
+# scanning or connection can exist in this image.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_ONLY=y
+
+# PHY: full calibration at every controller start; calibration data is never stored in NVS
+# (the image does not initialize NVS at all).
+CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=n

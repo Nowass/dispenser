@@ -115,8 +115,22 @@ M1.10c.2a (software integration) is verified on the host and by ESP32-C3 cross-b
 that demonstrates the target RNG path, BLE runtime behavior, timing, stack or heap on the device:
 cross-build success and host interoperability are **not** evidence for these items. Design
 reference: `docs/SECURITY_INTEGRATION_DESIGN.md` section 6.1. No security-enabled firmware
-(`CONFIG_DSP_BLE_SECURITY`) is deployed before R1–R4 pass; the build refuses that option together
-with the production endpoint.
+(`CONFIG_DSP_BLE_SECURITY`) is accepted for normal use before R1–R4 pass; the build refuses that
+option together with the production endpoint.
+
+**Gate sequence (approved 2026-11-18):**
+
+1. **RNG gate** — the diagnostic image of 8a.1 (no Noise service, no GATT, no privileged BLE
+   operation; not a deployment of security-enabled firmware): **R1, R2, R3 and R5 must pass**
+   (R6 is run where the image includes it). Only then may stage 2 start.
+2. **Controlled security-enabled BLE bring-up** — on the bench only: `sdkconfig.ble.defaults` +
+   `CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW`, never the production endpoint, development setup code
+   (its provisioning into `nvs_sec` needs a separate approval), no eFuse changes. **R4 is executed
+   here** (live CLAIM/SESSION/ADD/RECOVERY with different ephemerals and session IDs across runs),
+   together with R7, R8 and 8b H1–H10.
+3. **Acceptance for normal use** — security-enabled firmware is accepted for normal use only after
+   **R4 has passed** in stage 2 (and the remaining 8a items are recorded). Until then every
+   security-enabled image is a bench bring-up image.
 
 | # | Check | Pass criterion | Result |
 |---|---|---|---|
@@ -129,6 +143,88 @@ with the production endpoint.
 | R7 | Target resources | 8.1–8.3 with the real stack: peak heap per handshake, task stack high-water mark during a handshake and during dispatch, handshake and per-frame timing; the static estimates in the design's resource table replaced | |
 | R8 | Lifecycle on the device | pump suspension closes the security session (EV_SUSPENDING_FOR_DOSE best effort), reconnect needs a new IK handshake; EV_SESSION_CLOSING before the 15-minute maximum; a plain END_SESSION closes only its connection | |
 
+#### 8a.1 RNG-gate diagnostic image (R1, R2, R3, R5, R6)
+
+Design: `docs/ANDROID_BLE_DESIGN.md` Appendix B. A separate, off-by-default build
+(`CONFIG_DSP_RNG_GATE_DIAGNOSTIC`, fragment `sdkconfig.rnggate.defaults`) that enables the BT
+controller **only** (`CONFIG_BT_CONTROLLER_ONLY=y`, no NimBLE/Bluedroid host: no GATT, no
+advertising, scanning or connections) to activate the RF entropy source. It contains no Noise
+service, no `dsp_blesec`, no dispatcher, no application runtime, no GPIO output, no credentials
+or setup code, and never initializes NVS (`CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=n`, so PHY
+calibration is never stored; with R6 the PSA persistent-key storage code, which contains `nvs_set_blob`/`nvs_commit`, is linked but never reached, since no PSA key object is created, and `nvs_flash_init` is not in the image, so any NVS open would fail). It writes no eFuse (ESP-IDF startup and the BT controller read the
+MAC/chip eFuses as every image does). The configure step refuses it together with
+`CONFIG_DSP_APP_ALLOW_PRODUCTION` (also when that flag is only requested in a defaults file).
+Cross-built only; **not run on hardware yet**.
+
+Build (no flashing):
+
+```sh
+. ~/.espressif/tools/activate_idf_v6.1.sh
+cd firmware
+idf.py -B build-rnggate -D SDKCONFIG=build-rnggate/sdkconfig \
+       -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.rnggate.defaults" build
+```
+
+Flash (**proposal only; requires explicit approval before it is run**; the board must have its
+antenna attached; writes bootloader, partition table, OTA data and the app, no NVS image, no
+eFuse):
+
+```sh
+idf.py -B build-rnggate -D SDKCONFIG=build-rnggate/sdkconfig -p /dev/ttyACM0 flash
+```
+
+Capture (reads the console; `--reset` pulses RTS once for a normal reboot, DTR stays low, so
+the ROM download mode is never entered; without `--reset` start the capture first and then
+reset the board by hand):
+
+```sh
+python firmware/tools/rng_capture.py --port /dev/ttyACM0 --reset \
+       --out-dir rng-out --log rng-out/console.log
+# offline re-check of a saved log:
+python3 firmware/tools/rng_capture.py --input rng-out/console.log --out-dir rng-out
+```
+
+The tool verifies block order, block CRC-32, byte counts and the whole-stream CRC, writes
+`rng-out/rng_esp_fill_random.bin` and `rng-out/rng_randombytes_buf.bin` only for an error-free
+capture and exits non-zero on any framing/CRC error (then re-run the capture). With the default
+115200-baud UART console (also mirrored to the USB-Serial-JTAG port) 1 MiB per source takes
+about 2 minutes, 8 MiB about 16 minutes.
+
+How each item is produced (one run per boot, device log lines `RNGGATE ...`):
+
+| # | Produced by | Pass evidence in the log |
+|---|---|---|
+| R1 | `dsp_esp_rng_register()` before any libsodium use; name and order read after the first ready call | `RNGGATE R1 register=1`, `RNGGATE R1 name=dsp_esp32c3_hw registered_before_init=1` |
+| R3 (pre) | controller not initialized: `dsp_esp_rng_ready()` and `dsp_esp_rng_bytes()`; no libsodium call in this state | `RNGGATE R3pre controller_status=0 ready=0 bytes=0` (no abort) |
+| — | `esp_bt_controller_init` + `esp_bt_controller_enable(ESP_BT_MODE_BLE)`; first ready call runs `sodium_init` | `RNGGATE controller init=0x0 enable=0x0 status=2 ready=1` |
+| R2 | 4 × `randombytes_buf` + 1 × `randombytes_random` through libsodium | `RNGGATE R2 calls_before=a calls_after=b` with b ≥ a + 5; the `randombytes_buf` R5 pass adds one adapter call per block (`adapter_calls_during_sodium_pass`) |
+| R5 | `CONFIG_DSP_RNG_GATE_SAMPLE_BYTES` (default 1 MiB, up to 8 MiB) from `esp_fill_random`, then the same amount through libsodium `randombytes_buf` (adapter path), sequentially, controller enabled and re-checked before every block | `RNGBEGIN`/`RNG`/`RNGEND` frames; `RNGGATE R5 esp_fill_random=1 randombytes_buf=1`; capture tool exit 0; then `ent`, dieharder and/or a NIST STS subset on both `.bin` files, results recorded here |
+| R6 | `CONFIG_DSP_RNG_GATE_PSK_VECTORS=y` (set by the fragment): every `psk` and `psk_not` record of `test-vectors/ble_session_v1.txt` (CMake-generated header, public synthetic inputs) through `dsp_psk_derive` (PSA HKDF); counts only | `RNGGATE R6 psk pass=24 fail=0 psk_not pass=12 fail=0 (expected 24/12)` |
+| R3 (post) | `esp_bt_controller_disable` + `deinit`, then ready/bytes again | `RNGGATE R3post disable=0x0 deinit=0x0 controller_status=0 ready=0 bytes=0` |
+| — | summary | `RNGGATE SUMMARY R1=PASS R2=PASS R3pre=PASS R3post=PASS R5=STREAMED R6=PASS ...` |
+
+The R3 criteria about HELLO session ID 0 and HANDSHAKE_FAILED need the security service and are
+not part of this image; they are checked with the security+BLE bring-up image (below).
+
+**What this evidence does and does not show:**
+
+- (a) Statistical tests on the samples (`ent`, dieharder, NIST STS, and the tool's histogram
+  chi-square/monobit sanity figures) do **not** prove that the entropy source is correctly
+  enabled; they only detect gross failures (stuck, biased or repeating output, a broken
+  transport). Good-looking statistics are also produced by a pseudo-random generator. The
+  evidence that the source is enabled is R1–R3 (registration before use, routing through the
+  adapter, refusal without RF, controller status ENABLED while sampling) together with the
+  ESP-IDF documented condition that `esp_fill_random` returns true random numbers while the RF
+  subsystem (here the BT controller) is enabled.
+- (b) **R4 is not covered by this image.** Live CLAIM/SESSION/ADD/RECOVERY handshakes over BLE,
+  with different ephemeral keys and session IDs across runs, remain a mandatory hardware
+  acceptance item. They are verified in stage 2 of the gate sequence above (controlled
+  security-enabled BLE bring-up with `sdkconfig.ble.defaults` +
+  `CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW`), which may start only after R1–R3 and R5 have passed
+  with this image, using either an Android phone running the M1.10e client (M1.10e.2 or later) or a
+  host BLE peer; record which peer was used. Security-enabled firmware is accepted for normal use
+  only after R4 passes.
+
 ### 8b. M1.10d.2 — hardware acceptance of the NimBLE transport (OPEN)
 
 M1.10d.1 (transport, NimBLE adapter, build option) is verified on the host (unit, fault, fuzz,
@@ -136,7 +232,8 @@ two-thread/ThreadSanitizer and end-to-end tests with the noise-c phone through t
 MTU 23/64/247) and by ESP32-C3 cross-builds only. None of that is evidence for radio behavior,
 Android interoperability, timing or target resources. Design reference:
 `docs/BLE_TRANSPORT_DESIGN.md` section 15.2. Build: `sdkconfig.ble.defaults` (build-only, refused
-with the production endpoint). **Do not deploy security-enabled firmware before 8a R1–R4 pass.**
+with the production endpoint). Gate sequence: 8a (RNG gate R1–R3 + R5 first, then the controlled
+bring-up where R4 runs; acceptance for normal use only after R4 passes).
 Without the button driver (M10) the bring-up option `CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW` makes a
 power cycle open the service window (never in a production build).
 

@@ -10,6 +10,9 @@
  * Optional application runtime (M1.9c, CONFIG_DSP_APP_RUNTIME, default off): the M1.9b
  * application cycle with a SIMULATED pump (no GPIO) and deep sleep; see app_runtime().
  *
+ * Optional RNG-gate diagnostic image (M1.10c.2b evidence, CONFIG_DSP_RNG_GATE_DIAGNOSTIC, default
+ * off, sdkconfig.rnggate.defaults): BT controller only, no host stack; see rng_gate_task().
+ *
  * Deliberately absent from the default image (separate milestones, pending hardware review):
  *   - no GPIO configuration of any kind (pump/motor, button, LED),
  *   - no Bluetooth or Wi-Fi start,
@@ -56,6 +59,22 @@
 #endif
 #if CONFIG_DSP_BLE_TRANSPORT
 #include "dsp_esp_ble.h"
+#endif
+#endif
+
+#if CONFIG_DSP_RNG_GATE_DIAGNOSTIC
+#include <stdio.h>
+
+#include <sodium.h>
+
+#include "dsp_esp_rng.h"
+#include "esp_bt.h"
+#include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#if CONFIG_DSP_RNG_GATE_PSK_VECTORS
+#include "dsp_auth.h" /* dsp_secure_zero */
+#include "dsp_secderive.h"
 #endif
 #endif
 
@@ -369,6 +388,262 @@ static void app_runtime_start(void)
 }
 #endif
 
+#if CONFIG_DSP_RNG_GATE_DIAGNOSTIC
+/* ---- RNG-gate diagnostic image (M1.10c.2b R1, R2, R3, R5, R6) ------------------------
+ * Design: docs/ANDROID_BLE_DESIGN.md Appendix B; record sheet: HARDWARE_ACCEPTANCE.md 8a.
+ * Runs once per boot in its own static task, then idles. The Bluetooth controller is the only
+ * radio component (CONFIG_BT_CONTROLLER_ONLY: no host, so no GATT, advertising, scanning or
+ * connections can exist); it is enabled only to make the RF entropy source of esp_fill_random
+ * active. No NVS (PHY calibration storage off), no credentials, no eFuse writes, no GPIO output.
+ * No libsodium call is ever made while dsp_esp_rng_ready() is false (the adapter would abort).
+ *
+ * R5 stream format (parsed by tools/rng_capture.py), one line each, per source:
+ *   RNGBEGIN source=<name> bytes=<N> block=4096
+ *   RNG <name> <index> <crc32 hex8 of the raw block> <Base64 of the raw block (<= 4096 bytes)>
+ *   RNGEND source=<name> blocks=<count> bytes=<N> crc32=<crc32 hex8 of the whole stream>
+ * Sources, sequentially: "esp_fill_random" (direct), then "randombytes_buf" (libsodium through
+ * the registered adapter). The samples are public test data; no secret exists in this image. */
+
+#define RNG_GATE_BLOCK 4096u
+#define RNG_GATE_B64_LEN (((RNG_GATE_BLOCK + 2u) / 3u) * 4u)
+
+static uint8_t s_gate_block[RNG_GATE_BLOCK];
+static char s_gate_line[64 + RNG_GATE_B64_LEN];
+static StaticTask_t s_gate_task;
+static StackType_t s_gate_stack[8192 / sizeof(StackType_t)];
+
+/* CRC-32 (IEEE 802.3, reflected, as zlib.crc32): crc = rng_gate_crc32(crc, ...), start 0. */
+static uint32_t rng_gate_crc32(uint32_t crc, const uint8_t *p, size_t n)
+{
+    crc = ~crc;
+    while (n--) {
+        crc ^= *p++;
+        for (int k = 0; k < 8; k++) {
+            crc = (crc >> 1) ^ (0xEDB88320u & (0u - (crc & 1u)));
+        }
+    }
+    return ~crc;
+}
+
+/* RFC 4648 Base64 with padding; returns the number of characters written (no terminator). */
+static size_t rng_gate_b64(const uint8_t *in, size_t n, char *out)
+{
+    static const char A[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0;
+    size_t i = 0;
+    for (; i + 3 <= n; i += 3) {
+        uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8) | in[i + 2];
+        out[o++] = A[(v >> 18) & 63];
+        out[o++] = A[(v >> 12) & 63];
+        out[o++] = A[(v >> 6) & 63];
+        out[o++] = A[v & 63];
+    }
+    if (n - i == 1) {
+        uint32_t v = (uint32_t)in[i] << 16;
+        out[o++] = A[(v >> 18) & 63];
+        out[o++] = A[(v >> 12) & 63];
+        out[o++] = '=';
+        out[o++] = '=';
+    } else if (n - i == 2) {
+        uint32_t v = ((uint32_t)in[i] << 16) | ((uint32_t)in[i + 1] << 8);
+        out[o++] = A[(v >> 18) & 63];
+        out[o++] = A[(v >> 12) & 63];
+        out[o++] = A[(v >> 6) & 63];
+        out[o++] = '=';
+    }
+    return o;
+}
+
+static void rng_gate_put(const char *line, size_t len)
+{
+    /* one write per line so that log lines of other tasks cannot split a frame */
+    fwrite(line, 1, len, stdout);
+    fflush(stdout);
+}
+
+/* Streams `total` bytes from one source; false if the source refused (entropy inactive). */
+static bool rng_gate_stream(const char *source, bool sodium_path, uint32_t total)
+{
+    int n = snprintf(s_gate_line, sizeof s_gate_line, "RNGBEGIN source=%s bytes=%lu block=%u\n",
+                     source, (unsigned long)total, (unsigned)RNG_GATE_BLOCK);
+    rng_gate_put(s_gate_line, (size_t)n);
+    uint32_t sent = 0;
+    uint32_t index = 0;
+    uint32_t crc_all = 0;
+    while (sent < total) {
+        size_t len = total - sent < RNG_GATE_BLOCK ? total - sent : RNG_GATE_BLOCK;
+        /* the source must still be active for every block (never sample with RF off) */
+        if (!dsp_esp_rng_ready(NULL)) {
+            ESP_LOGE(TAG, "RNGGATE R5 %s: entropy source inactive at block %lu: stream aborted",
+                     source, (unsigned long)index);
+            return false;
+        }
+        if (sodium_path) {
+            randombytes_buf(s_gate_block, len);
+        } else {
+            esp_fill_random(s_gate_block, len);
+        }
+        uint32_t crc = rng_gate_crc32(0, s_gate_block, len);
+        crc_all = rng_gate_crc32(crc_all, s_gate_block, len);
+        n = snprintf(s_gate_line, sizeof s_gate_line, "RNG %s %lu %08lx ", source,
+                     (unsigned long)index, (unsigned long)crc);
+        size_t pos = (size_t)n;
+        pos += rng_gate_b64(s_gate_block, len, s_gate_line + pos);
+        s_gate_line[pos++] = '\n';
+        rng_gate_put(s_gate_line, pos);
+        sent += (uint32_t)len;
+        index++;
+        vTaskDelay(1); /* the console write may busy-wait: let the idle task (watchdog) run */
+    }
+    memset(s_gate_block, 0, sizeof s_gate_block);
+    n = snprintf(s_gate_line, sizeof s_gate_line, "RNGEND source=%s blocks=%lu bytes=%lu crc32=%08lx\n",
+                 source, (unsigned long)index, (unsigned long)sent, (unsigned long)crc_all);
+    rng_gate_put(s_gate_line, (size_t)n);
+    return true;
+}
+
+#if CONFIG_DSP_RNG_GATE_PSK_VECTORS
+typedef struct {
+    uint8_t is_not;    /* psk_not record: must equal psk and differ from wrong */
+    uint8_t purpose;
+    uint8_t has_token;
+    uint8_t setup[DSP_SETUP_CODE_LEN];
+    uint8_t token[DSP_INVITE_TOKEN_LEN];
+    uint8_t psk[DSP_PSK_LEN];
+    uint8_t wrong[DSP_PSK_LEN];
+} dsp_rng_gate_vector_t;
+#include "dsp_rng_gate_vectors.h" /* generated from test-vectors/ble_session_v1.txt */
+
+/* R6: every psk / psk_not record through dsp_psk_derive (PSA HKDF). Counts only, never bytes. */
+static bool rng_gate_psk_vectors(void)
+{
+    unsigned pass[2] = {0, 0};
+    unsigned fail[2] = {0, 0};
+    uint8_t out[DSP_PSK_LEN];
+    for (size_t i = 0; i < sizeof DSP_RNG_GATE_VECTORS / sizeof DSP_RNG_GATE_VECTORS[0]; i++) {
+        const dsp_rng_gate_vector_t *v = &DSP_RNG_GATE_VECTORS[i];
+        bool ok = dsp_psk_derive(v->purpose, v->setup, v->has_token ? v->token : NULL, out) &&
+                  memcmp(out, v->psk, DSP_PSK_LEN) == 0 &&
+                  (!v->is_not || memcmp(out, v->wrong, DSP_PSK_LEN) != 0);
+        dsp_secure_zero(out, sizeof out);
+        if (ok) {
+            pass[v->is_not]++;
+        } else {
+            fail[v->is_not]++;
+        }
+    }
+    ESP_LOGI(TAG, "RNGGATE R6 psk pass=%u fail=%u psk_not pass=%u fail=%u (expected %u/%u)", pass[0],
+             fail[0], pass[1], fail[1], (unsigned)DSP_RNG_GATE_N_PSK, (unsigned)DSP_RNG_GATE_N_PSK_NOT);
+    return fail[0] == 0 && fail[1] == 0 && pass[0] == DSP_RNG_GATE_N_PSK &&
+           pass[1] == DSP_RNG_GATE_N_PSK_NOT;
+}
+#endif
+
+static const char *pf(bool ok)
+{
+    return ok ? "PASS" : "FAIL";
+}
+
+static void rng_gate_task(void *arg)
+{
+    (void)arg;
+    ESP_LOGW(TAG, "RNGGATE diagnostic image (M1.10c.2b): BT controller only, no host, no GATT, "
+                  "no advertising; not a deployment image");
+
+    /* R1: registration before any libsodium use (no randomness is drawn here) */
+    bool reg = dsp_esp_rng_register();
+    ESP_LOGI(TAG, "RNGGATE R1 register=%d", (int)reg);
+
+    /* R3 (pre): controller not enabled -> the adapter refuses; no libsodium call in this state */
+    esp_bt_controller_status_t st = esp_bt_controller_get_status();
+    bool ready_pre = dsp_esp_rng_ready(NULL);
+    uint8_t probe[8];
+    bool bytes_pre = dsp_esp_rng_bytes(NULL, probe, sizeof probe);
+    bool r3_pre = st != ESP_BT_CONTROLLER_STATUS_ENABLED && !ready_pre && !bytes_pre;
+    ESP_LOGI(TAG, "RNGGATE R3pre controller_status=%d ready=%d bytes=%d", (int)st, (int)ready_pre,
+             (int)bytes_pre);
+
+    /* RF on: controller only (BLE mode), no host stack */
+    esp_bt_controller_config_t cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    esp_err_t e_init = esp_bt_controller_init(&cfg);
+    esp_err_t e_en = e_init == ESP_OK ? esp_bt_controller_enable(ESP_BT_MODE_BLE) : ESP_FAIL;
+    st = esp_bt_controller_get_status();
+    bool ready_on = dsp_esp_rng_ready(NULL); /* sodium_init happens here, on the first ready call */
+    ESP_LOGI(TAG, "RNGGATE controller init=0x%x enable=0x%x status=%d ready=%d", (unsigned)e_init,
+             (unsigned)e_en, (int)st, (int)ready_on);
+
+    const char *name = dsp_esp_rng_name();
+    bool before = dsp_esp_rng_registered_before_init();
+    bool r1 = reg && ready_on && before && strcmp(name, "dsp_esp32c3_hw") == 0;
+    ESP_LOGI(TAG, "RNGGATE R1 name=%s registered_before_init=%d", name, (int)before);
+
+    /* R2: libsodium requests go through the adapter (call counter increases) */
+    bool r2 = false;
+    uint32_t c0 = dsp_esp_rng_calls();
+    uint32_t c1 = c0;
+    if (ready_on) {
+        for (int i = 0; i < 4; i++) {
+            randombytes_buf(probe, sizeof probe);
+        }
+        (void)randombytes_random();
+        c1 = dsp_esp_rng_calls();
+        r2 = c1 >= c0 + 5u;
+    }
+    memset(probe, 0, sizeof probe); /* not secret; no libsodium call while RF may be off */
+    ESP_LOGI(TAG, "RNGGATE R2 calls_before=%lu calls_after=%lu (5 requests)", (unsigned long)c0,
+             (unsigned long)c1);
+
+    /* R5: samples with RF on, both paths */
+    bool r5a = false;
+    bool r5b = false;
+    uint32_t cs0 = 0;
+    uint32_t cs1 = 0;
+    if (ready_on) {
+        r5a = rng_gate_stream("esp_fill_random", false, (uint32_t)CONFIG_DSP_RNG_GATE_SAMPLE_BYTES);
+        cs0 = dsp_esp_rng_calls();
+        r5b = r5a && rng_gate_stream("randombytes_buf", true, (uint32_t)CONFIG_DSP_RNG_GATE_SAMPLE_BYTES);
+        cs1 = dsp_esp_rng_calls();
+    }
+    ESP_LOGI(TAG, "RNGGATE R5 esp_fill_random=%d randombytes_buf=%d adapter_calls_during_sodium_pass=%lu",
+             (int)r5a, (int)r5b, (unsigned long)(cs1 - cs0));
+
+#if CONFIG_DSP_RNG_GATE_PSK_VECTORS
+    bool r6 = ready_on && rng_gate_psk_vectors();
+    const char *r6s = pf(r6);
+#else
+    const char *r6s = "SKIP";
+#endif
+
+    /* R3 (post): RF off -> the adapter refuses again; no libsodium call after this point */
+    esp_err_t e_dis = esp_bt_controller_disable();
+    esp_err_t e_deinit = e_dis == ESP_OK ? esp_bt_controller_deinit() : ESP_FAIL;
+    st = esp_bt_controller_get_status();
+    bool ready_post = dsp_esp_rng_ready(NULL);
+    bool bytes_post = dsp_esp_rng_bytes(NULL, s_gate_block, 8);
+    bool r3_post = e_dis == ESP_OK && e_deinit == ESP_OK && st != ESP_BT_CONTROLLER_STATUS_ENABLED &&
+                   !ready_post && !bytes_post;
+    ESP_LOGI(TAG, "RNGGATE R3post disable=0x%x deinit=0x%x controller_status=%d ready=%d bytes=%d",
+             (unsigned)e_dis, (unsigned)e_deinit, (int)st, (int)ready_post, (int)bytes_post);
+
+    ESP_LOGI(TAG, "RNGGATE SUMMARY R1=%s R2=%s R3pre=%s R3post=%s R5=%s R6=%s stack_free_min=%lu "
+                  "(R5 quality is judged off-device; R4 is not covered by this image)",
+             pf(r1), pf(r2), pf(r3_pre), pf(r3_post), r5a && r5b ? "STREAMED" : "FAIL", r6s,
+             (unsigned long)uxTaskGetStackHighWaterMark(NULL));
+    for (;;) {
+        vTaskDelay(portMAX_DELAY);
+    }
+}
+
+static void rng_gate_start(void)
+{
+    TaskHandle_t t = xTaskCreateStatic(rng_gate_task, "dsp_rnggate", sizeof s_gate_stack / sizeof(StackType_t),
+                                       NULL, tskIDLE_PRIORITY + 2, s_gate_stack, &s_gate_task);
+    if (t == NULL) {
+        ESP_LOGE(TAG, "RNGGATE: task not created");
+    }
+}
+#endif
+
 void app_main(void)
 {
 #if CONFIG_DSP_APP_RUNTIME
@@ -392,6 +667,8 @@ void app_main(void)
     ESP_LOGI(TAG, "project=%s build=%s %s", app->project_name, app->date, app->time);
 #if CONFIG_DSP_APP_RUNTIME
     ESP_LOGI(TAG, "M1.9c application runtime: SIMULATED pump (no GPIO), deep sleep");
+#elif CONFIG_DSP_RNG_GATE_DIAGNOSTIC
+    ESP_LOGI(TAG, "RNG-gate diagnostic: BT controller only, no GPIO, NVS, sleep or dosing activity");
 #else
     ESP_LOGI(TAG, "M0.2 skeleton: no GPIO, radio, sleep or dosing activity");
 #endif
@@ -407,6 +684,9 @@ void app_main(void)
 
 #if CONFIG_DSP_APP_RUNTIME
     app_runtime_start();
+#endif
+#if CONFIG_DSP_RNG_GATE_DIAGNOSTIC
+    rng_gate_start();
 #endif
     /* Returning from app_main is fine: the main task is deleted, the scheduler keeps
      * running (in the runtime build the application task then owns everything). */
