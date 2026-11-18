@@ -26,6 +26,15 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
      */
     @Volatile var dropWriteType: Int? = null
     @Volatile var droppedWrites = 0
+    /**
+     * Deliver the phone's next frame of this type to the firmware, but report its last fragment's
+     * GATT write as failed — only after the device's reply to it arrived (that reply is dropped), so
+     * the device has certainly processed the frame: the phone sees a failed write and the link
+     * closes — the "transmission may have happened" case, with the device side deterministic.
+     */
+    @Volatile var failAckWriteType: Int? = null
+    /** Matching frames let through normally before [failAckWriteType] applies. */
+    @Volatile var failAckSkip = 0
     /** Complete frames the phone wrote, by frame type (dropped ones included). */
     val sentFrames = java.util.concurrent.ConcurrentHashMap<Int, Int>()
     fun sent(type: Int): Int = sentFrames[type] ?: 0
@@ -72,6 +81,18 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
         private fun deliver(frag: ByteArray) {
             val first = frag[0].toInt() and 0x80 != 0
             val last = frag[0].toInt() and 0x40 != 0
+            if (first && failAckAfterReply) {
+                failAckAfterReply = false
+                droppingReply = true
+            }
+            if (droppingReply) {
+                if (last) {
+                    droppingReply = false
+                    dropped++
+                    sink(GattCallback.RequestWritten(133)) // the write the device answered "failed"
+                }
+                return
+            }
             if (first && frag.size > 3 && delayFrameType == (frag[3].toInt() and 0xFF)) {
                 delayFrameType = null
                 Thread.sleep(delayMs) // a slow answer: everything behind it waits too
@@ -103,6 +124,9 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
         override fun enableNotifications(): Boolean = true.also { sink(GattCallback.NotificationsEnabled(DispenserGatt.GATT_SUCCESS)) }
 
         private var droppingWrite = false
+        private var failingAck = false
+        @Volatile private var failAckAfterReply = false
+        private var droppingReply = false
 
         override fun writeRequest(fragment: ByteArray): Boolean {
             val first = fragment[0].toInt() and 0x80 != 0
@@ -113,6 +137,14 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
                 if (dropWriteType == type) {
                     dropWriteType = null
                     droppingWrite = true
+                }
+                if (failAckWriteType == type) {
+                    if (failAckSkip > 0) {
+                        failAckSkip--
+                    } else {
+                        failAckWriteType = null
+                        failingAck = true
+                    }
                 }
             }
             if (droppingWrite) {
@@ -125,6 +157,11 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
             }
             val rc = FirmwareSim.write(fragment)
             if (rc == -2) return false // not connected
+            if (failingAck && last) {
+                failingAck = false
+                failAckAfterReply = true // reported by deliver() once the device's reply arrived
+                return true
+            }
             sink(GattCallback.RequestWritten(if (rc == 0) DispenserGatt.GATT_SUCCESS else rc))
             return true
         }

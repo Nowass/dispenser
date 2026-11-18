@@ -1029,12 +1029,14 @@ no Bluetooth-off mapping, unserialized frame sends, unhandled SecurityException 
 
 ### 14.2 Tests
 
-`FirmwareInTheLoopTest` (10, against the real firmware logic): CLAIM → SESSION + GET_STATUS +
+`FirmwareInTheLoopTest` (11, against the real firmware logic): CLAIM → SESSION + GET_STATUS +
 INVITE_CREATE → ADD with the invitation → RECOVERY with three presses (identity replaced, other phones
 removed, the old phone's credential then fails at HELLO); authentication failures (no credential,
 wrong setup code → HANDSHAKE_FAILED with the staged key kept and explicitly discarded, foreign
 invitation, forged credential → HANDSHAKE_FAILED; nothing enrolled); lost ENROLL_RESULT + process
-death → `ConfirmStaged` in a new manager over the same files; disconnect during a request
+death → `ConfirmStaged` in a new manager over the same files; XX message 3 delivered but its write
+reported failed → `EnrollmentUnconfirmed` (never a plain transport failure: the device may have
+stored it), then `ConfirmStaged`; disconnect during a request
 (`Uncertain`, old session refuses with `NotSent`, new generation and session ID); a delayed response
 retransmitted and answered from the device's response cache (late duplicate discarded); concurrent
 requests serialized; EV_SESSION_CLOSING and cleanup at the window maximum; and the 14.3 regressions:
@@ -1061,8 +1063,9 @@ when the session closes → `NotSent` while the sent one is `Uncertain`; cancell
 closes the session); bounded
 waiting (`Busy`), events, HELLO error / wrong device, ADD impostor with the invitation's hash but
 another static key (abort before message 3, nothing staged). Mutation checks: the 7 security rules
-of revision 6 plus 4 retry rules (no close after a timeout, an uncertain outcome reported as
-`NotSent`, a retransmission with a new `seq`, a failed send reported as `NotSent`) — all caught.
+of revision 6 plus 5 retry rules (no close after a timeout, an uncertain outcome reported as
+`NotSent`, a retransmission with a new `seq`, a failed send reported as `NotSent`, a failed
+message-3 write reported as a transport failure) — all caught.
 
 ### 14.3 Retries and uncertain outcomes (decision: option 1, approved)
 
@@ -1083,7 +1086,10 @@ client rules, matching BLE_PROTOCOL.md 10.4a as clarified:
    closed, or no transport keys / encryption failure on the first attempt). Once a send has
    started, every outcome without a response is `Uncertain` — including a refused or failed write
    (the session is closed) — and a caller cancelled after that point gets no result, so the
-   session is closed ("request cancelled: outcome unknown").
+   session is closed ("request cancelled: outcome unknown"). When the session closed first (e.g. a
+   decryption failure that also aborts a pending write), the result carries the session's close
+   reason. The same rule holds for enrollment: once XX message 3 may have been sent, a transport
+   failure is `EnrollmentUnconfirmed`.
 5. Never automatically allocate a new manual-dose `seq` to retry an uncertain dose; re-sending the
    same `seq` is safe (decided exactly once).
 6. Never automatically repeat REFILL after an uncertain outcome.

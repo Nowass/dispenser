@@ -185,7 +185,7 @@ class SecureSession private constructor(
                         } catch (e: Exception) {
                             // no transport keys (closed concurrently), ciphers freed, or a Noise failure:
                             // nothing of this attempt was written; the cipher state is not trusted any more
-                            val why = (e as? SessionClosedException)?.reason ?: "encryption failed"
+                            val why = closedState.value ?: (e as? SessionClosedException)?.reason ?: "encryption failed"
                             close(why)
                             return@withLock if (mayHaveSent == 0) RequestResult.NotSent(why) else RequestResult.Uncertain(why, mayHaveSent)
                         }
@@ -196,7 +196,9 @@ class SecureSession private constructor(
                             close("request cancelled: outcome unknown") // possibly a partial frame on the link
                             throw e
                         } catch (e: Exception) {
-                            val why = (e as? TransportClosedException)?.let { describe(it.reason) } ?: "send failed: ${e.javaClass.simpleName}"
+                            // the session's own close reason first: a close (e.g. a decryption failure) aborts a pending write
+                            val why = closedState.value ?: (e as? TransportClosedException)?.let { describe(it.reason) }
+                                ?: "send failed: ${e.javaClass.simpleName}"
                             close(why)
                             return@withLock RequestResult.Uncertain(why, attempt) // may have been written
                         }
@@ -448,7 +450,14 @@ class SecureSession private constructor(
             val t = nextTxn()
             val d = CompletableDeferred<Incoming>()
             waiters[t] = d
-            sendPlain(T_HS, t, mapOf("purpose" to purpose.wire, "msg_index" to 2, "noise" to m3))
+            try {
+                sendPlain(T_HS, t, mapOf("purpose" to purpose.wire, "msg_index" to 2, "noise" to m3))
+            } catch (e: TransportClosedException) {
+                // message 3 may have reached the device (it stores the enrollment on accepting it):
+                // the outcome is unknown, never a plain transport failure (11.7)
+                store.release(pending)
+                throw StepFailed(SessionFailure.EnrollmentUnconfirmed)
+            }
             var wait = timeouts.enrollResultMs
             if (purpose == Purpose.RECOVERY) {
                 val confirm = withTimeoutOrNull(timeouts.handshakeStepMs) {

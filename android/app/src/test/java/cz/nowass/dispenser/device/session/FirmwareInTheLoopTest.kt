@@ -244,6 +244,28 @@ class FirmwareInTheLoopTest {
         waitWakeEnd()
     }
 
+    /**
+     * XX message 3 reaches the device (which stores the enrollment) but the phone sees its write fail
+     * and the link close: the outcome is unknown — EnrollmentUnconfirmed with the key staged, never a
+     * plain transport failure — and the next connection confirms it with IK.
+     */
+    @Test
+    fun failed_write_of_message_3_is_an_unconfirmed_enrollment() = runBlocking {
+        val (store, a) = phone("A")
+        wake()
+        ports.failAckWriteType = SecureSession.T_HS
+        ports.failAckSkip = 1 // message 1 passes; message 3 is delivered but its write "fails"
+        val r = label().use { a.open(address, OpenRequest.Claim(it, "A")) }
+        assertEquals(OpenResult.Failed(SessionFailure.EnrollmentUnconfirmed), r)
+        assertTrue(store.loadPending(deviceIdHex) is CredentialState.Present)
+        assertEquals(CredentialState.Absent, store.load(deviceIdHex))
+        val c = a.open(address, OpenRequest.ConfirmStaged(deviceIdHex))
+        assertTrue("confirm: $c", c is OpenResult.Opened)
+        assertEquals(0, (c as OpenResult.Opened).enrolledSlot)
+        a.end()
+        waitWakeEnd()
+    }
+
     @Test
     fun disconnect_during_a_request_and_a_new_generation_afterwards() = runBlocking {
         val (_, a) = phone("A")
