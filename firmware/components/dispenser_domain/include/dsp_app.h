@@ -80,10 +80,11 @@ typedef enum {
  * security-layer-issued authorization (see the operations below). */
 typedef enum {
     DSP_QI_FRAME = 1,     /* one complete frame of connection `gen` (reassembled by the BLE task) */
-    DSP_QI_CONNECTED,     /* a client connected: new connection generation `gen`, ATT MTU */
-    DSP_QI_DISCONNECTED,  /* the connection `gen` ended */
-    DSP_QI_BUTTON,        /* a debounced button event (recovery confirmation) */
+    DSP_QI_BUTTON = 4,    /* a debounced button event (recovery confirmation) */
 } dsp_app_qkind_t;
+/* M1.10d (decision T2): connection events are NOT queue items. The transport reports them into
+ * an authoritative connection-state snapshot beside the queue (dsp_app_link_t), which is never
+ * refused for lack of space; the application reconciles with it before every queue item. */
 
 typedef struct {
     uint8_t kind;  /* dsp_app_qkind_t */
@@ -119,10 +120,13 @@ typedef struct {
     bool (*is_off)(void *ctx);   /* checklist confirmation; NULL = unconfirmed */
     /* Blocks until something was posted or max_ms elapsed. */
     void (*wait)(void *ctx, uint32_t max_ms);
-    /* One complete protocol frame for the current connection (the BLE task fragments it). */
-    bool (*send_frame)(void *ctx, const uint8_t *frame, size_t len);
-    /* Drops the current connection (security close); advertising continues. */
-    void (*disconnect)(void *ctx);
+    /* One complete protocol frame for connection generation `gen` (the transport fragments it).
+     * M1.10d: the transport refuses (false) unless `gen` is its current, open connection, so a
+     * frame of an ended connection can never reach a newer one. */
+    bool (*send_frame)(void *ctx, uint32_t gen, const uint8_t *frame, size_t len);
+    /* Drops connection `gen` (security close) if it is still the current one; advertising
+     * continues. */
+    void (*disconnect)(void *ctx, uint32_t gen);
     /* Optional: the public Info record and advertising payload (protocol 7.1). */
     void (*publish_info)(void *ctx, const uint8_t info[DSP_BLE_INFO_LEN],
                          const uint8_t advert[DSP_BLE_ADVERT_LEN]);
@@ -164,6 +168,11 @@ typedef struct {
     void (*on_frame)(void *ctx, struct dsp_app *app, const uint8_t *frame, size_t len);
     uint64_t (*on_tick)(void *ctx, struct dsp_app *app, uint64_t now_ms);
     void (*on_suspend)(void *ctx, struct dsp_app *app);
+    /* M1.10d (decision T3): the transport discarded a malformed fragment sequence of the current
+     * connection. Before authentication the hook may answer a bounded plain MALFORMED (protocol
+     * 10.6 gate); in a handshake or after authentication it must close the connection (never a
+     * plaintext error). NULL with on_frame set: the connection is closed. */
+    void (*on_rx_fault)(void *ctx, struct dsp_app *app);
 } dsp_app_security_t;
 
 /* Public identity for the Info record and the HELLO hash (platform: factory MAC, version). */
@@ -210,6 +219,12 @@ typedef struct {
     uint16_t session_writes_max;   /* 0 = DSP_APP_SESSION_WRITES_MAX_DEFAULT */
     uint16_t writes_per_minute;    /* 0 = DSP_APP_WRITES_PER_MINUTE_DEFAULT */
     uint16_t session_manual_max;   /* 0 = DSP_APP_SESSION_MANUAL_MAX_DEFAULT */
+    /* M1.10d (decision T7), BUILD-ONLY hardware bring-up until the button driver (M10): a
+     * power-on wake counts as physical presence like a button wake (service window and the
+     * security layer's session precondition). Authentication, the entropy prerequisite and
+     * every authorization rule are unchanged. The firmware build refuses it together with the
+     * production endpoint; false everywhere else. */
+    bool service_on_power_on;
 } dsp_app_config_t;
 
 typedef enum {
@@ -257,6 +272,8 @@ typedef struct {
     size_t frames_out;          /* frames sent */
     size_t frames_stale;        /* frames of another connection generation, dropped */
     size_t link_closes;         /* connections closed by the protocol gate */
+    size_t rx_faults;           /* M1.10d: fragment errors reported by the transport */
+    size_t links_opened;        /* M1.10d: connection generations opened by the application */
     size_t ops;                 /* M1.10b.1 operations called (any result) */
     size_t ops_ok;
     bool op_storage_fault;      /* an operation's write failed (dosing ended for the wake) */
@@ -567,7 +584,9 @@ typedef struct {
     uint8_t end;               /* dsp_app_ble_end_t */
     /* M1.10b.3: identity and session-local limits */
     uint32_t session_id;       /* random per CONNECTION (security session, M1.10c.1); 0 = none */
-    uint32_t conn_gen;         /* generation of the current connection (0 = none) */
+    uint32_t conn_gen;         /* last generation opened by the application (0 = none); stays
+                                  set after its close so that it is never reopened */
+    uint8_t faults_seen;       /* M1.10d: fragment errors of conn_gen already handled */
     bool conn_active;
     uint16_t ops;
     uint16_t writes;
@@ -576,6 +595,16 @@ typedef struct {
     uint64_t win_start_ms;
     bool failed_hs_counted;    /* failed_sessions written at most once per session */
 } dsp_app_session_t;
+
+/* Authoritative connection-state snapshot (M1.10d, decision T2). Written by the transport
+ * (dsp_app_post_conn_event / dsp_app_post_rx_fault) under cfg->sync; read by the application in
+ * one locked copy before every queue item. Internal. */
+typedef struct {
+    uint32_t gen;      /* newest generation reported (strictly increasing within a wake) */
+    bool up;           /* that generation is connected */
+    uint16_t mtu;
+    uint8_t faults;    /* fragment errors of `gen` (saturating) */
+} dsp_app_link_t;
 
 /* Ownership runtime state (RAM; internal). The cache never holds the private key. */
 typedef struct {
@@ -625,6 +654,7 @@ struct dsp_app {
     dsp_app_qitem_t q[DSP_APP_CMDQ_CAPACITY];
     size_t q_head;
     size_t q_count;
+    dsp_app_link_t lnk;   /* M1.10d (T2): connection snapshot, under cfg->sync */
     bool storage_fault; /* M1.10b.1: an operation's write failed: no dosing in this wake */
     dsp_app_session_t ss; /* current service session (valid while accepting) */
     dsp_app_owner_t own;  /* M1.10b.3 */
@@ -637,12 +667,23 @@ struct dsp_app {
 /* Runs one complete wake (ends with the sleep or fail-safe port call). */
 dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg);
 
-/* Producer side of the bounded queue (frames and connection events). false: queue full,
- * invalid input or no session active -> the platform answers "busy" (plain EV_BUSY).
+/* Producer side of the bounded queue (frames) and of the connection snapshot. post_frame false:
+ * queue full, invalid input or no session active -> the frame is dropped (M1.10d: no plaintext
+ * busy notice; the client's retry after its timeout is served from the response cache).
+ *
+ * Connection events (decision T2): post_conn_event updates the snapshot and is never refused for
+ * lack of space. A CONNECTED generation must be strictly greater than every generation reported
+ * before in this wake (false otherwise: ignored). DISCONNECTED of the newest generation marks it
+ * down; of an older one it is ignored (true). The application closes its connection whenever the
+ * snapshot's generation differs from it or is down, and opens the snapshot's generation if it is
+ * up and newer: a disconnect can never be hidden by a full queue, a disconnect followed by a
+ * connect never preserves the old session, and frames of any other generation are stale.
+ * post_rx_fault: one fragment error of generation `gen` (ignored unless it is the newest, up).
  *
  * Synchronization contract:
  *  - These and dsp_app_post_button are the ONLY functions another task may call. They touch
- *    nothing but the queue (q[], q_head, q_count) and the session flag; never domain state.
+ *    nothing but the queue (q[], q_head, q_count), the snapshot (lnk) and the session flag;
+ *    never domain state.
  *  - The queue is accessed under cfg->sync (lock/unlock) on both sides. With cfg->sync == NULL
  *    the caller guarantees that the producer runs in the application task (host tests).
  *  - Posting is accepted only while a service session is active (between the BLE port's start
@@ -651,6 +692,7 @@ dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg);
  *    application task. */
 bool dsp_app_post_frame(dsp_app_t *app, uint32_t gen, const uint8_t *frame, size_t len);
 bool dsp_app_post_conn_event(dsp_app_t *app, bool connected, uint32_t gen, uint16_t mtu);
+bool dsp_app_post_rx_fault(dsp_app_t *app, uint32_t gen);
 
 #ifdef __cplusplus
 }

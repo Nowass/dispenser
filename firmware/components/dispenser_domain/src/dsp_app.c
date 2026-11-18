@@ -195,6 +195,14 @@ static void stage_connect(dsp_app_t *app)
 
 /* ---- Service mode ------------------------------------------------------------------------ */
 
+/* Physical presence for the service window and the security layer: a button wake, or (T7,
+ * build-only bring-up) a power-on wake when the build enables it. */
+static bool presence_wake(const dsp_app_t *app)
+{
+    return app->rep.cause == DSP_CAUSE_BUTTON ||
+           (app->cfg->service_on_power_on && app->rep.cause == DSP_CAUSE_POWER_ON);
+}
+
 /* M1.10c.2a: a registered security session takes over every frame of the connection. */
 static bool sec_session(const dsp_app_t *app)
 {
@@ -272,9 +280,13 @@ static void q_unlock(const dsp_app_t *app)
     }
 }
 
-static bool q_pop(dsp_app_t *app)
+/* Pops one item and copies the connection snapshot in the same critical section: a frame of
+ * generation g is posted only after the transport reported g, so the copy is never older than
+ * the popped frame (the application reconciles with it before handling the frame). */
+static bool q_pop(dsp_app_t *app, dsp_app_link_t *snap)
 {
     q_lock(app);
+    *snap = app->lnk;
     bool got = app->q_count > 0;
     if (got) {
         app->rx = app->q[app->q_head];
@@ -292,6 +304,15 @@ static void q_open(dsp_app_t *app, bool open)
     app->accepting = open;
     app->q_head = 0;
     app->q_count = 0;
+    app->lnk.up = false; /* gen is kept: generations only increase within a wake */
+    app->lnk.faults = 0;
+    q_unlock(app);
+}
+
+static void link_snapshot(dsp_app_t *app, dsp_app_link_t *snap)
+{
+    q_lock(app);
+    *snap = app->lnk;
     q_unlock(app);
 }
 
@@ -370,7 +391,8 @@ static void publish_info(dsp_app_t *app)
 
 static void send_tx(dsp_app_t *app, size_t len)
 {
-    if (len > 0 && app->ble_active && app->cfg->ble->send_frame(app->cfg->ble->ctx, app->tx, len)) {
+    if (len > 0 && app->ble_active && app->ss.conn_active &&
+        app->cfg->ble->send_frame(app->cfg->ble->ctx, app->ss.conn_gen, app->tx, len)) {
         app->rep.frames_out++;
     }
 }
@@ -378,8 +400,69 @@ static void send_tx(dsp_app_t *app, size_t len)
 static void link_drop(dsp_app_t *app)
 {
     app->rep.link_closes++;
-    app->cfg->ble->disconnect(app->cfg->ble->ctx);
+    app->cfg->ble->disconnect(app->cfg->ble->ctx, app->ss.conn_gen);
     conn_end(app);
+}
+
+/* Opens generation gen: every state of an older connection was closed before (conn_end). */
+static void conn_open(dsp_app_t *app, dsp_app_session_t *ss, uint32_t gen)
+{
+    ss->conn_gen = gen;
+    ss->faults_seen = 0;
+    ss->conn_active = true;
+    app->rep.links_opened++;
+    dsp_link_open(&app->link, gen, mono_ms(app));
+    dsp_app_sec_connection_begin(app);
+    publish_info(app);
+    if (sec_session(app) && app->cfg->security->on_connection != NULL) {
+        app->cfg->security->on_connection(app->cfg->security->ctx, app, true);
+    }
+}
+
+/* One fragment error of the open connection (decision T3). */
+static void rx_fault(dsp_app_t *app)
+{
+    app->rep.rx_faults++;
+    if (sec_session(app)) {
+        const dsp_app_security_t *sec = app->cfg->security;
+        if (sec->on_rx_fault != NULL) {
+            sec->on_rx_fault(sec->ctx, app);
+        } else {
+            link_drop(app); /* fail closed: no plaintext from an unknown security state */
+        }
+        return;
+    }
+    dsp_link_result_t r = dsp_link_on_fragment_error(&app->link, app->tx, sizeof app->tx);
+    if (r.actions & DSP_LINK_ACT_REPLY) {
+        send_tx(app, r.out_len);
+    }
+    if (r.actions & DSP_LINK_ACT_CLOSE) {
+        link_drop(app);
+    }
+}
+
+/* Reconciles the application's connection with the transport's snapshot (decision T2):
+ *  - the open connection closes when the snapshot names another generation or is down (every
+ *    authorization and security state of it ends in conn_end);
+ *  - the snapshot's generation opens when it is up and newer than the last one opened (a
+ *    generation is opened at most once, so a dropped connection is never revived);
+ *  - new fragment errors of the open connection are handled, at most DSP_LINK_ERRORS_MAX per
+ *    call (each can close it). */
+static void link_sync(dsp_app_t *app, dsp_app_session_t *ss, const dsp_app_link_t *snap)
+{
+    if (ss->conn_active && (!snap->up || snap->gen != ss->conn_gen)) {
+        conn_end(app);
+        publish_info(app);
+    }
+    if (snap->up && snap->gen > ss->conn_gen && app->ble_active) {
+        conn_open(app, ss, snap->gen);
+    }
+    for (int i = 0; i < DSP_LINK_ERRORS_MAX && ss->conn_active && snap->gen == ss->conn_gen &&
+                    snap->faults > ss->faults_seen;
+         i++) {
+        ss->faults_seen++;
+        rx_fault(app);
+    }
 }
 
 /* One queue item (app->rx). Returns false when the service session must end. */
@@ -387,23 +470,6 @@ static bool handle_item(dsp_app_t *app, dsp_app_session_t *ss)
 {
     dsp_app_qitem_t *it = &app->rx;
     switch (it->kind) {
-    case DSP_QI_CONNECTED:
-        conn_end(app); /* a new connection replaces any previous one */
-        ss->conn_gen = it->gen;
-        ss->conn_active = true;
-        dsp_link_open(&app->link, it->gen, mono_ms(app));
-        dsp_app_sec_connection_begin(app);
-        publish_info(app);
-        if (sec_session(app) && app->cfg->security->on_connection != NULL) {
-            app->cfg->security->on_connection(app->cfg->security->ctx, app, true);
-        }
-        return true;
-    case DSP_QI_DISCONNECTED:
-        if (ss->conn_active && it->gen == ss->conn_gen) {
-            conn_end(app);
-            publish_info(app);
-        }
-        return true;
     case DSP_QI_BUTTON:
         owner_button(app, &it->button);
         return true;
@@ -471,6 +537,9 @@ static void stage_ble(dsp_app_t *app)
             ss->end = DSP_BLE_END_MAX;
             break;
         }
+        dsp_app_link_t snap;
+        link_snapshot(app, &snap);
+        link_sync(app, ss, &snap);
         bool conn = ble_connected(app);
         if (conn) {
             ss->was_connected = true;
@@ -496,7 +565,8 @@ static void stage_ble(dsp_app_t *app)
             }
             continue;
         }
-        if (q_pop(app)) { /* items that arrived before a deadline are served first */
+        if (q_pop(app, &snap)) { /* items that arrived before a deadline are served first */
+            link_sync(app, ss, &snap);
             if (!handle_item(app, ss)) {
                 break;
             }
@@ -1750,7 +1820,7 @@ bool dsp_app_sec_send(dsp_app_t *app, const uint8_t *frame, size_t len)
     if (!dsp_app_sec_connected(app) || frame == NULL || len == 0 || len > DSP_BLE_FRAME_MAX) {
         return false;
     }
-    if (!app->cfg->ble->send_frame(app->cfg->ble->ctx, frame, len)) {
+    if (!app->cfg->ble->send_frame(app->cfg->ble->ctx, app->ss.conn_gen, frame, len)) {
         return false;
     }
     app->rep.frames_out++;
@@ -1864,7 +1934,7 @@ static dsp_app_op_result_t sec_ready(dsp_app_t *app)
     if (app->cfg->security == NULL || app->cfg->security->random == NULL) {
         return op(DSP_OP_FORBIDDEN, 0, 0);
     }
-    if (!app->accepting || app->rep.cause != DSP_CAUSE_BUTTON || app->ss.session_id == 0) {
+    if (!app->accepting || !presence_wake(app) || app->ss.session_id == 0) {
         return op(DSP_OP_BUSY, DSP_OP_B_SESSION, 0);
     }
     if (!app->loaded) {
@@ -2189,7 +2259,40 @@ bool dsp_app_post_frame(dsp_app_t *app, uint32_t gen, const uint8_t *frame, size
 
 bool dsp_app_post_conn_event(dsp_app_t *app, bool connected, uint32_t gen, uint16_t mtu)
 {
-    return q_push(app, connected ? DSP_QI_CONNECTED : DSP_QI_DISCONNECTED, gen, mtu, NULL, 0, NULL);
+    if (app == NULL || app->cfg == NULL || gen == 0) {
+        return false;
+    }
+    q_lock(app);
+    bool ok = app->accepting;
+    if (ok && connected) {
+        ok = gen > app->lnk.gen; /* a new connection is always a new, larger generation */
+        if (ok) {
+            app->lnk.gen = gen;
+            app->lnk.up = true;
+            app->lnk.mtu = mtu;
+            app->lnk.faults = 0;
+        }
+    } else if (ok && gen >= app->lnk.gen) {
+        app->lnk.gen = gen; /* an older generation's disconnect changes nothing */
+        app->lnk.up = false;
+        app->lnk.faults = 0;
+    }
+    q_unlock(app);
+    return ok;
+}
+
+bool dsp_app_post_rx_fault(dsp_app_t *app, uint32_t gen)
+{
+    if (app == NULL || app->cfg == NULL || gen == 0) {
+        return false;
+    }
+    q_lock(app);
+    bool ok = app->accepting && app->lnk.up && gen == app->lnk.gen;
+    if (ok && app->lnk.faults < UINT8_MAX) {
+        app->lnk.faults++;
+    }
+    q_unlock(app);
+    return ok;
 }
 
 /* ---- Security-layer operations (dsp_app_sec.h) ------------------------------------------ */
@@ -2638,7 +2741,7 @@ dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg)
                 stage_dose(app); /* the clock may have become trusted or stepped */
             }
         }
-        if (app->rep.cause == DSP_CAUSE_BUTTON && cfg->ble != NULL) {
+        if (presence_wake(app) && cfg->ble != NULL) {
             stage_ble(app);
             if (app->loaded && app->rep.ops > 0) {
                 stage_connect(app); /* e.g. a CRITICAL event from a manual dose */

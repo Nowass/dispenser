@@ -26,12 +26,30 @@ M1.10b) are specified elsewhere. "MUST" and "MUST NOT" are normative.
 - `reserved(n)` is `n` bytes that MUST be zero when sent and MUST be zero when received.
 - Enumerations list their valid values; any other value is malformed.
 
-## 2. GATT transport (summary; normative details in M1.10d)
+## 2. GATT transport (M1.10d)
 
-One primary service `36b60001-3457-4e8e-9cba-8126de3f52e4` with the characteristics Info
-(`36b60002-…`, read), Request (`36b60003-…`, write with response) and Response (`36b60004-…`,
-notify). Advertising carries the service UUID and, in the scan response, Service Data for that
-UUID (section 7); no Manufacturer Specific Data and no company identifier.
+Design and rationale: `docs/BLE_TRANSPORT_DESIGN.md`. No ATT/SMP security, pairing or bonding:
+security is the session layer (section 11). Besides the standard GAP and GATT services the device
+exposes exactly one primary service:
+
+| Attribute | UUID | Properties | Behavior |
+|---|---|---|---|
+| Service | `36b60001-3457-4e8e-9cba-8126de3f52e4` | primary | — |
+| Info | `36b60002-3457-4e8e-9cba-8126de3f52e4` | read | the 32-byte record of section 7.1 |
+| Request | `36b60003-3457-4e8e-9cba-8126de3f52e4` | write with response | exactly one fragment (section 3) per write; a write longer than `ATT_MTU − 3` (e.g. a prepared/long write) is refused with ATT error 0x0D; write without response is not offered |
+| Response | `36b60004-3457-4e8e-9cba-8126de3f52e4` | notify (CCCD) | one fragment per notification; no indications |
+
+- The client MUST enable notifications on Response before sending HELLO; frames for a client
+  that has not enabled them are not sent.
+- The device prefers ATT_MTU 247 and fragments with the MTU actually negotiated (minimum 23); the
+  MTU in effect when a frame's first fragment is sent applies to the whole frame.
+- One connection at a time. Advertising happens only during a service window: connectable
+  undirected legacy advertising with the device's public address (not an identity: identity is
+  proven by the handshake), Flags + the complete list of 128-bit service UUIDs; scan response:
+  shortened local name `DSP2` + Service Data for the service UUID (section 7.1). No Manufacturer
+  Specific Data and no company identifier.
+- The write response is the client's flow control (section 3): the client sends the next
+  fragment only after it.
 
 ## 3. Fragmentation
 
@@ -54,6 +72,16 @@ notification (device → client).
   frame and starts a new one.
 - Flow control: the client sends the next fragment only after the write response; the device
   sends one notification at a time.
+- **Reporting fragment errors (M1.10d, decision T3).** Before a handshake started on the
+  connection (section 10.6) the device reports a fragment error with a plain `MALFORMED` error
+  frame of type 0 and `txn` 0 (the frame header was never complete), counted as a gate error (the
+  third closes the connection). After the first handshake message was accepted, during a
+  recovery confirmation and after authentication, a fragment error **closes the connection without
+  any reply**: the device never sends a plaintext error once a handshake started.
+- Replies sent just before the device closes the connection are best effort (section 11.3).
+- A complete frame the device cannot accept at the moment (its bounded queue is full or no
+  service window is open) is dropped without a reply; the client retries after its timeout
+  (section 10.4a).
 
 ## 4. Frame
 
@@ -110,7 +138,7 @@ notification (device → client).
 | 0x7E | END_SESSION | plain or enc | empty | empty |
 | 0x80 | EV_SESSION_CLOSING | event, enc | `reason u8, seconds_left u16` | — |
 | 0x81 | EV_SUSPENDING_FOR_DOSE | event, enc | `seconds_until u16` | — |
-| 0x82 | EV_BUSY | event, plain | empty | — |
+| 0x82 | EV_BUSY | event, plain | empty | — (reserved: firmware v1 never sends it, section 3) |
 | 0x83 | EV_CONFIRM_ON_DEVICE | event, enc | `action u8, seconds u8` | — |
 
 Types 0x90–0x9F (journal) and 0xA0–0xAF (priming/calibration) are reserved; all other
@@ -436,3 +464,18 @@ The error never says which input was wrong.
   service window's maximum; `EV_SUSPENDING_FOR_DOSE {0}` (best effort) immediately before a pump run,
   which closes the connection.
 - Retries: section 10.4a (response cache of eight entries per authenticated connection).
+- **Replies before a device-initiated close are best effort (M1.10d, decision T13).** When the
+  device answers and then closes (END_SESSION, an encrypted `MALFORMED`, the third plain gate
+  error, `EV_SUSPENDING_FOR_DOSE`), it sends the queued reply and terminates the link about 100 ms
+  later. Notifications carry no ATT acknowledgement, so the reply may be lost. The device's outcome
+  never depends on delivery: the operation, the end of the window or the close has already
+  happened. Clients:
+  - MUST NOT infer from a missing final reply that the request was not executed, nor from a
+    received one that anything beyond it happened; durable state is read back (`GET_RESULT` for a
+    manual dose, revisions for configuration and schedules).
+  - END_SESSION: a disconnect after sending it means the request completed; the client does not
+    repeat it on a new connection. While still connected after its timeout, it MAY retransmit the
+    same `txn` (section 10.4a) or simply disconnect (an unended window closes at its idle limit).
+  - `MALFORMED` before a handshake: nothing was executed; after a disconnect the client starts
+    again with HELLO (the device's error counters start from zero on every connection). After a
+    handshake started there is no reply at all; the client reconnects and repeats the handshake.

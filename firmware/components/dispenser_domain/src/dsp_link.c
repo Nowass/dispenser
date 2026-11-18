@@ -176,3 +176,14 @@ dsp_link_result_t dsp_link_on_frame(dsp_link_t *l, const uint8_t *frame, size_t 
         return error_reply(l, r, txn, DSP_BLE_E_UNAUTHENTICATED, 0, out, cap);
     }
 }
+
+dsp_link_result_t dsp_link_on_fragment_error(dsp_link_t *l, uint8_t *out, size_t cap)
+{
+    dsp_link_result_t r;
+    memset(&r, 0, sizeof r);
+    if (l == NULL || l->state == DSP_LINK_IDLE || out == NULL) {
+        r.actions = DSP_LINK_ACT_CLOSE;
+        return r;
+    }
+    return error_reply(l, r, 0, DSP_BLE_E_MALFORMED, 0, out, cap);
+}

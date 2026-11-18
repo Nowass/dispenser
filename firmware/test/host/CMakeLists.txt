@@ -127,6 +127,32 @@ add_test(NAME test_sec_header_guard
 add_test(NAME test_endpoint_guard
          COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/test_endpoint_guard.cmake")
 target_link_libraries(test_platform PRIVATE Threads::Threads)
+# M1.10d.1: the pure BLE byte transport (compiled unchanged into the firmware component) over a
+# fault-injecting fake radio, including a two-thread test (simulated NimBLE host task).
+dsp_add_host_test(test_ble_transport test_ble_transport.c
+                  "${DSP_PLATFORM_DIR}/src/dsp_ble_transport.c")
+target_include_directories(test_ble_transport PRIVATE "${DSP_PLATFORM_DIR}/include")
+target_link_libraries(test_ble_transport PRIVATE Threads::Threads)
+set_tests_properties(test_ble_transport PROPERTIES TIMEOUT 120)
+add_library(dsp_ble_transport_obj OBJECT "${DSP_PLATFORM_DIR}/src/dsp_ble_transport.c")
+target_include_directories(dsp_ble_transport_obj PRIVATE "${DSP_PLATFORM_DIR}/include")
+target_link_libraries(dsp_ble_transport_obj PRIVATE dispenser_domain)
+add_test(NAME test_ble_transport_symbols
+         COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DOBJ=$<TARGET_OBJECTS:dsp_ble_transport_obj>
+                 -P "${CMAKE_CURRENT_LIST_DIR}/test_ble_transport_symbols.cmake")
+# M1.10d.1 end to end: the complete noise-c phone suite (test_blesec.c) through the transport, the
+# phone fragmenting into ATT writes and reassembling notifications, at three negotiated MTUs.
+dsp_add_host_test(test_ble_e2e test_blesec.c support/fake_kv.c support/test_rng.c
+                  "${DSP_PLATFORM_DIR}/src/dsp_ble_transport.c")
+target_compile_definitions(test_ble_e2e PRIVATE DSP_VIA_TRANSPORT=1)
+target_include_directories(test_ble_e2e PRIVATE "${DSP_PLATFORM_DIR}/include")
+target_link_libraries(test_ble_e2e PRIVATE dispenser_security noise_c sodium)
+target_compile_options(test_ble_e2e PRIVATE -Wno-unused-function)
+set_tests_properties(test_ble_e2e PROPERTIES TIMEOUT 300 ENVIRONMENT "DSP_E2E_MTU=23")
+foreach(mtu 64 247)
+    add_test(NAME test_ble_e2e_mtu${mtu} COMMAND test_ble_e2e)
+    set_tests_properties(test_ble_e2e_mtu${mtu} PROPERTIES TIMEOUT 300 ENVIRONMENT "DSP_E2E_MTU=${mtu}")
+endforeach()
 
 # The engine never consults the C library timezone: identical results under any host TZ.
 foreach(tz "America/New_York" "Asia/Kathmandu")

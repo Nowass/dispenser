@@ -582,6 +582,26 @@ static void on_frame(void *ctx, dsp_app_t *app, const uint8_t *frame, size_t len
     }
 }
 
+/* M1.10d (decision T3): a malformed fragment sequence. Only the pre-authentication gate (OPEN,
+ * NEGOTIATED) answers a plain MALFORMED (bounded: the third gate error closes). In a handshake,
+ * a recovery confirmation or an authenticated session the connection is closed without any
+ * reply: no plaintext error after the handshake started. */
+static void on_rx_fault(void *ctx, dsp_app_t *app)
+{
+    dsp_blesec_t *s = ctx;
+    if (s->state != DSP_BLESEC_OPEN && s->state != DSP_BLESEC_NEGOTIATED) {
+        drop(s, app);
+        return;
+    }
+    dsp_link_result_t lr = dsp_link_on_fragment_error(&s->link, s->out, sizeof s->out);
+    if (lr.actions & DSP_LINK_ACT_REPLY) {
+        (void)dsp_app_sec_send(app, s->out, lr.out_len);
+    }
+    if (lr.actions & DSP_LINK_ACT_CLOSE) {
+        drop(s, app);
+    }
+}
+
 static uint64_t on_tick(void *ctx, dsp_app_t *app, uint64_t now)
 {
     dsp_blesec_t *s = ctx;
@@ -672,4 +692,5 @@ void dsp_blesec_init(dsp_blesec_t *s, const dsp_blesec_config_t *cfg, dsp_app_se
     sec->on_frame = on_frame;
     sec->on_tick = on_tick;
     sec->on_suspend = on_suspend;
+    sec->on_rx_fault = on_rx_fault;
 }

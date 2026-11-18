@@ -262,20 +262,22 @@ static void b_wait(void *ctx, uint32_t ms)
     struct timespec ts = {0, 200000}; /* 0.2 ms: the producer runs concurrently */
     nanosleep(&ts, NULL);
 }
-static bool b_send_frame(void *ctx, const uint8_t *f, size_t n)
+static bool b_send_frame(void *ctx, uint32_t gen, const uint8_t *f, size_t n)
 {
     (void)ctx;
+    (void)gen;
     if (n >= 8) {
         unsigned txn = (unsigned)(f[4] | (f[5] << 8));
         if (txn <= POSTS + 1) {
-            responses_by_id[txn]++; /* application task only */
+            __atomic_fetch_add(&responses_by_id[txn], 1, __ATOMIC_RELEASE); /* app task only */
         }
     }
     return true;
 }
-static void b_disconnect(void *ctx)
+static void b_disconnect(void *ctx, uint32_t gen)
 {
     (void)ctx;
+    (void)gen;
 }
 static const dsp_ble_port_t BLE = {NULL,   b_start,  b_connected, b_suspend,    b_resume,
                                    b_stop, b_is_off, b_wait,      b_send_frame, b_disconnect, NULL};
@@ -309,6 +311,14 @@ static void *producer(void *arg)
             nanosleep(&ts, NULL);
         }
         posted_ok++;
+        /* M1.10d (T2): a new connection ends the previous one, so the phone connects again only
+         * after its HELLO was answered (a frame of a replaced generation is stale, never answered
+         * on the new connection). Bounded: the session maximum ends the test otherwise. */
+        for (int spin = 0; spin < 200000 && __atomic_load_n(&responses_by_id[i], __ATOMIC_ACQUIRE) == 0;
+             spin++) {
+            struct timespec ts = {0, 20000};
+            nanosleep(&ts, NULL);
+        }
     }
     const uint8_t end[8] = {1, 0, 0x7E, 0, (uint8_t)(POSTS + 1), (uint8_t)((POSTS + 1) >> 8), 0, 0};
     while (!dsp_app_post_frame(&app, POSTS, end, sizeof end)) {

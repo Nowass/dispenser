@@ -16,6 +16,13 @@ if(CONFIG_DSP_BLE_SECURITY AND CONFIG_DSP_APP_ALLOW_PRODUCTION)
             "acceptance passes; it cannot be combined with CONFIG_DSP_APP_ALLOW_PRODUCTION")
 endif()
 
+# M1.10d.1: the BLE transport and the bring-up window are build-only until M1.10c.2b and M1.10d.2.
+if((CONFIG_DSP_BLE_TRANSPORT OR CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW) AND CONFIG_DSP_APP_ALLOW_PRODUCTION)
+    message(FATAL_ERROR "CONFIG_DSP_BLE_TRANSPORT / CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW are build-only "
+            "until the M1.10c.2b and M1.10d.2 hardware acceptance pass; they cannot be combined with "
+            "CONFIG_DSP_APP_ALLOW_PRODUCTION")
+endif()
+
 idf_component_register(SRCS "main.c"
                        INCLUDE_DIRS "."
                        REQUIRES dispenser_domain dispenser_platform dispenser_security esp_app_format log

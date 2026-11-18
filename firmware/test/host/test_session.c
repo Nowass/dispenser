@@ -375,6 +375,51 @@ static void test_rng_failure_fails_closed(void)
     CFG.security = &HARNESS_SEC;
 }
 
+/* ==== M1.10d (T7): build-only power-on service window ============================================
+ * Without the option a power-on wake never opens BLE and the security precondition refuses; with
+ * it, the power-on wake is a presence wake, and authentication is still required for everything
+ * (the owner operation below goes through the harness's issued authorization; a raw one fails). */
+static dsp_app_op_result_t t7_raw;
+static void h_t7_raw(int i)
+{
+    (void)i;
+    uint64_t fl;
+    dsp_app_auth_t forged = OWNER;
+    forged.token = 0x1234;
+    t7_raw = dsp_app_manual_floor(&app, &forged, &fl);
+}
+static void test_power_on_window_option(void)
+{
+    provision(true);
+    clear_script();
+    advance(g_true + MINUTE);
+    int st = sc.starts;
+    DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
+    DSP_CHECK(!rep.ble_session);
+    DSP_CHECK_EQ_INT(st, sc.starts);
+    CFG.service_on_power_on = true;
+    clear_script();
+    advance(g_true + MINUTE);
+    step(g_true, hk(h_admit_all, 0, 0));
+    step(g_true, hk(h_t7_raw, 0, 0));
+    int fl = step(g_true + 1, op_floor());
+    step(g_true + 2, mk(OP_END));
+    DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
+    CFG.service_on_power_on = false;
+    DSP_CHECK(rep.ble_session);
+    DSP_CHECK_EQ_INT(DSP_OP_OK, admit_res[0].status);      /* the presence precondition holds */
+    DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, t7_raw.status);     /* never without authentication */
+    DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[fl].r.status);       /* issued authorization: allowed */
+    DSP_CHECK_EQ_INT(DSP_BLE_END_COMMAND, rep.ble_end);
+    /* a timer wake never opens the window, with or without the option */
+    CFG.service_on_power_on = true;
+    clear_script();
+    sleep_and_wake();
+    CFG.service_on_power_on = false;
+    DSP_CHECK(!rep.ble_session);
+    invariants();
+}
+
 /* ==== C10: only an authorized owner ends the service window ================================ */
 
 static bool win_open[8];
@@ -574,6 +619,148 @@ static void h_ready(int i)
     ready_r = dsp_app_set_readiness(&app, issue_for(&OWNER), DSP_READINESS_READY, &st);
 }
 
+/* ==== 4a. Connection-state reconciliation (M1.10d, decision T2) ==================================
+ * The transport reports connection events into a snapshot that is never refused for lack of
+ * space. These hooks run inside the application task, so every sequence below is posted with
+ * the application NOT running between the callbacks (the worst interleaving of a radio task). */
+
+static size_t opened_before, stale_before;
+static bool posted[8];
+static const uint8_t T2_HELLO[10] = {1, 0, 1, 0, 0x21, 0, 2, 0, 1, 1}; /* txn 0x21 */
+
+static void h_t2_before(int i)
+{
+    (void)i;
+    kept = *issue_for(&OWNER);
+    opened_before = app.rep.links_opened;
+    stale_before = app.rep.frames_stale;
+    sc.nresp = 0;
+}
+/* a: disconnect then connect at once; b: a further disconnect of the new generation;
+ * c: a frame of the old generation posted after its disconnect; d: a 1000-cycle storm */
+static void h_t2_storm(int i)
+{
+    int mode = sc.op[i].a;
+    uint32_t g = sc.gen;
+    memset(posted, 0, sizeof posted);
+    posted[0] = dsp_app_post_frame(&app, g, T2_HELLO, sizeof T2_HELLO); /* queued on g */
+    posted[1] = dsp_app_post_conn_event(&app, false, g, 0);
+    if (mode == 'd') {
+        for (int k = 0; k < 1000; k++) {
+            (void)dsp_app_post_conn_event(&app, true, ++sc.gen, 247);
+            (void)dsp_app_post_conn_event(&app, false, sc.gen, 0);
+        }
+    }
+    posted[2] = dsp_app_post_conn_event(&app, true, ++sc.gen, 247);
+    posted[3] = dsp_app_post_frame(&app, g, T2_HELLO, sizeof T2_HELLO); /* stale producer */
+    if (mode == 'b') {
+        posted[4] = dsp_app_post_conn_event(&app, false, sc.gen, 0);
+    }
+    posted[5] = !dsp_app_post_conn_event(&app, true, g, 247);      /* older: refused */
+    posted[6] = !dsp_app_post_conn_event(&app, true, sc.gen, 247); /* same: refused */
+}
+static void h_t2_saturate(int i)
+{
+    (void)i;
+    memset(posted, 0, sizeof posted);
+    int n = 0;
+    for (int k = 0; k < DSP_APP_CMDQ_CAPACITY; k++) {
+        n += dsp_app_post_frame(&app, sc.gen, T2_HELLO, sizeof T2_HELLO);
+    }
+    posted[0] = n == DSP_APP_CMDQ_CAPACITY;
+    posted[1] = !dsp_app_post_frame(&app, sc.gen, T2_HELLO, sizeof T2_HELLO); /* queue full */
+    posted[2] = dsp_app_post_conn_event(&app, false, sc.gen, 0); /* never hidden by the queue */
+}
+static void h_t2_fault(int i)
+{
+    for (int k = 0; k < sc.op[i].a; k++) {
+        (void)dsp_app_post_rx_fault(&app, sc.gen);
+    }
+    (void)dsp_app_post_rx_fault(&app, sc.gen - 1); /* another generation: ignored */
+}
+static void h_t2_reconnect(int i)
+{
+    (void)i;
+    (void)dsp_app_post_conn_event(&app, true, ++sc.gen, 247);
+}
+
+static void h_t2_noop(int i)
+{
+    (void)i;
+}
+
+static int t2_hello_responses(void)
+{
+    int n = 0;
+    for (int k = 0; k < sc.nresp; k++) {
+        n += sc.resp_len[k] >= 8 && sc.resp[k][2] == 1 && sc.resp[k][4] == 0x21;
+    }
+    return n;
+}
+
+static void test_link_reconcile(void)
+{
+    const int modes[] = {'a', 'b', 'c', 'd'};
+    for (size_t m = 0; m < sizeof modes / sizeof modes[0]; m++) {
+        provision(true);
+        clear_script();
+        advance(g_true + MINUTE);
+        sc.stale_sends = 0;
+        step(g_true, hk(h_t2_before, 0, 0));
+        step(g_true + 1, hk(h_t2_storm, modes[m], 0));
+        int gone = step(g_true + 2, hk(h_use_kept, 0, 0));
+        DSP_CHECK(session());
+        DSP_CHECK(posted[0] && posted[1] && posted[2] && posted[5] && posted[6]);
+        DSP_CHECK(posted[3]); /* the queue accepts it; the application drops it as stale */
+        /* the old session never survives: its authorization, session ID and frames are gone */
+        DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[gone].r.status);
+        DSP_CHECK(app.rep.frames_stale >= stale_before + 2);
+        DSP_CHECK_EQ_INT(0, t2_hello_responses()); /* nothing answered for generation g ... */
+        DSP_CHECK_EQ_INT(0, sc.stale_sends);       /* ... and nothing sent to another one */
+        if (modes[m] == 'b') {
+            DSP_CHECK_EQ_INT((int)opened_before, (int)app.rep.links_opened); /* none opened */
+        } else {
+            DSP_CHECK_EQ_INT((int)opened_before + 1, (int)app.rep.links_opened); /* only the last */
+        }
+    }
+    /* Queue saturation cannot hide a disconnect: four queued frames, a refused fifth, then the
+     * disconnect; every queued frame is stale and the authorization ended. */
+    provision(true);
+    clear_script();
+    advance(g_true + MINUTE);
+    sc.stale_sends = 0;
+    step(g_true, hk(h_t2_before, 0, 0));
+    step(g_true + 1, hk(h_t2_saturate, 0, 0));
+    int gone = step(g_true + 2, hk(h_use_kept, 0, 0));
+    step(g_true + 3, hk(h_t2_reconnect, 0, 0));
+    DSP_CHECK(session());
+    DSP_CHECK(posted[0] && posted[1] && posted[2]);
+    DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, sc.res[gone].r.status);
+    DSP_CHECK(app.rep.frames_stale >= stale_before + DSP_APP_CMDQ_CAPACITY);
+    DSP_CHECK_EQ_INT(0, t2_hello_responses());
+    DSP_CHECK_EQ_INT(0, sc.stale_sends);
+    /* Fragment errors before authentication (no security session: the M1.10c.1 gate): a plain
+     * MALFORMED (type 0, txn 0) each, the third closes the connection; another generation's
+     * report is ignored. */
+    provision(true);
+    clear_script();
+    advance(g_true + MINUTE);
+    step(g_true, hk(h_t2_before, 0, 0));
+    step(g_true + 1, hk(h_t2_fault, 2, 0));
+    step(g_true + 2, hk(h_t2_fault, 1, 0));
+    step(g_true + 3, hk(h_t2_noop, 0, 0)); /* the application handles the reports first */
+    DSP_CHECK(session());
+    int malformed = 0;
+    for (int k = 0; k < sc.nresp; k++) {
+        malformed += sc.resp_len[k] == 17 && sc.resp[k][2] == 0 && (sc.resp[k][3] & 0x02) != 0 &&
+                     sc.resp[k][4] == 0 && sc.resp[k][8] == DSP_BLE_E_MALFORMED;
+    }
+    DSP_CHECK_EQ_INT(3, malformed);
+    DSP_CHECK_EQ_INT(3, (int)app.rep.rx_faults);
+    DSP_CHECK(app.rep.link_closes >= 1);
+    invariants();
+}
+
 static void test_status_and_service_operations(void)
 {
     provision(true);
@@ -647,6 +834,8 @@ int main(void)
     DSP_RUN(test_unauthenticated_end_keeps_window);
     DSP_RUN(test_handshake_failures_no_lockout);
     DSP_RUN(test_connection_scope);
+    DSP_RUN(test_link_reconcile);
+    DSP_RUN(test_power_on_window_option);
     DSP_RUN(test_status_and_service_operations);
     return dsp_test_finish();
 }

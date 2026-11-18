@@ -373,7 +373,7 @@ static struct {
     int len, next;
     bool arm[MAX_STEPS]; /* power cuts allowed during this step */
     bool start_fails;
-    int starts, suspends, resumes, responses, disconnects;
+    int starts, suspends, resumes, responses, disconnects, stale_sends;
     uint8_t resp[16][64]; /* frames sent by the device (first 64 bytes) */
     size_t resp_len[16];
     int nresp;
@@ -739,9 +739,13 @@ static void ble_wait(void *ctx, uint32_t max_ms)
     advance(until);
     run_due_steps();
 }
-static bool ble_send_frame(void *ctx, const uint8_t *f, size_t n)
+static bool ble_send_frame(void *ctx, uint32_t gen, const uint8_t *f, size_t n)
 {
     (void)ctx;
+    if (gen != sc.gen) {
+        sc.stale_sends++; /* the transport refuses a frame of another generation */
+        return false;
+    }
     sc.responses++;
     if (sc.nresp < 16) {
         size_t c = n < sizeof sc.resp[0] ? n : sizeof sc.resp[0];
@@ -750,9 +754,10 @@ static bool ble_send_frame(void *ctx, const uint8_t *f, size_t n)
     }
     return true;
 }
-static void ble_disconnect(void *ctx)
+static void ble_disconnect(void *ctx, uint32_t gen)
 {
     (void)ctx;
+    (void)gen;
     sc.disconnects++;
     /* the simulated phone reconnects at once (e.g. after the 30 s unauthenticated limit) */
     (void)dsp_app_post_conn_event(&app, true, ++sc.gen, 247);

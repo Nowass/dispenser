@@ -628,6 +628,13 @@ items are in `firmware/HARDWARE_ACCEPTANCE.md` 8a. Status per criterion: section
 
 ### 13.1 What changed
 
+> **Superseded in part by M1.10d.1** (`docs/BLE_TRANSPORT_DESIGN.md` T2/T3): connection events
+> are no longer queue items but an authoritative connection snapshot beside the frame queue
+> (`dsp_app_post_conn_event` never refused for space, strictly increasing generations;
+> `dsp_app_post_rx_fault` added); the BLE port's `send_frame` and `disconnect` take the connection
+> generation; the security layer gained `on_rx_fault` (plain MALFORMED only before a handshake
+> started). The table below records the M1.10c.1 state.
+
 | Area | Change |
 |---|---|
 | Queue | Opaque items `dsp_app_qitem_t {kind, gen, mtu, len, button, bytes[520]}`, capacity 4: FRAME, CONNECTED, DISCONNECTED, BUTTON. Producers `dsp_app_post_frame`, `dsp_app_post_conn_event`, `dsp_app_post_button` fill the tail slot under the lock (no frame copy on the producer's stack). The command/response structs and `dsp_app_post` are removed. The queue kinds STATUS, REFILL, SET_READINESS and END_SESSION are retired (MANUAL_DOSE already was) |
@@ -674,7 +681,9 @@ NimBLE/GATT (M1.10d), Android behavior (M1.10e). Hardware acceptance 9.4 stays o
   unauthenticated (or until its third error). It cannot end the window (C10), but it can delay
   the owner within it. Mitigation for the NimBLE adapter (M1.10d): allow a second concurrent
   connection reserved for a new client, or a short per-address reconnect back-off while the
-  window is open. Both are bounded by the window lifetime and RAM-only.
+  window is open. Both are bounded by the window lifetime and RAM-only. **M1.10d decision T1
+  (approved):** single connection with immediate re-advertising and per-window contention
+  counters; measured on hardware (`HARDWARE_ACCEPTANCE.md` 8b H9).
 - The 30 s unauthenticated limit also bounds the M1.10c.2 handshake (HELLO + 3 HS messages).
   It is measured on the board.
 - Nothing in the runtime configurations registers a BLE port or security layer yet (M1.10d), so

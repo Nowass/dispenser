@@ -78,6 +78,12 @@ bool dsp_link_expired(const dsp_link_t *l, uint64_t now_ms);
 dsp_link_result_t dsp_link_on_frame(dsp_link_t *l, const uint8_t *frame, size_t len,
                                     const dsp_link_hello_t *hello, uint8_t *out, size_t cap);
 
+/* M1.10d (decision T3): the transport discarded a malformed fragment sequence (protocol section
+ * 3). Before authentication only: a plain MALFORMED error (type 0, txn 0: the frame header was
+ * never complete), counted like every gate error (the third closes the connection). On a closed
+ * gate: CLOSE without a reply. */
+dsp_link_result_t dsp_link_on_fragment_error(dsp_link_t *l, uint8_t *out, size_t cap);
+
 /* A plain error frame (header + code u8, detail u32, aux u32) for any type byte. */
 size_t dsp_link_error_frame(uint8_t type, uint16_t txn, uint8_t code, uint32_t detail,
                             uint32_t aux, uint8_t *out, size_t cap);

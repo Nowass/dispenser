@@ -129,6 +129,30 @@ with the production endpoint.
 | R7 | Target resources | 8.1–8.3 with the real stack: peak heap per handshake, task stack high-water mark during a handshake and during dispatch, handshake and per-frame timing; the static estimates in the design's resource table replaced | |
 | R8 | Lifecycle on the device | pump suspension closes the security session (EV_SUSPENDING_FOR_DOSE best effort), reconnect needs a new IK handshake; EV_SESSION_CLOSING before the 15-minute maximum; a plain END_SESSION closes only its connection | |
 
+### 8b. M1.10d.2 — hardware acceptance of the NimBLE transport (OPEN)
+
+M1.10d.1 (transport, NimBLE adapter, build option) is verified on the host (unit, fault, fuzz,
+two-thread/ThreadSanitizer and end-to-end tests with the noise-c phone through the transport at
+MTU 23/64/247) and by ESP32-C3 cross-builds only. None of that is evidence for radio behavior,
+Android interoperability, timing or target resources. Design reference:
+`docs/BLE_TRANSPORT_DESIGN.md` section 15.2. Build: `sdkconfig.ble.defaults` (build-only, refused
+with the production endpoint). **Do not deploy security-enabled firmware before 8a R1–R4 pass.**
+Without the button driver (M10) the bring-up option `CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW` makes a
+power cycle open the service window (never in a production build).
+
+| # | Check | Pass criterion | Result |
+|---|---|---|---|
+| H1 | Advertising | visible only during a service window; advertising data = Flags + service UUID; scan response = `DSP2` + Service Data (7.1 payload, updated after ownership changes); 100 ms for 30 s after window start/disconnect, then 500 ms; discovery latency recorded | |
+| H2 | GATT and MTU | service and three characteristics as `BLE_PROTOCOL.md` section 2; CCCD; MTU 247 with Android and a 23-byte client both work; a long/prepared write refused | |
+| H3 | Handshakes over BLE | CLAIM, SESSION, ADD, RECOVERY with a phone (together with 8a R4) | |
+| H4 | Lifecycle | disconnect/reconnect (new generation, new IK handshake), out of range and supervision timeout, pump suspension (link closed, EV_SUSPENDING_FOR_DOSE best effort, controller stays enabled, no RF activity) and resume; a reply sent before a close (END_SESSION, encrypted MALFORMED) is best effort (T13): record how often it arrives with the 100 ms grace (not a delivery pass condition); the link is terminated ≤ 1.1 s after the close request; suspension completes ≤ 1.5 s and the pump never starts before it returns | |
+| H5 | Notifications | throughput with Android; buffer-pool refusals (`tx_busy`) recorded; no frame abandoned (`tx_failures` 0) with a well-behaved client | |
+| H6 | RNG with the radio | 8a R1–R5 with this transport (controller enabled at window start) | |
+| H7 | Target resources | free heap after NimBLE init and its minimum during a session (gate ≥ 64 KB), NimBLE host task and application task stack high-water marks, image sizes on the device | |
+| H8 | Power and teardown | current while advertising / connected / suspended; controller disabled (`is_off`) before Wi-Fi and before deep sleep | |
+| H9 | Contention | a second phone repeatedly connecting during the owner's window: per-window counters (`dsp_esp_ble_stats`: connections, refused, fragment errors) recorded; owner still served | |
+| H10 | Stack thread-safety | GAP/GATT calls from the application task (advertising, notify, terminate) under load without assertion or deadlock | |
+
 ## 9. Configuration limits and storage (M1.10b.1)
 
 The firmware accepts every representable value of the calibration and safety fields (only

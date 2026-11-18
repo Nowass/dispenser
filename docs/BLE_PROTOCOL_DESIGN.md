@@ -513,7 +513,7 @@ otherwise. Never reachable by a gesture alone.
 | Total static protocol RAM | ≈ 4.2 KiB (plus NimBLE host memory, measured in M1.10d) |
 | Concurrency | one connection; one outstanding request; the client must wait for a response, `BUSY` or its timeout before the next request |
 | Fragment timeout | 2 s between fragments of one frame, else the partial frame is discarded |
-| Malformed fragments | index gap, FIRST missing, overflow, LAST without data → discard, send plain `MALFORMED` (no secrets), count; 3 per session → disconnect |
+| Malformed fragments | index gap, FIRST missing, overflow, LAST without data → discard, send plain `MALFORMED` (no secrets), count; 3 per session → disconnect. **Amended by M1.10d T3:** plain `MALFORMED` only before a handshake started; afterwards the connection is closed without a reply (`BLE_PROTOCOL.md` section 3) |
 | Flow control client → device | ATT write with response: the client sends the next fragment only after the write response |
 | Flow control device → client | notifications sent one fragment at a time; on NimBLE mbuf exhaustion retry after 20 ms, at most 10 times, then end the session |
 | Queue full | `EV_BUSY`; the request was not taken; the client retries the same `txn` |

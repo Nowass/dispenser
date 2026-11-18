@@ -54,6 +54,9 @@
 #include "dsp_blesec.h"
 #include "dsp_esp_rng.h"
 #endif
+#if CONFIG_DSP_BLE_TRANSPORT
+#include "dsp_esp_ble.h"
+#endif
 #endif
 
 static const char *TAG = "dispenser";
@@ -220,6 +223,32 @@ static dsp_https_transport_t s_https;
 static dsp_blesec_t s_blesec;          /* build-only until M1.10c.2b */
 static dsp_app_security_t s_security;
 #endif
+#if CONFIG_DSP_BLE_TRANSPORT
+static dsp_ble_port_t s_ble;           /* build-only until M1.10c.2b and M1.10d.2 */
+static dsp_app_identity_t s_identity;  /* Info record and advertising payload */
+
+/* "major.minor.patch[-...]" -> numbers (0 for a missing part). */
+static void parse_version(const char *v, dsp_app_identity_t *id)
+{
+    unsigned part[3] = {0, 0, 0};
+    for (int i = 0; i < 3 && *v != '\0'; i++) {
+        while (*v >= '0' && *v <= '9') {
+            part[i] = part[i] * 10u + (unsigned)(*v - '0');
+            if (part[i] > 0xFFFFu) {
+                part[i] = 0xFFFFu;
+            }
+            v++;
+        }
+        if (*v != '.') {
+            break;
+        }
+        v++;
+    }
+    id->fw_major = (uint8_t)(part[0] > 0xFFu ? 0xFFu : part[0]);
+    id->fw_minor = (uint8_t)(part[1] > 0xFFu ? 0xFFu : part[1]);
+    id->fw_patch = (uint16_t)part[2];
+}
+#endif
 static StaticTask_t s_task;
 static StackType_t s_stack[CONFIG_DSP_APP_TASK_STACK / sizeof(StackType_t)];
 
@@ -268,7 +297,7 @@ static void app_runtime(void)
     s_cfg.time = &s_time;
     s_cfg.mono = &s_mono;
     s_cfg.sync = &s_sync;
-    s_cfg.ble = NULL; /* no BLE stack yet: no service mode */
+    s_cfg.ble = NULL; /* service mode only with CONFIG_DSP_BLE_TRANSPORT (below) */
     s_cfg.random = esp_random();
     s_cfg.max_sleep_s = CONFIG_DSP_APP_MAX_SLEEP_S;
 #if CONFIG_DSP_BLE_SECURITY
@@ -288,6 +317,22 @@ static void app_runtime(void)
         }
         dsp_blesec_init(&s_blesec, &bc, &s_security);
         s_cfg.security = &s_security;
+#if CONFIG_DSP_BLE_TRANSPORT
+        /* M1.10d.1: the NimBLE transport exists only together with the security layer (never a
+         * BLE service without it). The window still opens only on a presence wake. */
+        memcpy(s_identity.device_id, bc.device_id, sizeof s_identity.device_id);
+        parse_version(esp_app_get_description()->version, &s_identity);
+        s_cfg.identity = &s_identity;
+        if (dsp_esp_ble_port(&s_app, &s_ble)) {
+            s_cfg.ble = &s_ble;
+        } else {
+            ESP_LOGW(TAG, "app: BLE transport unavailable");
+        }
+#if CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW
+        s_cfg.service_on_power_on = true; /* T7: build-only bring-up, refused with production */
+        ESP_LOGW(TAG, "app: BRING-UP build: a power-on wake opens a BLE service window");
+#endif
+#endif
     } else {
         ESP_LOGW(TAG, "app: security layer not registered (RNG registration or device ID failed)");
     }

@@ -1,0 +1,30 @@
+# M1.10d.1 BUILD-ONLY variant: application runtime + BLE security layer + NimBLE transport.
+# Use on top of sdkconfig.defaults (cross-builds and size measurement only; NOT for deployment
+# before the M1.10c.2b ESP32-C3 RNG hardware gate and M1.10d.2 pass; refused with production):
+#   idf.py -B build-ble -D SDKCONFIG=build-ble/sdkconfig \
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble.defaults" build
+CONFIG_DSP_APP_RUNTIME=y
+CONFIG_DSP_BLE_SECURITY=y
+CONFIG_DSP_BLE_TRANSPORT=y
+
+# NimBLE (decision T8, docs/BLE_TRANSPORT_DESIGN.md section 12): peripheral + broadcaster only,
+# no GATT client, no SM/pairing/bonding (security is the application layer), one connection,
+# preferred ATT MTU 247 (the negotiated MTU is used), no persistence, logs off, name "DSP2",
+# legacy advertising only.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+# GATT client and bond persistence are already off (they depend on the central role and on
+# the disabled security manager); set explicitly for review.
+CONFIG_BT_NIMBLE_GATT_CLIENT=n
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=n
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+CONFIG_BT_NIMBLE_NVS_PERSIST=n
+CONFIG_BT_NIMBLE_LOG_LEVEL_NONE=y
+CONFIG_BT_NIMBLE_SVC_GAP_DEVICE_NAME="DSP2"
+CONFIG_BT_NIMBLE_EXT_ADV=n
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y

@@ -94,6 +94,30 @@ config DSP_BLE_SECURITY
         The target RNG path has NOT been validated on hardware (M1.10c.2b, design
         6.1): the build refuses this option together with the production endpoint.
 
+config DSP_BLE_TRANSPORT
+    bool "NimBLE BLE transport (BUILD-ONLY until M1.10c.2b and M1.10d.2 hardware acceptance)"
+    default n
+    depends on DSP_BLE_SECURITY && BT_NIMBLE_ENABLED
+    help
+        Connects the Application Service's BLE port to NimBLE (dispenser_platform
+        dsp_ble_transport + dsp_esp_ble): advertising, GATT service, fragmentation,
+        notifications. The service window still opens only on a presence wake.
+        The NimBLE settings come from sdkconfig.ble.defaults. Not validated on
+        hardware: the build refuses this option together with the production
+        endpoint, and security-enabled firmware must not be deployed before the
+        ESP32-C3 RNG hardware gate (M1.10c.2b) passes.
+
+config DSP_BLE_BRINGUP_POWER_ON_WINDOW
+    bool "Bring-up only: a power-on wake opens a service window (never production)"
+    default n
+    depends on DSP_BLE_TRANSPORT
+    help
+        Hardware acceptance (M1.10d.2) without the button driver (M10): a power
+        cycle counts as physical presence like a button wake. Authentication,
+        the entropy-source prerequisite and every authorization rule are
+        unchanged; deterministic randomness is never used. Refused together with
+        the production endpoint.
+
 config DSP_APP_SIM_HW_MAX_RUNTIME_MS
     int "Simulated pump hardware runtime maximum (ms, 0 = never actuate)"
     range 0 60000

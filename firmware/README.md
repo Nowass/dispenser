@@ -81,7 +81,16 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   (mbedTLS/TF-PSA-Crypto on the device), the authorization-bound dispatcher, the eight-response
   cache and the ESP32-C3 RNG adapter (fail closed without an active RF entropy source). Build-only
   (`CONFIG_DSP_BLE_SECURITY`, default off) until the hardware acceptance (M1.10c.2b,
-  `HARDWARE_ACCEPTANCE.md` 8a); nothing is reachable before the NimBLE transport (M1.10d).
+  `HARDWARE_ACCEPTANCE.md` 8a); reachable only through the NimBLE transport (M1.10d.1).
+- (M1.10d.1, under review) **NimBLE BLE transport** (`dsp_ble_transport`, pure and host-tested;
+  `dsp_esp_ble`, the NimBLE adapter): GATT service, advertising during service windows only,
+  fragmentation at the negotiated MTU, asynchronous notification backpressure, one connection with
+  strictly increasing generations, an authoritative connection snapshot in the Application Service
+  (connection events never lost, no stale session or response survives a reconnect) and fragment
+  errors decided by the security layer (no plaintext error after a handshake started). Build-only
+  (`CONFIG_DSP_BLE_TRANSPORT` via `sdkconfig.ble.defaults`, refused with production) until
+  M1.10c.2b and M1.10d.2 (`HARDWARE_ACCEPTANCE.md` 8b). See
+  [NimBLE BLE transport](#nimble-ble-transport-m110d1).
 - (M1.10c.1) **BLE authorization boundary**: the BLE queue carries opaque frames
   (capacity 4, connection generation) plus connect/disconnect/button events; the BLE port is
   byte-only (`send_frame`, `disconnect`, `publish_info`); a pre-authentication gate (`dsp_link`)
@@ -210,6 +219,7 @@ firmware/
 ├── CMakeLists.txt              ESP-IDF project (name "dispenser")
 ├── version.txt                 firmware version, single source for both builds
 ├── sdkconfig.defaults          committed Kconfig defaults (target, flash size, partition table, TLS bundle)
+├── sdkconfig.ble.defaults      BUILD-ONLY fragment: runtime + security + NimBLE transport (M1.10d.1)
 ├── partitions.csv              4 MB partition table (M1.7)
 ├── tools/provision_dev_secrets.py  developer-only nvs_sec image builder (+ its test, M1.7)
 ├── HARDWARE_ACCEPTANCE.md      on-device acceptance checklist (M1.8; not run yet)
@@ -259,6 +269,8 @@ firmware/
 │       ├── include/dsp_esp_notify.h  HTTP port, device ID, monotonic clock, nvs_sec credentials (M1.7)
 │       ├── include/dsp_esp_app.h     power port, queue lock, simulated pump, time port (M1.9c)
 │       ├── include/dsp_platform_logic.h  pure adapter rules, also host-tested (M1.9c)
+│       ├── include/dsp_ble_transport.h   pure BLE byte transport, also host-tested (M1.10d.1)
+│       ├── include/dsp_esp_ble.h     NimBLE adapter: GATT, advertising, radio ops (M1.10d.1)
 │       └── src/                      dsp_nvs_kv.c, dsp_esp_clock.c, dsp_esp_wifi.c, dsp_esp_sntp.c,
 │                                     dsp_esp_http.c, dsp_esp_device.c, dsp_esp_power.c,
 │                                     dsp_esp_sync.c, dsp_esp_pump_sim.c, dsp_platform_logic.c
@@ -289,7 +301,10 @@ firmware/
 │   ├── test_link.c                pre-authentication gate, every privileged type, fuzzing (M1.10c.1)
 │   ├── test_session.c             authorization boundary through wakes, HELLO/Info state (M1.10c.1)
 │   ├── test_secderive.c           PSK / prologue / device hash against ble_session_v1 (M1.10c.2a)
-│   └── test_blesec.c              Noise sessions end to end: noise-c phone vs dsp_blesec (M1.10c.2a)
+│   ├── test_blesec.c              Noise sessions end to end: noise-c phone vs dsp_blesec (M1.10c.2a);
+│   │                              also built as test_ble_e2e: the same suite through the transport
+│   ├── test_ble_transport.c       BLE transport over a fault-injecting radio, two threads (M1.10d.1)
+│   └── test_ble_transport_symbols.cmake  link-time boundary check of the transport (M1.10d.1)
 ├── test/psk_linux/             device HKDF provider (PSA) on the ESP-IDF linux target (M1.10c.2a)
 ├── test/integration/           local end-to-end harness (M1.8, see its README)
 │   ├── notify_harness.c           real domain code driven over stdin
@@ -1858,6 +1873,47 @@ security layer: M1.10c/d). Design: `docs/BLE_PROTOCOL_DESIGN.md` 7.4 (D8); wire 
   configuration, schedule and ownership writes have session-local limits (v1: a reconnect or
   reset clears them; documented residual). See the M1.10b.3 section.
 
+## NimBLE BLE transport (M1.10d.1)
+
+Design: [`docs/BLE_TRANSPORT_DESIGN.md`](../docs/BLE_TRANSPORT_DESIGN.md) (revision 2, decisions
+T1–T14); wire rules: `docs/BLE_PROTOCOL.md` sections 2–3. **Build-only and not run on hardware:**
+M1.10d.2 (`HARDWARE_ACCEPTANCE.md` 8b) and M1.10c.2b (8a) are open; do not deploy
+security-enabled firmware before the ESP32-C3 RNG gate passes.
+
+- `dsp_ble_transport` (pure C, `dispenser_platform`, compiled unchanged into the host tests)
+  implements the BLE port over a small radio interface: one connection with strictly increasing
+  generations, reassembly with the shared codec, a 3-frame TX ring sent asynchronously (20 ms
+  retry callout, ≤ 25 refusals, 1000 ms per frame, then close), advertising (re)started only from
+  the application task, generation-bound `send_frame`/`disconnect`, a final reply sent before a
+  requested close. It never sends a protocol message of its own.
+- `dsp_esp_ble` (ESP-IDF): NimBLE port, the GATT service, advertising (100 ms for 30 s, then
+  500 ms; public address), the retry callout on the host task's event queue, FreeRTOS lock and
+  wake semaphore. The controller stays enabled while a window is suspended for a pump run and is
+  disabled at the end of the window.
+- Application Service: connection events go to an authoritative **connection snapshot** beside
+  the frame queue (never refused for space); the application reconciles with it before every item,
+  so no session, authorization or response survives a reconnect. Fragment errors are reported to
+  it and decided by the security layer (plain MALFORMED only before a handshake started).
+- `main.c` wires the transport only together with the security layer; the Info record carries the
+  device tag and firmware version.
+
+```sh
+# BUILD-ONLY variant (refused together with CONFIG_DSP_APP_ALLOW_PRODUCTION)
+idf.py -B build-ble -D SDKCONFIG=build-ble/sdkconfig \
+       -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble.defaults" build
+# hardware bring-up without the button driver: add CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW=y
+```
+
+| Configuration | Image | Slot | Static DRAM |
+|---|---|---|---|
+| runtime + security + BLE | 680,816 B | 37.1 % | 136,021 B |
+| runtime + connectivity + security + BLE | 1,400,784 B | 76.3 % (gate 85 %) | 180,393 B |
+
+NimBLE (controller, host, PHY/NVS) plus transport and adapter add 243,392 B image and 39,936 B
+static DRAM to the security image (transport + adapter ≈ 6.1 KB code, 3.2 KB static); with Wi-Fi
+already linked the increase is 197,536 B. Heap after NimBLE init, stack high-water marks,
+throughput and current are hardware items (H5, H7, H8).
+
 ## HTTPS notification transport and connectivity session (M1.7)
 
 Pure domain code (`dsp_notify_proto`, `dsp_https_transport`, `dsp_connectivity`, extensions
@@ -2117,6 +2173,9 @@ Current host tests (CTest names):
 | `test_endpoint_guard` | M1.9c build-time endpoint guard (`cmake -P`): runtime disabled, runtime without connectivity, connectivity without an endpoint (fails), explicit staging endpoint, production without approval (fails), production with approval; production-host spellings, non-https and host-less URLs, a look-alike host, and the guard's production host equal to the `DSP_NOTIFY_URL` default |
 | `test_bleproto` | M1.10a BLE protocol v1 codec: every record of `test-vectors/ble_protocol_v1.txt` (59 messages decoded field by field and re-encoded byte for byte, 63 rejections with their reason, encrypted headers, forward compatibility, negotiation, fragmentation for MTU 23–517, reassembly errors and timeout, Info and advertising records), canonical re-encoding of every accepted bit-flipped frame (12,968 mutations), rejection of every body truncation, 200,000 random frames and 200,000 random fragments, encoder refusals |
 | `test_platform` | M1.9c pure adapter rules (`dsp_platform_logic.c`, compiled unchanged into the firmware): reset/wake mapping for every reset kind and wake-source combination, retained block and clock continuity agreeing on every reset, sleep clamping, button pin check (strapping and non-wake pins rejected), RTC header (power-on garbage, torn header, oversize, corrupt data rejected by the domain CRC), backoff and hourly limit preserved through the RTC buffer, no clock trust from retained data; and a **two-thread** queue test (a producer thread posting 400 commands, queue full and session-closed refusals, while the application task runs a service session under a mutex): every accepted command answered exactly once. Also run separately under ThreadSanitizer (0 races; a lock-free mutant reports races) |
+| `test_ble_transport` | M1.10d.1 BLE byte transport (`dsp_ble_transport.c`, compiled unchanged into the firmware) over a fault-injecting radio with an error-checking lock (nesting aborts): fragmentation and reassembly at every ATT MTU 23–247 (+517 clamped) and boundary lengths, MTU change between frames, every fragment fault and the 2 s gap (±1 ms), the transport's own fault limit, 200,000 fuzzed fragments, queue refusal without any reply, asynchronous TX retries (never blocking), retry limit, absolute deadline, stack errors, ring capacity, unsubscribed clients, disconnect during RX/TX/inside a notification (also with a reconnect on the same handle), stale completions/callouts/generations, advertising only from the application task, fast/slow advertising, Info and payload restarts, refused second and suspended links, suspend with and without a GAP disconnect (synthesized report), close after the final reply, stop/is_off; and a **two-thread** test (simulated NimBLE host task vs the application task, one reused connection handle): no fragment ever on another link. Also run under ThreadSanitizer (0 reports) |
+| `test_ble_transport_symbols` | link-time boundary: the transport object references only the three `dsp_app_post_*` producers, the fragmentation codec and `mem*` |
+| `test_ble_e2e`, `test_ble_e2e_mtu64`, `test_ble_e2e_mtu247` | the complete `test_blesec` suite (CLAIM, SESSION, ADD, RECOVERY, cache, manipulations, lifecycle, fault policy) with the noise-c phone talking **through the transport**: fragmented ATT writes in, reassembled notifications out, at MTU 23, 64 and 247 |
 | `test_https` | HTTPS transport and connectivity session (M1.7) over fakes: exact body and token handed to the port, token wiped after every request, token validation (length, spaces, control characters); **systemic 401/404/405/413/415, ambiguous 400, mismatched 409, redirects, 429 and 5xx never drain the queue** (20 sessions each, then recovery); event-specific 409/400 removed and logged; mismatched acknowledgement UNCERTAIN, then duplicate ACK with an identical payload; timeout after the backend accepted plus power loss; connect/TLS failures; the 60 s budget with a monotonic clock; session gating: dosing/permit/BLE guard, next-dose distance, regular sync vs CRITICAL on an existing wake, the 1-hour limit, the Wi-Fi backoff, untrusted time (nothing sent) vs trusted HOLDOVER, missing token, Wi-Fi always shut down |
 
 Python tool test (no ESP-IDF needed; the real-generator case runs inside an ESP-IDF shell):
@@ -2187,11 +2246,12 @@ alternative to the native setup, not a requirement.
 | Configuration, schedules, phone time operations (M1.10b.1) | implemented, tested through complete wakes with power cuts (`test_app_ops`) and unit tests | compiled, not linked (no caller until the dispatcher) | not run |
 | BLE protocol v1 codec (`dsp_bleproto`, M1.10a) | implemented, shared vectors + property/fuzz tests; Kotlin codec runs the same vectors | compiled, not linked (not called) | not run |
 | Platform adapters: power/sleep, RTC block, queue lock, simulated pump, runtime (M1.9c) | pure rules host-tested (`test_platform`, incl. a two-thread queue test; TSan-clean separately) | compiled in four configurations; runtime opt-in | **not run**; no real pump driver, no button pin |
+| NimBLE BLE transport and adapter (M1.10d.1) | transport host-tested (`test_ble_transport`, two threads + TSan, symbol boundary), end to end with the noise-c phone at three MTUs (`test_ble_e2e*`) | compiled (`sdkconfig.ble.defaults`, build-only) | **not run** (M1.10d.2 open) |
 | Battery monitor | not started | — | — |
 | Dosing service, journal, service mode | not started | — | — |
 | Motor/pump GPIO, button, indicator LED | not started (no pin map) | — | — |
 | Deep sleep and wake-up | domain plan and checklist (M1.9b) | adapter compiled (M1.9c) | **not run** |
-| BLE, production credential provisioning, OTA client, deep sleep | not started | — | — |
+| Production credential provisioning, OTA client, deep sleep | not started | — | — |
 
 ## Hardware verification still pending
 

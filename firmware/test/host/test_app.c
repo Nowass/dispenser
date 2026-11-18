@@ -825,17 +825,21 @@ static void ble_respond(void *ctx, const tresp_t *r)
     }
 }
 static int frames_sent, disconnects;
-static bool ble_send_frame(void *ctx, const uint8_t *f, size_t n)
+static bool ble_send_frame(void *ctx, uint32_t gen, const uint8_t *f, size_t n)
 {
     (void)ctx;
+    if (gen != conn_gen) {
+        return false; /* the transport refuses a frame of another generation */
+    }
     (void)f;
     (void)n;
     frames_sent++;
     return true;
 }
-static void ble_disconnect(void *ctx)
+static void ble_disconnect(void *ctx, uint32_t gen)
 {
     (void)ctx;
+    (void)gen;
     disconnects++;
     (void)dsp_app_post_conn_event(&app, true, ++conn_gen, 247); /* the phone reconnects */
 }

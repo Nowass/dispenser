@@ -58,9 +58,17 @@ static struct {
 
 static void phone_on_disconnect(void);
 
-static bool cap_send(void *ctx, const uint8_t *f, size_t n)
+/* T13: frames accepted for sending but lost on the air (a notification has no ATT
+ * acknowledgement). Through the transport, the transport behaves exactly as for delivered ones. */
+static bool g_air_loss;
+static bool cap_send(void *ctx, uint32_t gen, const uint8_t *f, size_t n)
 {
-    (void)ble_send_frame(ctx, f, n);
+    if (!ble_send_frame(ctx, gen, f, n)) {
+        return false;
+    }
+    if (g_air_loss) {
+        return true;
+    }
     if (inbox.count < INBOX) {
         int i = (inbox.head + inbox.count) % INBOX;
         memcpy(inbox.f[i], f, n);
@@ -69,12 +77,191 @@ static bool cap_send(void *ctx, const uint8_t *f, size_t n)
     }
     return true;
 }
-static void cap_disconnect(void *ctx)
+static void cap_disconnect(void *ctx, uint32_t gen)
 {
     phone_on_disconnect();
-    ble_disconnect(ctx); /* the harness reconnects at once (new generation) */
+    ble_disconnect(ctx, gen); /* the harness reconnects at once (new generation) */
 }
 static dsp_ble_port_t BLE2;
+
+#ifdef DSP_VIA_TRANSPORT
+/* ---- M1.10d.1 end to end: the whole suite through the BLE byte transport --------------------
+ * The phone's frames are fragmented at the negotiated MTU (DSP_E2E_MTU) into ATT writes; the
+ * device's frames come back as notifications and are reassembled by the phone. The fake radio
+ * connects the phone whenever the transport starts advertising (app task, as the invariant
+ * requires) and delivers the GAP disconnect when the transport terminates the link. */
+#include <stdlib.h>
+
+#include "dsp_ble_transport.h"
+
+static dsp_ble_transport_t TR;
+static dsp_ble_port_t TRP;
+static uint16_t e2e_mtu = 23;
+static bool e2e_conn;
+static bool e2e_quiet;      /* suspend/stop: a radio-side close, not a protocol drop */
+static uint64_t e2e_extra;  /* milliseconds added by fired callouts */
+static bool e2e_armed;
+static uint32_t e2e_arm_ms;
+static dsp_ble_reasm_t e2e_rx;
+static int e2e_frags_out, e2e_writes;
+
+static uint32_t e2e_now(void *ctx)
+{
+    (void)ctx;
+    return (uint32_t)(mono_ms + e2e_extra);
+}
+static bool e2e_init(void *ctx)
+{
+    (void)ctx;
+    return true;
+}
+static void e2e_deinit(void *ctx)
+{
+    (void)ctx;
+}
+static bool e2e_is_off(void *ctx)
+{
+    (void)ctx;
+    return true;
+}
+static bool e2e_adv_start(void *ctx, const uint8_t advert[4], bool fast)
+{
+    (void)ctx;
+    (void)advert;
+    (void)fast;
+    if (!e2e_conn) { /* the phone is in range and connects at once */
+        e2e_conn = true;
+        dsp_ble_reasm_init(&e2e_rx);
+        dsp_ble_tr_on_connect(&TR, 1, true);
+        dsp_ble_tr_on_mtu(&TR, 1, e2e_mtu);
+        dsp_ble_tr_on_subscribe(&TR, 1, true);
+        sc.gen = TR.gen;
+    }
+    return true;
+}
+static void e2e_adv_stop(void *ctx)
+{
+    (void)ctx;
+}
+static bool e2e_term_ignored; /* the controller never reports the GAP disconnect (T14 wait) */
+static int e2e_terms_ignored;
+static void e2e_terminate(void *ctx, uint16_t handle)
+{
+    if (!e2e_conn) {
+        return;
+    }
+    if (e2e_term_ignored) {
+        e2e_terms_ignored++;
+        return;
+    }
+    if (!e2e_quiet) {
+        sc.disconnects++;
+        phone_on_disconnect();
+    }
+    e2e_conn = false;
+    dsp_ble_tr_on_disconnect(&TR, handle);
+    (void)ctx;
+}
+static int e2e_notify(void *ctx, uint16_t handle, const uint8_t *frag, size_t len)
+{
+    if (!e2e_conn || handle != 1 || len > (size_t)e2e_mtu - 3u) {
+        return DSP_BLE_NOTIFY_ERR;
+    }
+    e2e_frags_out++;
+    bool complete = false;
+    if (dsp_ble_reasm_push(&e2e_rx, frag, len, e2e_now(NULL), &complete) == DSP_BLE_OK && complete) {
+        (void)cap_send(ctx, sc.gen, e2e_rx.buf, e2e_rx.len);
+        dsp_ble_reasm_init(&e2e_rx);
+    }
+    return DSP_BLE_NOTIFY_OK;
+}
+static void e2e_retry_arm(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    e2e_armed = true;
+    e2e_arm_ms = ms;
+}
+static void e2e_signal(void *ctx)
+{
+    (void)ctx;
+}
+static void e2e_wait(void *ctx, uint32_t max_ms)
+{
+    if (e2e_armed) { /* the host task's callout first (the phone reconnects at once after) */
+        e2e_armed = false;
+        e2e_extra += e2e_arm_ms;
+        dsp_ble_tr_on_retry(&TR);
+        return;
+    }
+    ble_wait(ctx, max_ms);
+}
+static void e2e_lock(void *ctx)
+{
+    (void)ctx;
+}
+static const dsp_ble_radio_t E2E_RADIO = {NULL,          e2e_init,      e2e_deinit, e2e_is_off,
+                                          e2e_adv_start, e2e_adv_stop,  e2e_terminate,
+                                          e2e_notify,    e2e_retry_arm, e2e_signal, e2e_wait,
+                                          e2e_now,       e2e_lock,      e2e_lock};
+/* the harness's own accounting around the transport's port */
+static bool e2e_start(void *ctx)
+{
+    sc.starts++;
+    bool ok = TRP.start(ctx);
+    ble_on = ok;
+    return ok;
+}
+static void e2e_suspend(void *ctx)
+{
+    sc.suspends++;
+    e2e_quiet = true;
+    TRP.suspend(ctx);
+    e2e_quiet = false;
+    ble_on = false;
+}
+static bool e2e_resume(void *ctx)
+{
+    sc.resumes++;
+    bool ok = TRP.resume(ctx);
+    ble_on = ok;
+    return ok;
+}
+static void e2e_stop(void *ctx)
+{
+    e2e_quiet = true;
+    TRP.stop(ctx);
+    e2e_quiet = false;
+    ble_on = false;
+}
+
+static void e2e_post(const uint8_t *f, size_t n)
+{
+    size_t cnt = dsp_ble_frag_count(n, e2e_mtu);
+    if (!e2e_conn || cnt == 0 || cnt > 64 || n > DSP_BLE_FRAME_MAX) {
+        return; /* nothing a phone could send */
+    }
+    uint8_t frag[DSP_BLE_TR_MTU_PREFERRED];
+    for (size_t i = 0; i < cnt; i++) {
+        size_t fl = dsp_ble_frag_get(f, n, e2e_mtu, i, frag, sizeof frag);
+        e2e_writes++;
+        (void)dsp_ble_tr_on_write(&TR, 1, frag, fl);
+    }
+}
+
+static void e2e_setup(void)
+{
+    const char *m = getenv("DSP_E2E_MTU");
+    e2e_mtu = (uint16_t)(m != NULL ? atoi(m) : 23);
+    e2e_conn = false;
+    e2e_armed = false;
+    dsp_ble_tr_init(&TR, &E2E_RADIO, &app, &TRP);
+    BLE2 = TRP;
+    BLE2.start = e2e_start;
+    BLE2.suspend = e2e_suspend;
+    BLE2.resume = e2e_resume;
+    BLE2.stop = e2e_stop;
+}
+#endif
 
 /* ---- Phone ------------------------------------------------------------------------------------ */
 
@@ -149,6 +336,8 @@ static void drain(void)
         const uint8_t *body = NULL;
         if (dsp_ble_parse_header(f, n, &h, &body) != DSP_BLE_OK) {
             e->type = 0xFF;
+            e->plen = n < sizeof e->plain ? n : sizeof e->plain; /* raw frame, for checks */
+            memcpy(e->plain, f, e->plen);
             continue;
         }
         e->type = h.type;
@@ -226,7 +415,11 @@ static int count_type(uint8_t type)
 
 static void post(const uint8_t *f, size_t n)
 {
+#ifdef DSP_VIA_TRANSPORT
+    e2e_post(f, n);
+#else
     (void)dsp_app_post_frame(&app, sc.gen, f, n);
+#endif
 }
 
 static void post_msg(dsp_ble_msg_t *m)
@@ -476,6 +669,9 @@ static void fresh_unclaimed(void)
     BLE2 = BLE;
     BLE2.send_frame = cap_send;
     BLE2.disconnect = cap_disconnect;
+#ifdef DSP_VIA_TRANSPORT
+    e2e_setup();
+#endif
     CFG.ble = &BLE2;
     CFG.security = &BSEC;
     phone_keys(&PA, 0x5C);
@@ -490,6 +686,7 @@ static void window_begin(void)
     inbox.head = inbox.count = 0;
     g_nlog = 0;
     g_disconnects_seen = 0;
+    g_air_loss = false;
     PA.gen = PB.gen = 0;
     phone_free(&PA);
     phone_free(&PB);
@@ -509,6 +706,22 @@ static void script_handshake(dsp_utc_t *t, int purpose)
 static bool all_zero(const void *p, size_t n)
 {
     return sodium_is_zero(p, n) == 1;
+}
+
+static void check_zeroized(void);
+/* T12/T14: called from inside the pump run. Whatever the suspension took (a timely GAP
+ * disconnect or the bounded wait), the connection and its security session are gone. */
+static int g_pump_probed;
+static void probe_no_session_during_pump(void)
+{
+    g_pump_probed++;
+    DSP_CHECK(!app.ss.conn_active);
+    DSP_CHECK(!app.ble_active);
+#ifdef DSP_VIA_TRANSPORT
+    DSP_CHECK(!TR.conn);
+    DSP_CHECK(!TRP.connected(TRP.ctx));
+#endif
+    check_zeroized();
 }
 
 static void check_zeroized(void)
@@ -1038,11 +1251,14 @@ static void test_lifecycle_events(void)
     step(t + 4, mk(OP_END_TIMEOUT));
     int pumps_before = pump.calls;
     int violations_before = pump.violations;
+    g_pump_probed = 0;
+    pump_hook = probe_no_session_during_pump;
     manual_via_ble = true; /* only "no scripted OP_MANUAL step"; the durable-decision checks stay */
     DSP_CHECK(session());
     manual_via_ble = false;
     DSP_CHECK(pump.calls > pumps_before);                    /* the oracle was exercised */
     DSP_CHECK_EQ_INT(violations_before, pump.violations);    /* durable decision before the pump */
+    DSP_CHECK_EQ_INT(1, g_pump_probed); /* T12/T14: no security session while the pump ran */
     drain();
     DSP_CHECK(last_of(DSP_BLE_T_EV_SUSPENDING_FOR_DOSE) != NULL); /* best effort, sent */
     DSP_CHECK(by_txn(1000) == NULL);                               /* no response (suspended) */
@@ -1288,6 +1504,222 @@ static void test_recovery_flow(void)
 }
 
 /* Random frames in every pre-authentication state: no crash, no operation, no write. */
+/* M1.10d (decision T3): a fragment error reported by the transport. Before the handshake: a
+ * plain MALFORMED (type 0, txn 0), the connection stays. In an XX handshake or after
+ * authentication: the connection is closed with no reply at all (never a plaintext error). */
+static void h_rx_fault(int i)
+{
+    (void)i;
+    phone_sync_conn();
+#ifdef DSP_VIA_TRANSPORT
+    /* a real fragment error: a continuation fragment with no partial frame, through the
+     * transport's reassembly (its own counter and the application's are both exercised) */
+    const uint8_t bad[2] = {0x01, 0xEE};
+    DSP_CHECK(e2e_conn);
+    e2e_writes++;
+    DSP_CHECK_EQ_INT(DSP_BLE_WRITE_OK, dsp_ble_tr_on_write(&TR, 1, bad, sizeof bad));
+#else
+    DSP_CHECK(dsp_app_post_rx_fault(&app, sc.gen));
+#endif
+}
+static void h_air_loss(int step_i)
+{
+    g_air_loss = sc.op[step_i].a != 0;
+}
+/* T14: the application's limit is the effective one; the transport's backstop never fired. */
+static void check_no_transport_fault_close(void)
+{
+#ifdef DSP_VIA_TRANSPORT
+    DSP_CHECK_EQ_INT(0, (int)TR.st.rx_fault_closes);
+#endif
+}
+static int plain_fault_errors(void)
+{
+    int n = 0;
+    for (int k = 0; k < g_nlog; k++) {
+        /* type 0 (no complete frame header was received, as for an unparsable header in the
+         * M1.10c.1 gate): the codec rejects the type, so the raw frame is checked */
+        const uint8_t *f = g_log[k].plain;
+        n += g_log[k].type == 0xFF && g_log[k].plen == 17 && f[2] == 0 &&
+             (f[3] & DSP_BLE_F_ERROR) && !(f[3] & DSP_BLE_F_ENCRYPTED) && f[4] == 0 && f[5] == 0 &&
+             f[8] == DSP_BLE_E_MALFORMED;
+    }
+    return n;
+}
+static void test_rx_fault_policy(void)
+{
+    /* pre-authentication (after HELLO) */
+    fresh_unclaimed();
+    window_begin();
+    dsp_utc_t t = g_true;
+    step(t++, hk(h_hello, 0, 0));
+    step(t++, hk(h_rx_fault, 0, 0));
+    step(t++, hk(h_drain, 0, 0));
+    step(t + 1, mk(OP_END_TIMEOUT));
+    DSP_CHECK(session());
+    drain();
+    DSP_CHECK_EQ_INT(1, plain_fault_errors());
+    DSP_CHECK_EQ_INT(0, g_disconnects_seen);
+    DSP_CHECK_EQ_INT(1, (int)rep.rx_faults);
+    check_no_transport_fault_close();
+    check_zeroized();
+    /* pre-authentication, three errors: three plain MALFORMED, the third closes the connection
+     * (DSP_LINK_ERRORS_MAX, application side), long before the transport's backstop */
+    fresh_unclaimed();
+    window_begin();
+    t = g_true;
+    step(t++, hk(h_hello, 0, 0));
+    step(t++, hk(h_rx_fault, 0, 0));
+    step(t++, hk(h_rx_fault, 0, 0));
+    step(t++, hk(h_rx_fault, 0, 0));
+    step(t++, hk(h_drain, 0, 0));
+    step(t + 1, mk(OP_END_TIMEOUT));
+    DSP_CHECK(session());
+    drain();
+    DSP_CHECK_EQ_INT(3, plain_fault_errors());
+    DSP_CHECK(g_disconnects_seen >= 1);
+    DSP_CHECK_EQ_INT(3, (int)rep.rx_faults);
+    check_no_transport_fault_close();
+    check_zeroized();
+    /* XX handshake in progress (CLAIM message 2 answered, message 3 pending) */
+    fresh_unclaimed();
+    window_begin();
+    t = g_true;
+    step(t++, hk(h_hello, 0, 0));
+    step(t++, hk(h_hs1, DSP_SEC_CLAIM, 0));
+    step(t++, hk(h_rx_fault, 0, 0));
+    step(t++, hk(h_drain, 0, 0));
+    step(t + 1, mk(OP_END_TIMEOUT));
+    DSP_CHECK(session());
+    drain();
+    DSP_CHECK(last_of(DSP_BLE_T_HS) != NULL); /* message 2 was sent */
+    DSP_CHECK_EQ_INT(0, plain_fault_errors());
+    DSP_CHECK(count_type(DSP_BLE_T_ENROLL_RESULT) == 0);
+    DSP_CHECK(g_disconnects_seen >= 1);
+    DSP_CHECK_EQ_INT(DSP_AUTH_UNCLAIMED, durable_auth().claim_state);
+    check_no_transport_fault_close();
+    check_zeroized();
+    /* authenticated (IK SESSION): closed without any reply, plain or encrypted */
+    fresh_unclaimed();
+    do_claim();
+    window_begin();
+    t = g_true;
+    script_handshake(&t, DSP_SEC_SESSION);
+    step(t++, hk(h_drain, 0, 0));
+    step(t++, hk(h_rx_fault, 0, 0));
+    step(t++, hk(h_drain, 0, 0));
+    step(t + 1, mk(OP_END_TIMEOUT));
+    DSP_CHECK(session());
+    drain();
+    DSP_CHECK(g_split);
+    int errors = 0;
+    for (int k = 0; k < g_nlog; k++) {
+        errors += (g_log[k].flags & DSP_BLE_F_ERROR) != 0;
+    }
+    DSP_CHECK_EQ_INT(0, errors);
+    DSP_CHECK(g_disconnects_seen >= 1);
+    DSP_CHECK(rep.ble_end != DSP_BLE_END_COMMAND); /* the window continues (C10) */
+    check_no_transport_fault_close();
+    check_zeroized();
+    invariants();
+}
+
+#ifdef DSP_VIA_TRANSPORT
+/* the controller drops the link later, while the pump runs */
+static void probe_pump_after_forced_close(void)
+{
+    probe_no_session_during_pump();
+    e2e_term_ignored = false;
+    e2e_conn = false;
+}
+
+/* T14: suspension for a manual dose while the controller never reports the GAP disconnect. The
+ * transport waits DSP_BLE_TR_CLOSE_WAIT_MS at most, synthesizes the disconnect, and the pump runs
+ * with no connection and no security session; the session's deadlines still apply afterwards. */
+static void test_suspend_without_gap_disconnect(void)
+{
+    fresh_unclaimed();
+    do_claim();
+    window_begin();
+    dsp_utc_t t = g_true;
+    script_handshake(&t, DSP_SEC_SESSION);
+    req_init(0, DSP_BLE_T_MANUAL_DOSE);
+    g_req[0].b.manual_dose_req.seq = 1;
+    g_req[0].b.manual_dose_req.volume_ul = 1000;
+    step(t++, hk(h_req, 0, 0));
+    step(t + 3, hk(h_drain, 0, 0));
+    step(t + 4, mk(OP_END_TIMEOUT));
+    int pumps_before = pump.calls;
+    int violations_before = pump.violations;
+    g_pump_probed = 0;
+    e2e_terms_ignored = 0;
+    e2e_term_ignored = true;
+    pump_hook = probe_pump_after_forced_close;
+    manual_via_ble = true;
+    DSP_CHECK(session());
+    manual_via_ble = false;
+    e2e_term_ignored = false;
+    DSP_CHECK(pump.calls > pumps_before);
+    DSP_CHECK_EQ_INT(violations_before, pump.violations);
+    DSP_CHECK_EQ_INT(1, g_pump_probed);
+    DSP_CHECK(e2e_terms_ignored >= 1);
+    DSP_CHECK(TR.st.synth_disconnects >= 1);
+    DSP_CHECK(sc.suspends >= 1);
+    check_zeroized();
+    invariants();
+}
+#endif
+
+/* T13: the final replies before a close are best effort. Whether the encrypted END_SESSION reply
+ * or the third plain MALFORMED reaches the phone or not, the device's outcome is the same: the
+ * window ends (END_SESSION) or the connection closes (MALFORMED), every security state is
+ * zeroized, and the next connection starts from nothing (its counters reset). */
+static void test_lost_final_replies(void)
+{
+    fresh_unclaimed();
+    do_claim();
+    window_begin();
+    dsp_utc_t t = g_true;
+    script_handshake(&t, DSP_SEC_SESSION);
+    step(t++, hk(h_drain, 0, 0));
+    req_init(0, DSP_BLE_T_END_SESSION);
+    step(t++, hk(h_air_loss, 1, 0));
+    step(t++, hk(h_req, 0, 0));
+    step(t + 5, mk(OP_END_TIMEOUT)); /* not reached: the END was executed */
+    DSP_CHECK(session());
+    g_air_loss = false;
+    drain();
+    DSP_CHECK(by_txn(1000) == NULL);                    /* the phone never saw the reply */
+    DSP_CHECK_EQ_INT(DSP_BLE_END_COMMAND, rep.ble_end); /* the device ended the window anyway */
+    check_zeroized();
+
+    /* pre-authentication: the third MALFORMED is lost; the connection closes anyway and a new
+     * connection is served from a clean state (HELLO answered, no error counted against it) */
+    fresh_unclaimed();
+    window_begin();
+    t = g_true;
+    step(t++, hk(h_hello, 0, 0));
+    step(t++, hk(h_drain, 0, 0));
+    step(t++, hk(h_air_loss, 1, 0));
+    step(t++, hk(h_rx_fault, 0, 0));
+    step(t++, hk(h_rx_fault, 0, 0));
+    step(t++, hk(h_rx_fault, 0, 0));
+    step(t++, hk(h_air_loss, 0, 0));
+    step(t++, hk(h_drain, 0, 0));
+    step(t++, hk(h_hello, 0, 0)); /* on the next connection */
+    step(t++, hk(h_drain, 0, 0));
+    step(t + 1, mk(OP_END_TIMEOUT));
+    DSP_CHECK(session());
+    drain();
+    DSP_CHECK_EQ_INT(0, plain_fault_errors());
+    DSP_CHECK(g_disconnects_seen >= 1);
+    DSP_CHECK_EQ_INT(2, count_type(DSP_BLE_T_HELLO));
+    DSP_CHECK(rep.links_opened >= 2);
+    check_no_transport_fault_close();
+    check_zeroized();
+    invariants();
+}
+
 static void test_fuzz_pre_auth(void)
 {
     fresh_unclaimed();
@@ -1341,5 +1773,14 @@ int main(void)
     DSP_RUN(test_cache_digest_and_epoch);
     DSP_RUN(test_end_during_confirmation);
     DSP_RUN(test_fuzz_pre_auth);
+    DSP_RUN(test_rx_fault_policy);
+    DSP_RUN(test_lost_final_replies);
+#ifdef DSP_VIA_TRANSPORT
+    DSP_RUN(test_suspend_without_gap_disconnect);
+#endif
+#ifdef DSP_VIA_TRANSPORT
+    printf("e2e (MTU %u): %d writes in, %d notifications out\n", e2e_mtu, e2e_writes, e2e_frags_out);
+    DSP_CHECK(e2e_writes > 0 && e2e_frags_out > 0);
+#endif
     return dsp_test_finish();
 }
