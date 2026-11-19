@@ -64,7 +64,7 @@ class OnboardingFirmwareTest {
         val removed = mutableListOf<String>()
         override suspend fun start(): AssociationStart = AssociationStart.Unsupported
         override fun addressFrom(result: Intent?): String? = picked
-        override fun disassociate(address: String) { removed += address }
+        override fun disassociate(address: String): Boolean { removed += address; return true }
     }
 
     @Before
@@ -103,7 +103,17 @@ class OnboardingFirmwareTest {
         val modes = AppModeController(modeStore, { CredentialStore.hasConfirmedRecord(dir, it) }, scope).also { it.start() }
         val associator = FakeAssociator(address)
         var after = 0
-        fun controller() = OnboardingController({ BluetoothReadiness.Ready }, associator, manager, store, modeStore, modes, afterEnrollment = { after++ })
+        val health = cz.nowass.dispenser.data.device.CredentialHealth({ cz.nowass.dispenser.data.device.DeviceUiRepository.credentialAccess(store, deviceId) })
+        fun controller() = OnboardingController({ BluetoothReadiness.Ready }, associator, manager, store, modeStore, modes,
+            afterEnrollment = { after++; health.refresh() })
+        val sessions = object : ForgetSessions {
+            override suspend fun endGracefully() = manager.end(graceful = true)
+            override fun closeNow() = manager.closeNow()
+            override val hasLiveSession: Boolean get() = manager.hasLiveSession
+            override fun block(deviceId: String) = manager.block(deviceId)
+            override fun unblock(deviceId: String) = manager.unblock(deviceId)
+        }
+        fun forget(end: ForgetSessions = sessions) = ForgetDevice(store, modeStore, associator, modes, end, afterCredentialChange = { health.refresh() })
     }
 
     private suspend fun Phone.claim(c: OnboardingController = controller()): EnrollOutcome {
@@ -272,7 +282,7 @@ class OnboardingFirmwareTest {
         val journal = InMemoryPendingOpsJournal()
         journal.insert(PendingOp(deviceId = deviceId, kind = PendingKind.MANUAL_DOSE, createdAtMs = 1, seq = 9, volumeUl = 1000))
 
-        ForgetDevice(p.store, p.modeStore, p.associator, p.modes, endSession = { p.manager.end() })(deviceId)
+        assertEquals(ForgetResult.Forgotten(associationRemoved = true), p.forget()(deviceId))
 
         assertEquals(CredentialState.Absent, p.store.load(deviceId))
         assertEquals(CredentialState.Absent, p.store.loadPending(deviceId))
@@ -289,4 +299,62 @@ class OnboardingFirmwareTest {
     }
 
     private fun <T> assertNotNullAnd(v: T?): T = checkNotNull(v)
+
+    // ---- security review F1 / F3 against the real firmware ----------------------------------
+
+    @Test
+    fun no_session_for_the_device_can_be_opened_while_it_is_forgotten() = runBlocking {
+        val p = Phone()
+        wake()
+        assertTrue(p.claim() is EnrollOutcome.Enrolled)
+        assertTrue(p.controller().enterDeviceMode(deviceId))
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val reached = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val slowEnd = object : ForgetSessions by p.sessions {
+            override suspend fun endGracefully() { reached.complete(Unit); gate.await(); p.sessions.endGracefully() }
+        }
+        val forgetting = async(Dispatchers.Default) { p.forget(slowEnd)(deviceId) }
+        withTimeout(5_000) { reached.await() }
+        // while Forget runs: a new session for this device is refused before connecting
+        assertEquals(cz.nowass.dispenser.device.session.OpenResult.Failed(cz.nowass.dispenser.device.session.SessionFailure.Blocked),
+            p.manager.open(address, cz.nowass.dispenser.device.session.OpenRequest.Session(deviceId)))
+        gate.complete(Unit)
+        assertEquals(ForgetResult.Forgotten(associationRemoved = true), forgetting.await())
+        assertTrue(!p.manager.hasLiveSession)
+        assertEquals(CredentialState.Absent, p.store.load(deviceId))
+        assertEquals(cz.nowass.dispenser.domain.DeviceAccess.RECORD_MISSING, p.health.state.value)
+    }
+
+    @Test
+    fun recovery_leaves_the_recovery_required_state_without_a_restart() = runBlocking {
+        val p = Phone()
+        wake()
+        assertTrue(p.claim() is EnrollOutcome.Enrolled)
+        assertTrue(p.controller().enterDeviceMode(deviceId))
+        p.manager.end()
+        assertTrue(FirmwareSim.joinWake(20_000))
+        // the Keystore key is lost: DEVICE mode shows recovery required, every operation disabled
+        p.wrapper.keys.clear()
+        assertEquals(cz.nowass.dispenser.domain.DeviceAccess.KEY_MISSING, p.health.refresh())
+        val repo = cz.nowass.dispenser.data.device.DeviceDispenserRepository(deviceId, { address },
+            cz.nowass.dispenser.device.ops.ManagerSessionPort(p.manager), cz.nowass.dispenser.data.device.InMemoryPendingOpsJournal(),
+            cz.nowass.dispenser.data.device.InMemoryDeviceCacheStore(), cz.nowass.dispenser.data.device.CredentialSeqAllocator(p.store),
+            cz.nowass.dispenser.data.device.UnavailablePhoneTimeSource, scope)
+        val ui = cz.nowass.dispenser.data.device.DeviceUiRepository(repo, java.time.Clock.systemUTC(), clockTick = null, access = p.health.state)
+        assertEquals(cz.nowass.dispenser.domain.ConnectionState.RECOVERY_REQUIRED, ui.observeDevice().first().connection)
+        // recovery in the same process (boot hold, three presses)
+        wake(recoveryHold = true)
+        val c = p.controller()
+        c.enterLabel(labelText())
+        c.finishAssociation(null)
+        val r = async { c.enroll(OnboardingPurpose.RECOVERY, "Pixel") }
+        withTimeout(15_000) { c.phase.filterNotNull().first { it is EnrollPhase.ConfirmOnDevice } }
+        FirmwareSim.press3()
+        assertEquals(EnrollOutcome.Enrolled(deviceId, 0), r.await())
+        // the health was refreshed by the enrollment: the same UI source leaves the recovery-required state
+        assertEquals(cz.nowass.dispenser.domain.DeviceAccess.OK, p.health.state.value)
+        assertEquals(cz.nowass.dispenser.domain.ConnectionState.CONNECTED,
+            withTimeout(5_000) { ui.observeDevice().first { it.connection != cz.nowass.dispenser.domain.ConnectionState.RECOVERY_REQUIRED } }.connection)
+        p.manager.end()
+    }
 }

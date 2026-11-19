@@ -1444,7 +1444,54 @@ are M1.10e.4d.
 - Mutation checks (each fails a test): staged key overwritable, another device accepted, label kept
   after the enrollment, label not zeroized on close, label in saved state, no FLAG_SECURE.
 
-### 17.3 Manual / M1.10e.5 items
+### 17.3 Security review fixes (F1–F3) and the orphan-key finding
+
+**F1 — session termination.** "Forget device" runs its whole cleanup `NonCancellable` and blocks new
+sessions for the device first (`DeviceSessionManager.block`: `open()` refuses with
+`SessionFailure.Blocked`; an open already in progress is closed instead of adopted). The graceful
+END_SESSION is bounded (3 s) and may throw, time out or be cancelled; the hard close
+(`DeviceSessionManager.closeNow`, synchronous, non-throwing) always follows in a `finally`; nothing is
+deleted unless the manager then exposes no authenticated session.
+
+**F2 — partial failures.** `ForgetDevice` returns `Forgotten(associationRemoved)` or
+`Failed(SESSION | CREDENTIALS | ADDRESS | MODE)` and never throws. `CredentialStore.removeVerified`
+deletes and verifies per record the Keystore key FIRST (`hasKey` afterwards), then the file (deleted and
+`exists()` false): a key that cannot be removed leaves the record file (so a retry still knows the key's
+random alias); a file that cannot be removed has no key any more (the record is unusable, shown as
+recovery required). DEMO is selected only after the session is closed, both records and keys are
+verified gone, the address is removed and a final check finds no record again; otherwise DEVICE mode
+stays (recovery required if the credential is already gone) and Settings shows the failure ("…zkuste to
+znovu"). The CDM association is a locator, not a secret: its removal failure does not block DEMO but is
+reported ("odeberte ho v nastavení systému"). Every step is idempotent, so a retry after any partial
+failure completes. The journal and the cache are kept.
+
+**F3 — credential health.** `CredentialHealth` (one per device) is refreshed after a successful
+enrollment or recovery and after every "Forget device" attempt; the same DEVICE UI source leaves the
+recovery-required state without a restart.
+
+**Orphan Keystore keys (finding, not changed).** `CredentialStore.beginEnrollment` creates a Keystore key
+with a random alias (`dsp_cred_v1_<id>_<random>`) before the handshake; the key is referenced on disk
+only once `stage` writes the pending record (before XX message 3). A process death in between leaves a
+key that no record names. No cleanup exists: `delete` / `removeVerified` / `discardPending` remove only
+keys named by a record, and `KeyWrapper` cannot enumerate aliases. Impact: none on secrecy — the key
+is non-exportable and has wrapped nothing persisted (the phone key pair existed only in memory); it is
+Keystore clutter only. A safe cleanup would need alias enumeration (`KeyStore.aliases()` filtered by the
+`dsp_cred_v1_` prefix, minus every alias named by a confirmed or staged record, never during an
+enrollment in progress) — a credential-storage change left for review.
+
+Tests: `ForgetDeviceTest` (14: graceful end throwing, cancelled, hanging — always a hard close, blocked
+meanwhile; a cancelled caller does not interrupt the cleanup; a session that cannot be closed stops
+before anything is deleted; Keystore deletion throwing or silently keeping the key; file deletion
+failing; address-store and mode-store failures; CDM disassociation returning false or throwing; retries
+after every partial failure; forgetting twice; verified removal reports an undeletable file);
+`OnboardingFirmwareTest` (+2, real firmware: no session can be opened for the device while it is
+forgotten; recovery in the same process leaves the recovery-required state); `OnboardingUiTest` (+1:
+the failure notice in Settings). Mutation checks (each fails a test): no hard close (13 failures),
+cancellable cleanup (1), no live-session check (1), file deleted before the key (3), key removal
+unchecked (1), file removal unchecked (1, with the new direct test; the final record check also catches
+it), no session block (1), no health refresh after an enrollment (1).
+
+### 17.4 Manual / M1.10e.5 items
 
 The CDM system dialog and its result on real phones (API 26–32 and 33+), permission denial and
 "don't ask again", Bluetooth enable, vendor CDM behaviour with Location Services off, and

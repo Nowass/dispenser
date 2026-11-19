@@ -50,8 +50,28 @@ class DeviceSessionManager(
     /** The live session, if any (for diagnostics and tests). */
     val session: SecureSession? get() = current.get()?.takeIf { it.isOpen }
 
+    /** Devices for which no session may be opened or adopted (being forgotten, F1). */
+    private val blocked: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /** No new session for [deviceIdHex] until [unblock]; an open already in progress is closed instead of adopted. */
+    fun block(deviceIdHex: String) { blocked += deviceIdHex.lowercase() }
+
+    fun unblock(deviceIdHex: String) { blocked -= deviceIdHex.lowercase() }
+
+    /**
+     * Hard close of the live session, synchronous and non-suspending (cannot be cancelled): frees the
+     * Noise state and closes the link; the manager stops exposing it before this returns (D2).
+     */
+    fun closeNow(reason: String = "closed by the app") {
+        current.get()?.close(reason)
+    }
+
+    /** True while an authenticated session is exposed (any device). */
+    val hasLiveSession: Boolean get() = session != null || state.value is SessionState.Authenticated
+
     /** Connects to [address] (a locator, never an identity) and opens [request]. */
     suspend fun open(address: String, request: OpenRequest): OpenResult = openLock.withLock {
+        if (request.deviceIdHex.lowercase() in blocked) return@withLock OpenResult.Failed(SessionFailure.Blocked)
         if (current.get()?.isOpen == true) return@withLock OpenResult.Failed(SessionFailure.AlreadyActive)
         stateFlow.value = SessionState.Connecting(request.deviceIdHex)
         try {
@@ -64,6 +84,12 @@ class DeviceSessionManager(
             val link = FrameLink(transport, scope)
             val r = SecureSession.open(link, request, noise, store, scope, timeouts, nowUtc) { seconds ->
                 stateFlow.value = SessionState.ConfirmingOnDevice(request.deviceIdHex, seconds)
+            }
+            if (r is OpenResult.Opened && request.deviceIdHex.lowercase() in blocked) {
+                // forgotten while this open was in progress: never adopted
+                r.session.close("device being forgotten")
+                stateFlow.value = SessionState.Idle
+                return@withLock OpenResult.Failed(SessionFailure.Blocked)
             }
             when (r) {
                 is OpenResult.Opened -> adopt(r.session, request.deviceIdHex, r.enrolledSlot)

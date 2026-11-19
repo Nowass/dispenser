@@ -289,6 +289,32 @@ class CredentialStore(
         }
     }
 
+    /** Why [removeVerified] could not finish (nothing about key material). */
+    enum class RemovalProblem { KEY_STILL_PRESENT, FILE_STILL_PRESENT }
+
+    /**
+     * "Forget device" (M1.10e.4b, F2): removes the confirmed and the staged record of [deviceIdHex] and
+     * verifies it. Per record the Keystore key is deleted and checked FIRST, then the file: if the key
+     * cannot be removed the record file stays, so a retry still knows the key's alias; if the file
+     * cannot be removed its key is already gone (the record is unusable) and a retry deletes the file.
+     * Idempotent. Returns null when both records and their keys are gone; exceptions from the Keystore
+     * propagate to the caller (the state is then still consistent for a retry).
+     */
+    @Synchronized
+    fun removeVerified(deviceIdHex: String): RemovalProblem? {
+        for (f in listOf(file(deviceIdHex), pendingFile(deviceIdHex))) {
+            if (!f.exists()) continue
+            val c = Container.parse(runCatching { f.readBytes() }.getOrNull() ?: ByteArray(0))
+            if (c != null) {
+                wrapper.deleteKey(c.alias)
+                if (wrapper.hasKey(c.alias)) return RemovalProblem.KEY_STILL_PRESENT
+            }
+            // an unparsable container names no key: its record is unusable either way
+            if (!f.delete() && f.exists()) return RemovalProblem.FILE_STILL_PRESENT
+        }
+        return null
+    }
+
     fun securityLevel(deviceIdHex: String): KeyWrapper.SecurityLevel {
         val c = Container.parse(runCatching { file(deviceIdHex).readBytes() }.getOrNull() ?: return KeyWrapper.SecurityLevel.UNKNOWN)
         return if (c == null) KeyWrapper.SecurityLevel.UNKNOWN else wrapper.securityLevel(c.alias)

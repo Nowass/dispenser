@@ -45,6 +45,10 @@ import cz.nowass.dispenser.device.transport.GattTransportFactory
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
 import android.content.pm.PackageManager
 import cz.nowass.dispenser.data.onboarding.ForgetDevice
+import cz.nowass.dispenser.data.onboarding.ForgetResult
+import cz.nowass.dispenser.data.onboarding.ForgetSessions
+import cz.nowass.dispenser.data.device.CredentialHealth
+import cz.nowass.dispenser.ui.settings.ForgetNotice
 import cz.nowass.dispenser.data.onboarding.OnboardingController
 import cz.nowass.dispenser.device.transport.AndroidDeviceAssociator
 import cz.nowass.dispenser.ui.DeviceAdminUi
@@ -201,14 +205,18 @@ class AppContainer(private val context: Context) {
      */
     private val deviceUis = PerKeyRegistry(::buildDeviceUi)
 
+    /** Credential health per device (one per device, like the repository). */
+    private val healths = PerKeyRegistry<String, CredentialHealth> { id -> CredentialHealth({ DeviceUiRepository.credentialAccess(credentials, id) }) }
+
     private fun deviceUi(deviceId: String): DeviceUiRepository = deviceUis.get(deviceId)
 
     private fun buildDeviceUi(deviceId: String): DeviceUiRepository {
         val dao = deviceDatabase.dao()
-        // Credential health, checked once off the main thread: a missing key or record keeps DEVICE mode
-        // in the recovery-required state (cached values and unresolved operations stay visible).
-        val access = MutableStateFlow(DeviceAccess.CHECKING)
-        appScope.launch(Dispatchers.IO) { access.value = DeviceUiRepository.credentialAccess(credentials, deviceId) }
+        // Credential health off the main thread: a missing key or record keeps DEVICE mode in the
+        // recovery-required state (cached values and unresolved operations stay visible). Re-evaluated
+        // after an enrollment/recovery and after "Forget device" (F3).
+        val health = healths.get(deviceId)
+        appScope.launch { health.refresh() }
         return DeviceUiRepository(
             device = DeviceDispenserRepository(
                 deviceId = deviceId,
@@ -221,7 +229,7 @@ class AppContainer(private val context: Context) {
                 scope = appScope,
             ),
             clock = clock,
-            access = access,
+            access = health.state,
         )
     }
 
@@ -235,12 +243,47 @@ class AppContainer(private val context: Context) {
         credentials = credentials,
         addresses = modeStore,
         modes = modes,
-        // resolution of unresolved operations and a live status read on the session the enrollment opened
-        afterEnrollment = { id -> appScope.launch { deviceUi(id).device.connect() } },
+        // the credential is usable again (leaves the recovery-required state, F3), then resolution of
+        // unresolved operations and a live status read on the session the enrollment opened
+        afterEnrollment = { id ->
+            healths.get(id).refresh()
+            appScope.launch { deviceUi(id).device.connect() }
+        },
     )
 
     private val forgetDevice: ForgetDevice by lazy {
-        ForgetDevice(credentials, modeStore, associator, modes, endSession = { sessionManager.end(graceful = true) })
+        ForgetDevice(
+            credentials, modeStore, associator, modes,
+            sessions = object : ForgetSessions {
+                override suspend fun endGracefully() = sessionManager.end(graceful = true)
+                override fun closeNow() = sessionManager.closeNow()
+                override val hasLiveSession: Boolean get() = sessionManager.hasLiveSession
+                override fun block(deviceId: String) = sessionManager.block(deviceId)
+                override fun unblock(deviceId: String) = sessionManager.unblock(deviceId)
+            },
+            afterCredentialChange = { id -> healths.get(id).refresh() },
+        )
+    }
+
+    /** The outcome of the last "Forget device" that needs the user's attention (failure, association left). */
+    private val forgetNotice = MutableStateFlow<ForgetNotice?>(null)
+    private val forgetRunning = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    private fun forget(deviceId: String) {
+        if (!forgetRunning.compareAndSet(false, true)) return
+        forgetNotice.value = null
+        appScope.launch {
+            val r = try { forgetDevice(deviceId) } catch (e: Throwable) { ForgetResult.Failed(ForgetResult.Step.CREDENTIALS) }
+            forgetNotice.value = when (r) {
+                is ForgetResult.Forgotten -> if (r.associationRemoved) null else ForgetNotice.ASSOCIATION_LEFT
+                is ForgetResult.Failed -> when (r.step) {
+                    ForgetResult.Step.SESSION -> ForgetNotice.FAILED_SESSION
+                    ForgetResult.Step.CREDENTIALS -> ForgetNotice.FAILED_CREDENTIALS
+                    ForgetResult.Step.ADDRESS, ForgetResult.Step.MODE -> ForgetNotice.FAILED_STORAGE
+                }
+            }
+            forgetRunning.set(false)
+        }
     }
 
     /** The shell's device administration for [mode]. */
@@ -250,7 +293,9 @@ class AppContainer(private val context: Context) {
         onboardingFactory = { purpose -> OnboardingViewModel.factory(purpose, ::onboardingController) },
         switchToDevice = { id -> appScope.launch { modes.enterDevice(id) } },
         switchToDemo = { appScope.launch { modes.enterDemo() } },
-        forget = { (mode as? ResolvedMode.Device)?.deviceId?.let { id -> appScope.launch { forgetDevice(id) } } },
+        forget = { (mode as? ResolvedMode.Device)?.deviceId?.let(::forget) },
+        forgetNotice = forgetNotice,
+        dismissForgetNotice = { forgetNotice.value = null },
     )
 
     /** Public GitHub Releases source (owner/repo from gradle.properties via resources; no credentials). */

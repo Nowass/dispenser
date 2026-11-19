@@ -39,8 +39,14 @@ class FakeKeyWrapper : KeyWrapper {
         }
     }
 
+    /** Fault injection: deleteKey throws (as a KeyStoreException would). */
+    @Volatile var failDelete = false
+    /** Fault injection: deleteKey silently leaves the key in place. */
+    @Volatile var ignoreDelete = false
+
     override fun deleteKey(alias: String) {
-        keys.remove(alias)
+        if (failDelete) throw java.security.KeyStoreException("injected key deletion failure")
+        if (!ignoreDelete) keys.remove(alias)
     }
 
     override fun securityLevel(alias: String) = KeyWrapper.SecurityLevel.SOFTWARE

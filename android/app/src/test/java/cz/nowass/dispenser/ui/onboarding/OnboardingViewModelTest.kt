@@ -60,7 +60,7 @@ class OnboardingViewModelTest {
     private val associator = object : DeviceAssociator {
         override suspend fun start(): AssociationStart = AssociationStart.Unsupported
         override fun addressFrom(result: Intent?): String? = address
-        override fun disassociate(address: String) = Unit
+        override fun disassociate(address: String) = true
     }
 
     @Before

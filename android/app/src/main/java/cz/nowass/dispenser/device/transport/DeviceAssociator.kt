@@ -35,8 +35,8 @@ interface DeviceAssociator {
     suspend fun start(): AssociationStart
     /** The selected device's public address (upper case, `XX:XX:…`) from the dialog result; null if cancelled. */
     fun addressFrom(result: Intent?): String?
-    /** Removes the association of [address] (best effort; "Forget device"). */
-    fun disassociate(address: String)
+    /** Removes the association of [address] ("Forget device"); false if it could not be removed. */
+    fun disassociate(address: String): Boolean
 }
 
 /** [DeviceAssociator] over [CompanionDeviceManager]; single device, filtered by the Dispenser service UUID. */
@@ -94,17 +94,20 @@ class AndroidDeviceAssociator(private val context: Context) : DeviceAssociator {
         return address?.uppercase()?.takeIf { ADDRESS.matches(it) }
     }
 
-    override fun disassociate(address: String) {
-        val manager = cdm ?: return
-        runCatching {
+    override fun disassociate(address: String): Boolean {
+        val manager = cdm ?: return true // no CDM: nothing to remove
+        return runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 manager.myAssociations.filter { it.deviceMacAddress?.toString()?.equals(address, ignoreCase = true) == true }
                     .forEach { manager.disassociate(it.id) }
+                manager.myAssociations.none { it.deviceMacAddress?.toString()?.equals(address, ignoreCase = true) == true }
             } else {
                 @Suppress("DEPRECATION")
-                manager.disassociate(address)
+                if (manager.associations.any { it.equals(address, ignoreCase = true) }) manager.disassociate(address)
+                @Suppress("DEPRECATION")
+                manager.associations.none { it.equals(address, ignoreCase = true) }
             }
-        }
+        }.getOrDefault(false)
     }
 
     private companion object {

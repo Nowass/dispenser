@@ -556,4 +556,9 @@
     <string name="settings_device_forget_text">Smaže se klíč tohoto telefonu a uložené spojení se zařízením. Zařízení si tento telefon může dál pamatovat jako oprávněný: oprávnění odeberete z jiného spárovaného telefonu, nebo obnovou zařízení. Nevyřešené operace zůstanou uložené a nic se automaticky neopakuje.</string>
     <string name="onboarding_failed_staged">Telefon si ponechal nepotvrzený klíč pro toto zařízení (odpověď zařízení nelze ověřit). Před dalším pokusem ho ověřte, nebo výslovně zahoďte.</string>
     <string name="onboarding_err_staged_pending">Pro toto zařízení čeká nepotvrzené spárování. Nejdříve ho ověřte, nebo zahoďte.</string>
+    <string name="settings_forget_failed_session">Zapomenutí se nezdařilo: spojení se zařízením se nepodařilo ukončit. Zařízení zůstává spárované; zkuste to znovu.</string>
+    <string name="settings_forget_failed_credentials">Zapomenutí se nezdařilo: klíč nebo údaje o spárování se nepodařilo odstranit. Zkuste to znovu.</string>
+    <string name="settings_forget_failed_storage">Zapomenutí se nedokončilo: změnu se nepodařilo uložit. Klíč tohoto telefonu je už odstraněný; zkuste to znovu.</string>
+    <string name="settings_forget_association_left">Zařízení zapomenuto. Systémové přiřazení se nepodařilo odebrat – odeberte ho v nastavení systému (Připojená zařízení).</string>
+    <string name="settings_forget_notice_ok">OK</string>
 </resources>

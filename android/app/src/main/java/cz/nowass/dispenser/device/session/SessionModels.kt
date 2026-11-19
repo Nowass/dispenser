@@ -71,6 +71,8 @@ sealed interface SessionFailure {
     /** A frame the protocol does not allow at this point (the connection was closed). */
     data class ProtocolError(val what: String) : SessionFailure
     data object AlreadyActive : SessionFailure
+    /** This device is being forgotten on this phone: no new session for it (M1.10e.4b, F1). */
+    data object Blocked : SessionFailure
 }
 
 sealed interface OpenResult {

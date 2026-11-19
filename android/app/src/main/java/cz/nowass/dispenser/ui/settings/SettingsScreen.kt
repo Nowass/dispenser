@@ -115,7 +115,13 @@ data class SettingsDeviceAdmin(
     val onSwitchToDevice: () -> Unit = {},
     val onSwitchToDemo: () -> Unit = {},
     val onForget: () -> Unit = {},
+    /** The last "Forget device" outcome that needs attention (shown in either mode). */
+    val forgetNotice: ForgetNotice? = null,
+    val onDismissForgetNotice: () -> Unit = {},
 )
+
+/** "Forget device" outcomes shown to the user (F2): a failure keeps DEVICE mode, a retry is safe. */
+enum class ForgetNotice { FAILED_SESSION, FAILED_CREDENTIALS, FAILED_STORAGE, ASSOCIATION_LEFT }
 
 data class SimulationActions(
     val start: (LocalDateTime, java.time.ZoneId, String, String) -> Unit = { _, _, _, _ -> },
@@ -146,6 +152,7 @@ const val SETTINGS_DEVICE_RECOVERY_TEST_TAG = "settings_device_recovery"
 const val SETTINGS_DEVICE_UNRESOLVED_TEST_TAG = "settings_device_unresolved"
 const val SETTINGS_DEVICE_CONNECT_TEST_TAG = "settings_device_connect"
 const val SETTINGS_DEVICE_FORGET_TEST_TAG = "settings_device_forget"
+const val SETTINGS_FORGET_NOTICE_TEST_TAG = "settings_forget_notice"
 
 /**
  * Compact settings in four sections (A1.4a): Aplikace, Zásobník (read-only summary +
@@ -272,6 +279,28 @@ fun SettingsScreen(
         }
 
         SectionLabel(stringResource(R.string.settings_device))
+        deviceAdmin?.forgetNotice?.let { notice ->
+            SurfaceCard {
+                ListItem(
+                    headlineContent = {
+                        Text(
+                            stringResource(
+                                when (notice) {
+                                    ForgetNotice.FAILED_SESSION -> R.string.settings_forget_failed_session
+                                    ForgetNotice.FAILED_CREDENTIALS -> R.string.settings_forget_failed_credentials
+                                    ForgetNotice.FAILED_STORAGE -> R.string.settings_forget_failed_storage
+                                    ForgetNotice.ASSOCIATION_LEFT -> R.string.settings_forget_association_left
+                                },
+                            ),
+                            color = if (notice == ForgetNotice.ASSOCIATION_LEFT) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.testTag(SETTINGS_FORGET_NOTICE_TEST_TAG),
+                        )
+                    },
+                    trailingContent = { TextButton(onClick = deviceAdmin.onDismissForgetNotice) { Text(stringResource(R.string.settings_forget_notice_ok)) } },
+                    colors = itemColors,
+                )
+            }
+        }
         if (ready?.isDemo == false) {
             SurfaceCard {
                 Column {

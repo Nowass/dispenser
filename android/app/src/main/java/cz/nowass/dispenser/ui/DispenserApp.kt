@@ -126,6 +126,10 @@ class DeviceAdminUi(
     val switchToDevice: (String) -> Unit,
     val switchToDemo: () -> Unit,
     val forget: () -> Unit,
+    /** The last "Forget device" outcome that needs the user's attention; null = nothing to show. */
+    val forgetNotice: kotlinx.coroutines.flow.StateFlow<cz.nowass.dispenser.ui.settings.ForgetNotice?> =
+        kotlinx.coroutines.flow.MutableStateFlow(null),
+    val dismissForgetNotice: () -> Unit = {},
 )
 
 /**
@@ -271,6 +275,7 @@ fun DispenserApp(
                     onOpenBackup = backupViewModelFactory?.let { { navController.navigate(BACKUP_ROUTE) { launchSingleTop = true } } },
                     deviceAdmin = deviceAdmin?.let { admin ->
                         val selected by remember(admin) { admin.selectedDeviceInDemo }.collectAsStateWithLifecycle(initialValue = null)
+                        val notice by admin.forgetNotice.collectAsStateWithLifecycle()
                         cz.nowass.dispenser.ui.settings.SettingsDeviceAdmin(
                             bleSupported = admin.bleSupported,
                             selectedDeviceInDemo = selected.takeIf { isDemo },
@@ -279,6 +284,8 @@ fun DispenserApp(
                             onSwitchToDevice = { selected?.let(admin.switchToDevice) },
                             onSwitchToDemo = admin.switchToDemo,
                             onForget = admin.forget,
+                            forgetNotice = notice,
+                            onDismissForgetNotice = admin.dismissForgetNotice,
                         )
                     },
                     initialTab = entry.arguments?.getString(ARG_TAB),

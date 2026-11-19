@@ -282,7 +282,7 @@ class OnboardingController(
             is SessionFailure.EnrollmentRefused -> EnrollOutcome.Reason.DEVICE_REFUSED
             SessionFailure.NothingStaged -> EnrollOutcome.Reason.NOTHING_STAGED
             is SessionFailure.Timeout -> EnrollOutcome.Reason.TIMEOUT
-            SessionFailure.AlreadyActive -> EnrollOutcome.Reason.BUSY
+            SessionFailure.AlreadyActive, SessionFailure.Blocked -> EnrollOutcome.Reason.BUSY
             SessionFailure.EnrollmentUnconfirmed, SessionFailure.NoCredential, SessionFailure.CredentialLost,
             SessionFailure.CredentialUnreadable, is SessionFailure.ProtocolError -> EnrollOutcome.Reason.PROTOCOL
         }

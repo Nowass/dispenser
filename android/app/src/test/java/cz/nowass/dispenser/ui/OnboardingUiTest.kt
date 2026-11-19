@@ -182,4 +182,15 @@ class OnboardingUiTest {
             .map { it.relativeTo(src).path }.toList()
         assertEquals(listOf("cz/nowass/dispenser/ui/onboarding/OnboardingScreen.kt"), askers)
     }
+
+    @Test
+    fun forget_failures_are_reported_in_settings() {
+        var dismissed = 0
+        settings(SettingsDeviceAdmin(bleSupported = true, forgetNotice = cz.nowass.dispenser.ui.settings.ForgetNotice.FAILED_CREDENTIALS,
+            onDismissForgetNotice = { dismissed++ }), isDemo = false)
+        compose.onNodeWithTag(cz.nowass.dispenser.ui.settings.SETTINGS_FORGET_NOTICE_TEST_TAG, useUnmergedTree = true)
+            .assertTextEquals("Zapomenutí se nezdařilo: klíč nebo údaje o spárování se nepodařilo odstranit. Zkuste to znovu.")
+        compose.onNodeWithText("OK").performScrollTo().performClick()
+        assertEquals(1, dismissed)
+    }
 }
