@@ -22,6 +22,11 @@
 build-host/
 build-fwsim-tsan/
 build-container/
+# Any other separate build directory (build-rnggate/, build-ble/, hardware builds; README
+# "Build"): never committed, never shared with the default build/.
+build-*/
+# RNG-gate captures (HARDWARE_ACCEPTANCE.md 8a.1): device evidence, kept outside Git.
+rng-out/
 **/build/
 build/
 *.o

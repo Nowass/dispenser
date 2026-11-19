@@ -126,6 +126,9 @@ add_test(NAME test_sec_header_guard
                  -P "${CMAKE_CURRENT_LIST_DIR}/test_sec_header_guard.cmake")
 add_test(NAME test_endpoint_guard
          COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/test_endpoint_guard.cmake")
+# M1.7 flash layout guard (stale sdkconfig incident 2026-11-19; pure CMake script).
+add_test(NAME test_flash_layout_guard
+         COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/test_flash_layout_guard.cmake")
 target_link_libraries(test_platform PRIVATE Threads::Threads)
 # M1.10d.1: the pure BLE byte transport (compiled unchanged into the firmware component) over a
 # fault-injecting fake radio, including a two-thread test (simulated NimBLE host task).

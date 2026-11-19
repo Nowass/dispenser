@@ -2,7 +2,8 @@
 
 What M1.7/M1.8 could **not** verify without the board. Run it once a Seeed Studio XIAO
 ESP32-C3 is available, record the results (date, firmware commit, board, measured values) in
-the "Result" column, and keep the safety rules below. Nothing here has been run yet.
+the "Result" column, and keep the safety rules below. Only checks 1.1–1.3 have been run so far
+(2026-11-19); everything else is still OPEN.
 
 ## Verification levels
 
@@ -26,10 +27,73 @@ the "Result" column, and keep the safety rules below. Nothing here has been run 
 
 | # | Check | Pass criterion | Result |
 |---|---|---|---|
-| 1.1 | `python -m esptool --chip esp32c3 flash-id` | 4 MB (0x400000) detected | |
-| 1.2 | First full flash (`idf.py flash`: bootloader, partition table at 0x10000, `ota_data_initial`, app) | boots; partition table printed matches `partitions.csv` | |
-| 1.3 | Boot log | identification line, no reset loop | |
-| 1.4 | `idf.py flash` again | `nvs_sec` content unchanged (only `erase-flash` wipes it) | |
+| 1.1 | `python -m esptool --chip esp32c3 flash-id` | 4 MB (0x400000) detected | **PASS** 2026-11-19: ESP32-C3 (QFN32) rev v0.4, embedded 4 MB flash (XMC), USB-Serial/JTAG, esptool v5.6.0 |
+| 1.2 | First full flash (`idf.py flash`: bootloader, partition table at 0x10000, `ota_data_initial`, app) | boots; partition table printed matches `partitions.csv` | **PASS** 2026-11-19: default image of `af9677a`, ESP-IDF v6.1; all four regions written with verified hashes; the printed table matches all 9 entries of `partitions.csv` |
+| 1.3 | Boot log | identification line, no reset loop | **PASS** 2026-11-19: `Dispenser V2 firmware 0.1.0-dev (esp32c3, v6.1)` and the M0.2 skeleton line; one boot per reset, no panic, watchdog, error or warning line |
+| 1.4 | `idf.py flash` again | `nvs_sec` content unchanged (only `erase-flash` wipes it) | OPEN |
+
+**Record of the first flash (2026-11-19).** Board: Seeed Studio XIAO ESP32-C3, chip revision
+v0.4, 4 MB flash, connected by USB only (no pump, MOSFET or battery). Firmware: commit `af9677a`,
+default configuration (`sdkconfig.defaults` only, no diagnostic or runtime option), app version
+`0.1.0-dev`, ESP-IDF v6.1. Built in a fresh build directory with its own `sdkconfig`
+(`idf.py -B <dir> -D SDKCONFIG=<dir>/sdkconfig build`), never from a pre-existing local
+`sdkconfig`. Written: bootloader 0x0 (21,152 B), partition table 0x10000, `ota_data_initial`
+0x25000, app 0x30000 (148,480 B); `nvs`, `nvs_sec` and the rest of the flash untouched; no
+erase-flash, no eFuse change, no credentials. Evidence, kept outside the repository by the owner
+(read-only):
+
+- Full flash backup taken before the first flash (factory content, 4,194,304 bytes, verified by
+  a second identical read): `xiao-c3-factory-backup-20261119-202840.bin`, SHA-256
+  `f61f361dbb211ebf121d2ef8d3621760ff638bf7c2cf9ee28b581be4cd30449b`.
+- Boot log captured over `/dev/ttyACM0` after a reset: `first-boot-20261119.log` (3,632 bytes).
+
+**Incident record — second flash with a stale build directory (2026-11-19).** After the first
+flash above, the VS Code ESP-IDF "Flash Device" command (JTAG) was used. It does not build: it
+wrote the existing `firmware/build/` from 2026-11-15, generated before the M1.7 layout. Its
+`flasher_args.json` was `--flash-size 2MB`: 0x0 bootloader (expects its table at 0x8000),
+0x8000 single-app partition table (`nvs` 0x9000, `phy_init` 0xF000, `factory` app 0x10000),
+0x10000 app (148,480 B, an M0.2 build of 2026-11-15). The owner's boot log showed the app
+loaded from 0x10000 and a 2048 KB image header on the 4096 KB flash. The 0x10000 write
+(sectors 0x10000–0x34FFF) covered the approved partition table and the approved `nvs`,
+`otadata`, `phy_init`, `nvs_sec`, `nvs_keys` areas and the first 20 KiB of `ota_0`; `nvs_sec`
+held no credentials (never provisioned). The results of 1.1–1.3 above are unaffected: they
+were recorded from the approved image before the incident. Confirmed by a read-only full
+readback (`post-vscode-flash-readback-20261119-211000.bin`, SHA-256
+`030c521bfd919b03f5ce1e3363fcfadbcd0361a15ef1886da9f4c27a1e360738`): it equals, byte for
+byte, the factory content + the approved first flash + the three stale files written into
+erased sectors (0x0–0x5FFF, 0x8000–0x8FFF, 0x10000–0x34FFF); nothing else was written. Not
+caused by the configuration itself: the stale `sdkconfig` values were all marked
+`# default:`, and any build would have re-derived the approved layout; the stale artifacts had
+simply never been rebuilt. Fixes: the stale `sdkconfig` and `build/` were moved unchanged out
+of the repository (owner's evidence folder `stale-config-20261115/`), a default build now
+produces the approved layout (4 MB, `partitions.csv` at 0x10000, app at 0x30000), a
+configure-time flash layout guard rejects explicitly set wrong layout values, and README
+"Build" documents that a flash command writes the existing build directory.
+
+**Recovery record (2026-11-19, approved by the owner).** A fresh build of `af9677a` (with the
+uncommitted flash layout guard, which does not change the image) in a separate build directory,
+checked before writing (target `esp32c3`, 4 MB, `partitions.csv` at 0x10000, app at 0x30000,
+runtime/BLE/diagnostics off), was written with
+`idf.py -B <dir> -D SDKCONFIG=<dir>/sdkconfig -p /dev/ttyACM0 flash`: bootloader 0x0, partition
+table 0x10000, `ota_data_initial` 0x25000, app 0x30000, every hash verified. Then exactly two
+approved region erases: `esptool erase-region 0x11000 0x14000` (`nvs`) and
+`esptool erase-region 0x28000 0x6000` (`nvs_sec`); no `erase-flash`, no eFuse or security
+change. Read-only full readback afterwards: `post-restore-readback-20261119-211545.bin`,
+SHA-256 `954fe7cfc8adb63ffe05d597738a12a120eb607ef334e28dd07e8adafdc86266`. The bootloader,
+partition table (all 9 entries of `partitions.csv`) and app are present byte for byte; `nvs`
+and `nvs_sec` are all 0xFF. Compared with the incident readback, 38 sectors have different
+content, all inside the 72 written or erased sectors; the other 34 (3 bootloader sectors and
+the app's 0x35000–0x53FFF, already the approved app) were rewritten with identical bytes, and
+nothing outside the approved regions changed. `otadata[0]` differs from `ota_data_initial`
+(all 0xFF) by its 32-byte entry `ota_seq=1`, state VALID, CRC 0x4743989A: written by the
+ESP-IDF bootloader itself at the first boot (no factory partition, initial otadata), selecting
+`ota_0`; expected. Left untouched (unused by the approved bootloader and partitions): the old
+single-app table at 0x8000, stale bytes in `phy_init`, `nvs_keys` and the gap at 0x2F000,
+factory leftovers at 0x9000–0xFFFF and in `ota_0` after the app. Boot log
+(`post-restore-boot-20261119.log`): chip v0.4, flash 4 MB, the approved 9-entry table, app
+loaded from 0x30000, `Dispenser V2 firmware 0.1.0-dev (esp32c3, v6.1)` and the M0.2 skeleton
+line; one boot per reset, no panic, watchdog, error, warning or 2 MB line. The board is back
+in the approved layout; check 1.4 remains OPEN.
 
 ## 2. Credentials
 

@@ -1,5 +1,17 @@
 # Composition root. Dependencies are listed explicitly (no implicit "all components").
 
+# M1.7 flash layout (4 MB, partitions.csv at 0x10000): a stale or wrong sdkconfig fails the
+# configure step instead of building an image for another layout. See dsp_flash_layout_guard.cmake.
+if(NOT CMAKE_BUILD_EARLY_EXPANSION)
+    include("${CMAKE_CURRENT_LIST_DIR}/dsp_flash_layout_guard.cmake")
+    dsp_flash_layout_guard("${CONFIG_IDF_TARGET}" "${CONFIG_ESPTOOLPY_FLASHSIZE}"
+                           "${CONFIG_PARTITION_TABLE_CUSTOM}" "${CONFIG_PARTITION_TABLE_CUSTOM_FILENAME}"
+                           "${CONFIG_PARTITION_TABLE_OFFSET}" dsp_layout_error)
+    if(dsp_layout_error)
+        message(FATAL_ERROR "Dispenser flash layout guard: ${dsp_layout_error}")
+    endif()
+endif()
+
 # M1.9c: the application runtime's endpoint is checked at configure time (explicit endpoint,
 # https only, production only with separate approval). See dsp_endpoint_guard.cmake.
 include("${CMAKE_CURRENT_LIST_DIR}/dsp_endpoint_guard.cmake")

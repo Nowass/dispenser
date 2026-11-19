@@ -15,6 +15,9 @@ signing.properties
 # Private configuration backups exported from the app (user data)
 dispenser-zaloha-*.json
 
+# RNG-gate captures (firmware/HARDWARE_ACCEPTANCE.md 8a.1): device evidence, kept outside Git
+/rng-out/
+
 # OS / editor noise
 .DS_Store
 Thumbs.db

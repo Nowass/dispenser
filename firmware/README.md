@@ -149,7 +149,7 @@ hardware-validated.**
 |---|---|
 | Board | Seeed Studio XIAO ESP32-C3 |
 | SoC / IDF target | ESP32-C3 (RISC-V) / `esp32c3` |
-| Flash size in build | **4 MB** (M1.7; the manufacturer's documentation confirms 4 MB). Check the actual board with `esptool flash-id` before the first flash. |
+| Flash size in build | **4 MB** (M1.7). Confirmed on the first board 2026-11-19 (`esptool flash-id`: ESP32-C3 rev v0.4, 4 MB XMC; [`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md) 1.1). |
 | Partition table | custom [`partitions.csv`](partitions.csv): two 1.75 MiB OTA slots, `nvs` 80 KiB, `nvs_sec` 24 KiB, reserved `nvs_keys`, `coredump`, 256 KiB reserve (see [Partition table](#partition-table-4-mb-m17)) |
 | GPIO assignments | **None defined.** Pump, button and indicator pins come from the hardware review. |
 
@@ -2151,11 +2151,40 @@ idf.py size
 
 `sdkconfig` is not committed. It is generated from `sdkconfig.defaults` (which sets
 `CONFIG_IDF_TARGET="esp32c3"`) plus ESP-IDF v6.1 defaults, so `idf.py set-target` is not
-needed. A build from defaults alone produces an `sdkconfig` identical to the local one
-(checked 2026-11-15). Add an option to `sdkconfig.defaults` only together with a
-reviewed reason; a different ESP-IDF version may generate different defaults.
+needed. ESP-IDF v6.1 marks every value it took from a default with `# default:` and
+re-derives those values from `sdkconfig.defaults` at each reconfigure; a value set
+explicitly (menuconfig, a hand edit, an older ESP-IDF without markers) is kept and wins over
+`sdkconfig.defaults`. Add an option to `sdkconfig.defaults` only together with a reviewed
+reason; a different ESP-IDF version may generate different defaults.
 
-`idf.py flash monitor` exists but is **not part of any verification so far** (no board).
+**Flash layout guard.** The configure step fails unless the effective configuration is the
+approved layout: target `esp32c3`, 4 MB flash, custom `partitions.csv` at 0x10000
+([`main/dsp_flash_layout_guard.cmake`](main/dsp_flash_layout_guard.cmake), host test
+`test_flash_layout_guard`). An explicitly set wrong value therefore stops the build instead
+of producing an image for another layout. The guard runs only when something builds.
+
+**Flash only what you just built.** A flash command writes the files listed in the build
+directory's `flasher_args.json`, whatever their age. `idf.py flash` runs the build (and so the
+configure step with the flash layout guard) before writing, which reduces the risk of writing
+stale artifacts, but it does not make flashing safe on its own: it still writes whatever that
+build directory and its `sdkconfig` produce. Writing existing binaries directly bypasses the
+build and therefore the guard entirely: `esptool write-flash` with files or `@flash_args`,
+OpenOCD `program_esp`, and the VS Code ESP-IDF "Flash Device" command (UART or JTAG), which
+does **not** build and writes the existing `build/` as it is. On 2026-11-19 "Flash Device"
+wrote a `build/` left over from 2026-11-15 (the pre-M1.7 2 MB single-app layout) to the board
+([`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md) section 1, incident record). Therefore:
+
+- in VS Code use "Build, Flash and Monitor", or run "Build Project" immediately before
+  "Flash Device", and check the build output (`flasher_args.json`: `--flash-size 4MB`,
+  0x0 bootloader, 0x10000 partition table, 0x25000 `ota_data_initial`, 0x30000 app);
+- on the command line prefer `idf.py -B <dir> -D SDKCONFIG=<dir>/sdkconfig ... flash` (it
+  builds first) and still check that directory's `flasher_args.json`; when writing existing
+  binaries directly, check `flasher_args.json` and the image files first, because no guard runs;
+- for hardware acceptance images use a fresh, separate build directory and check it before
+  flashing: `idf.py -B <dir> -D SDKCONFIG=<dir>/sdkconfig build` (`build-*/` is git-ignored);
+- never flash with `erase-flash` (it also wipes `nvs_sec`).
+
+First flash and boot log on the board: 2026-11-19 (`HARDWARE_ACCEPTANCE.md` 1.1–1.3).
 
 The ESP-IDF v6.1 configure step prints five `component_validation` CMake warnings about
 `wpa_supplicant` using private `esp_wifi` include directories. They come from ESP-IDF
@@ -2305,9 +2334,6 @@ alternative to the native setup, not a requirement.
 
 ## Hardware verification still pending
 
-- First flash and boot log on a real XIAO ESP32-C3 (`idf.py flash monitor`).
-- Actual flash size (4 MB per the manufacturer; the build assumes 4 MB): `esptool flash-id`
-  before the first flash, which must write the complete image set.
 - Reset-state level of every GPIO considered for the pump gate (strapping pins GPIO2,
   GPIO8, GPIO9 must be avoided or analysed), plus the external pull-down that keeps the
   pump OFF before firmware runs (FR-044).
