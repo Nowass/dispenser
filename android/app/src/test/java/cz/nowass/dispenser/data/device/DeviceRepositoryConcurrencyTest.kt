@@ -9,6 +9,7 @@ import cz.nowass.dispenser.domain.ScheduleDraft
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -242,5 +243,132 @@ class DeviceRepositoryConcurrencyTest {
         val c2 = r.connect() as ConnectOutcome.Connected
         assertTrue(c2.resolutionComplete)
         assertEquals(0, dev.pumpRuns)
+    }
+
+    // ---- review of 4d7e3b2: caller cancelled while the manager-owned request continues ------
+
+    /** Holds the next request of [type] inside the device until the returned gate completes. */
+    private fun holdNext(type: Int): Pair<CompletableDeferred<Unit>, CompletableDeferred<Unit>> {
+        val reached = CompletableDeferred<Unit>()
+        val gate = CompletableDeferred<Unit>()
+        dev.hooks[type] = { reached.complete(Unit); gate.await() }
+        return reached to gate
+    }
+
+    private suspend fun unresolvedRows(kind: PendingKind) = journal.inner.list(dev.deviceId).filter { it.unresolved && it.kind == kind }
+
+    @Test
+    fun refill_cancelled_caller_keeps_the_guard_until_the_outcome_is_settled() = runTest {
+        val r = repo()
+        assertTrue(r.connect() is ConnectOutcome.Connected)
+        val (reached, gate) = holdNext(M.REFILL)
+        val caller = launch { r.refill(100_000) }
+        runCurrent()
+        assertTrue("the REFILL request is in flight", reached.isCompleted)
+        val row = unresolvedRows(PendingKind.REFILL).single() // durable before sending
+        caller.cancel()
+        runCurrent()
+        assertTrue(caller.isCancelled)
+
+        // the caller is gone, the request is not: a second REFILL is refused by the journal, nothing sent
+        val sent = dev.received.size
+        assertEquals(OpResult.Refused(LocalRefusal.Unresolved(row.id)), r.refill(120_000))
+        assertEquals(sent, dev.received.size)
+        assertEquals(0, dev.refills)
+
+        // the original continues, is executed once and settled by its own outcome (Ok: row removed)
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(1, dev.refills)
+        assertEquals(100_000L, dev.remainingUl)
+        assertTrue(unresolvedRows(PendingKind.REFILL).isEmpty())
+        // only now a new REFILL is allowed
+        assertTrue(r.refill(130_000) is OpResult.Ok)
+        assertEquals(2, dev.refills)
+    }
+
+    @Test
+    fun refill_cancelled_caller_with_an_uncertain_outcome_blocks_until_read_back() = runTest {
+        val r = repo()
+        assertTrue(r.connect() is ConnectOutcome.Connected)
+        val (reached, gate) = holdNext(M.REFILL)
+        dev.faults[M.REFILL] = FakeDevicePort.Fault.EXECUTE_THEN_LOSE // executed, the answer is lost
+        val caller = launch { r.refill(100_000) }
+        runCurrent()
+        assertTrue(reached.isCompleted)
+        caller.cancel()
+        runCurrent()
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(1, dev.refills)
+        val row = unresolvedRows(PendingKind.REFILL).single()
+        assertEquals("kept for read-back", PendingState.PREPARED, row.state)
+        // the link closed with the lost answer; the next session resolves it before a new REFILL is allowed
+        assertTrue(r.refill(120_000).let { it is OpResult.NotSent || it is OpResult.Refused })
+        val c = r.connect() as ConnectOutcome.Connected
+        assertTrue(c.resolutionComplete)
+        val resolved = journal.inner.list(dev.deviceId).single { it.id == row.id }
+        assertEquals(PendingState.RESOLVED, resolved.state)
+        assertEquals(Resolution.READ_BACK, resolved.resolution)
+        assertTrue(r.refill(120_000) is OpResult.Ok)
+        assertEquals("never re-sent automatically", 2, dev.refills)
+    }
+
+    @Test
+    fun manual_dose_cancelled_caller_device_closes_link_resolved_by_get_result() = runTest {
+        val r = repo()
+        assertTrue(r.connect() is ConnectOutcome.Connected)
+        val (reached, gate) = holdNext(M.MANUAL_DOSE)
+        val caller = launch { r.manualDose(1_000) }
+        runCurrent()
+        assertTrue("the MANUAL_DOSE request is in flight", reached.isCompleted)
+        val row = unresolvedRows(PendingKind.MANUAL_DOSE).single()
+        caller.cancel()
+        runCurrent()
+        assertTrue(caller.isCancelled)
+
+        val sent = dev.received.size
+        val seqCalls = seq.calls
+        assertEquals(OpResult.Refused(LocalRefusal.Unresolved(row.id)), r.manualDose(1_000))
+        assertEquals("nothing sent, not even the status read", sent, dev.received.size)
+        assertEquals("no seq allocated", seqCalls, seq.calls)
+
+        // the original dose runs once; the device suspends BLE and closes the link (normal path)
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(1, dev.pumpRuns)
+        assertEquals(PendingState.PREPARED, journal.inner.list(dev.deviceId).single { it.id == row.id }.state)
+        assertTrue(r.manualDose(1_000).let { it is OpResult.NotSent || it is OpResult.Refused }) // no session / unresolved
+        // the next session settles it by GET_RESULT{seq} (DONE); only then is a new dose possible, with a new seq
+        assertTrue((r.connect() as ConnectOutcome.Connected).resolutionComplete)
+        val settled = journal.inner.list(dev.deviceId).single { it.id == row.id }
+        assertEquals(PendingState.RESOLVED, settled.state)
+        assertEquals(Resolution.DONE, settled.resolution)
+        dev.doseClosesLink = false
+        val next = r.manualDose(1_000)
+        assertTrue("$next", next is OpResult.Ok)
+        assertEquals(2, dev.pumpRuns)
+        assertTrue("a fresh seq", dev.received.filter { it.first == M.MANUAL_DOSE }.map { it.second["seq"] as Long }.distinct().size == 2)
+    }
+
+    @Test
+    fun manual_dose_cancelled_caller_device_answers_settled_in_the_same_session() = runTest {
+        dev.doseClosesLink = false
+        val r = repo()
+        assertTrue(r.connect() is ConnectOutcome.Connected)
+        val (reached, gate) = holdNext(M.MANUAL_DOSE)
+        val caller = launch { r.manualDose(1_000) }
+        runCurrent()
+        assertTrue(reached.isCompleted)
+        val row = unresolvedRows(PendingKind.MANUAL_DOSE).single()
+        caller.cancel()
+        runCurrent()
+        assertEquals(OpResult.Refused(LocalRefusal.Unresolved(row.id)), r.manualDose(1_000))
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(1, dev.pumpRuns)
+        assertTrue("decided and answered: row removed", journal.inner.list(dev.deviceId).none { it.id == row.id })
+        assertTrue(r.manualDose(1_000) is OpResult.Ok)
+        assertEquals(2, dev.pumpRuns)
     }
 }

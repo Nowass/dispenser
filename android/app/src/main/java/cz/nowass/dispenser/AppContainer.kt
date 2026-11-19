@@ -174,16 +174,22 @@ class AppContainer(private val context: Context) {
         )
     }
 
-    private val deviceUis = HashMap<String, DeviceUiRepository>()
+    /**
+     * Exactly one repository per device for the process lifetime (review of 4d7e3b2): the repository's
+     * operation reservations are instance-local, so a second instance for the same device must never
+     * exist. Reused across mode changes and session replacement.
+     */
+    private val deviceUis = PerKeyRegistry(::buildDeviceUi)
 
-    @Synchronized
-    private fun deviceUi(deviceId: String): DeviceUiRepository = deviceUis.getOrPut(deviceId) {
+    private fun deviceUi(deviceId: String): DeviceUiRepository = deviceUis.get(deviceId)
+
+    private fun buildDeviceUi(deviceId: String): DeviceUiRepository {
         val dao = deviceDatabase.dao()
         // Credential health, checked once off the main thread: a missing key or record keeps DEVICE mode
         // in the recovery-required state (cached values and unresolved operations stay visible).
         val access = MutableStateFlow(DeviceAccess.CHECKING)
         appScope.launch(Dispatchers.IO) { access.value = DeviceUiRepository.credentialAccess(credentials, deviceId) }
-        DeviceUiRepository(
+        return DeviceUiRepository(
             device = DeviceDispenserRepository(
                 deviceId = deviceId,
                 address = { null }, // the CDM association address arrives with onboarding (M1.10e.4b)
@@ -223,6 +229,14 @@ class AppContainer(private val context: Context) {
         val info = context.packageManager.getPackageInfo(context.packageName, 0)
         AppVersion(name = info.versionName ?: "?", code = PackageInfoCompat.getLongVersionCode(info))
     }
+}
+
+/** One value per key for its lifetime, created at most once even under concurrent first access. */
+class PerKeyRegistry<K, V>(private val create: (K) -> V) {
+    private val values = HashMap<K, V>()
+
+    @Synchronized
+    fun get(key: K): V = values.getOrPut(key) { create(key) }
 }
 
 /** Credential records: app-private no-backup storage (never in Auto Backup or device transfer). */

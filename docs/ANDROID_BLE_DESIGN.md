@@ -1297,6 +1297,30 @@ guard, allow reads, and are retried by the next `connect()`; nothing re-issued);
 arriving while the first is between guard and insert are refused; one REFILL frame, one MANUAL_DOSE
 frame, exactly one pump run, pump oracle clean); `DeviceUiRepositoryTest` (+InProgress mapping).
 7 of the first 9 concurrency tests failed before the fix (the 10th was added for a surviving mutant). Mutation checks: no in-flight check (2 failures),
+
+**Review of `4d7e3b2` — cancellation (verified, no change needed).** When the caller is cancelled
+after its operation inserted the journal row and started sending, the reservation is released, the
+manager-owned request continues (`DeviceOperations` runs it in the manager scope) and settles the row
+by its own outcome; meanwhile the journal guard refuses the same operation without sending anything
+(not even the status read or a seq allocation for a dose). Tests (`DeviceRepositoryConcurrencyTest`,
++4): REFILL answered (row removed, then a new REFILL allowed), REFILL with a lost answer (row kept
+PREPARED, the next session's read-back resolves it, then allowed; never re-sent), MANUAL_DOSE with the
+device closing the link (one pump run, PREPARED until GET_RESULT says DONE at the next session, then a
+new dose with a fresh seq), MANUAL_DOSE answered in the same session (row removed, then allowed).
+Removing the REFILL or MANUAL_DOSE journal guard makes these tests fail.
+
+**Review of `4d7e3b2` — repository instances (invariant demonstrated).** The reservations are
+instance-local; they suffice because there is exactly one `DeviceDispenserRepository` per device in
+the app: one process (no component declares another), one `AppContainer` per process
+(`DispenserApplication`), one repository per device inside it (`AppContainer` builds it only through `PerKeyRegistry`, created
+at most once per device and reused across mode changes and session replacement — the repository
+follows the manager's sessions), and no other production code constructs it.
+`DeviceRepositoryInstanceTest` (5) pins all of this (including 8 threads racing the first access, 20
+rounds). It does not build the device stack: the native provider must not be loaded inside
+Robolectric's sandbox class loader, which would make the plain JVM native tests in the same worker fail. Journal checks alone would **not** be enough across
+instances (the same check-then-insert gap); if a second instance per device is ever introduced, the
+reservation registry must become process-wide (keyed by device and operation) or the journal needs an
+atomic constraint — to be reviewed then.
 no reservation (2), no retry of an unfinished resolution (1), "complete" despite PREPARED rows (1).
 
 ## 16. Implementation notes (M1.10e.4a — app mode and data plumbing)
