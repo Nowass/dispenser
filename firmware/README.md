@@ -307,6 +307,8 @@ firmware/
 │   │                              transcripts) replayed byte for byte through dsp_app + dsp_blesec
 │   ├── test_ble_transport.c       BLE transport over a fault-injecting radio, two threads (M1.10d.1)
 │   └── test_ble_transport_symbols.cmake  link-time boundary check of the transport (M1.10d.1)
+├── test/fwsim/                 firmware-in-the-loop simulator library for the Android tests (test-only, M1.10e.2b)
+│   └── tsan/                      ThreadSanitizer driver for its connection lifecycle (test-only, see its README)
 ├── test/psk_linux/             device HKDF provider (PSA) on the ESP-IDF linux target (M1.10c.2a)
 ├── test/integration/           local end-to-end harness (M1.8, see its README)
 │   ├── notify_harness.c           real domain code driven over stdin

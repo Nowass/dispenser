@@ -17,8 +17,10 @@
 *.log
 
 # Build artifacts and directories (build-host/: host unit tests,
-# build-container/: devcontainer builds, see README)
+# build-container/: devcontainer builds, see README;
+# build-fwsim-tsan/: test/fwsim/tsan ThreadSanitizer driver)
 build-host/
+build-fwsim-tsan/
 build-container/
 **/build/
 build/

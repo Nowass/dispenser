@@ -1178,7 +1178,8 @@ the additional rules below; D6 modified.
   (`all_four_handshakes_over_one_device_lifetime`, 3 of 15 runs under 12 CPU hogs). Now
   synchronous (4.4).
 - **Firmware simulator: data race on the virtual clock (test harness, fixed).** ThreadSanitizer
-  (a scratch native driver linking `fwsim.c` directly with a minimal `JNIEnv`) reported the
+  (`firmware/test/fwsim/tsan/`, a test-only native driver linking `fwsim.c` directly with a minimal
+  `JNIEnv`) reported the
   transport's `now_ms` read on a phone-write thread racing the application task's clock update.
   Host-task-role calls now read the clock copy the application task publishes under its lock;
   on the device the clock is the thread-safe hardware timer (no firmware change).
@@ -1217,8 +1218,8 @@ the additional rules below; D6 modified.
   `Cached` at once and an existing reader receives `Cached`. Mutations (no synchronous
   invalidation, only the first close invalidates, unconditional invalidation, no run on
   registration) are each caught.
-- Simulator lifecycle: `FirmwareSimLinkTest` (7, see 15.2); ThreadSanitizer driver over the
-  same races (one reused handle, left-over poller, late writer/disconnector, injector, malformed
+- Simulator lifecycle: `FirmwareSimLinkTest` (7, see 15.2); ThreadSanitizer driver
+  `firmware/test/fwsim/tsan/` (`run.sh`, see its README) over the same races (one reused handle, left-over poller, late writer/disconnector, injector, malformed
   writes into the firmware transport racing the phone disconnect): 3 × 200 rounds, 0 reports;
   `test_ble_transport` and `test_platform` under TSan: 0 reports.
 - Mutation checks: 9 safety rules removed one at a time (journal failure ignored, seq not persisted,
