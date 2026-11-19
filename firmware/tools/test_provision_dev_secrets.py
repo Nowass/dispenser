@@ -206,6 +206,21 @@ assert len(ok) == 1 and ok[0][1:3] == ["data", "hex2bin"] and re.fullmatch("[0-9
             self.assertEqual(rc, 2, bad)
             self.assertFalse(os.path.exists(out))
 
+    def test_setup_label_matches_shared_vectors(self):
+        """The label the tool writes is the one the Android parser accepts: every label_ok record of
+        test-vectors/qr_formats_v1.txt (also run by the app's QrFormatsVectorTest)."""
+        path = os.path.join(pds.REPO, "test-vectors", "qr_formats_v1.txt")
+        records = 0
+        with open(path, encoding="ascii") as f:
+            for line in f:
+                if not line.startswith("label_ok "):
+                    continue
+                fields = dict(kv.split("=", 1) for kv in line.split()[1:])
+                code = bytes.fromhex(fields["code"][2:])  # "x:<hex>"
+                self.assertEqual(pds.setup_label(fields["device_id"], code), fields["label"], fields["name"])
+                records += 1
+        self.assertGreaterEqual(records, 4)
+
     def test_setup_label(self):
         code = bytes(range(16))
         # independent reference: RFC 4648 base32 mapped onto the Crockford alphabet
