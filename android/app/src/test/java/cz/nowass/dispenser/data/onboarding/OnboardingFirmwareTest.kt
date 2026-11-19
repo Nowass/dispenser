@@ -153,15 +153,48 @@ class OnboardingFirmwareTest {
         assertEquals(LabelEntry.Rejected(LabelEntry.Problem.CHECK), c.enterLabel("DSP2:$deviceId:$typo"))
     }
 
+    /**
+     * Regression (first hardware bring-up, 2026-11-19): the ESP32-C3 advertises with its Bluetooth MAC
+     * (base MAC + 2: base e0:72:a1:1e:1f:34 = device ID, BLE E0:72:A1:1E:1F:36), so the CDM address
+     * differs from the device ID. The address is only a locator: the CLAIM must succeed and the address
+     * be stored for the device ID of the label.
+     */
     @Test
-    fun picking_another_device_is_reported_before_connecting() = runBlocking {
+    fun claim_works_when_the_ble_address_differs_from_the_device_id() = runBlocking {
         val p = Phone()
+        val bleAddress = "A0:B1:C2:D3:E4:F7" // device ID a0b1c2d3e4f5 + 2, as on the real board
+        p.associator.picked = bleAddress
+        wake()
         val c = p.controller()
-        c.enterLabel(labelText())
-        p.associator.picked = "11:22:33:44:55:66"
-        assertEquals(AssociationOutcome.OtherDevice("11:22:33:44:55:66"), c.finishAssociation(null))
-        assertTrue(p.modeStore.addresses.first().isEmpty())
-        assertEquals(EnrollOutcome.Failed(EnrollOutcome.Reason.INCOMPLETE), c.enroll(OnboardingPurpose.CLAIM, "Pixel"))
+        assertEquals(LabelEntry.Accepted(deviceId), c.enterLabel(labelText()))
+        assertEquals(AssociationOutcome.Associated(bleAddress), c.finishAssociation(null))
+        assertEquals(EnrollOutcome.Enrolled(deviceId, 0), c.enroll(OnboardingPurpose.CLAIM, "Pixel"))
+        assertTrue(p.store.load(deviceId) is CredentialState.Present)
+        assertEquals(mapOf(deviceId to bleAddress), p.modeStore.addresses.first())
+        assertTrue(c.enterDeviceMode(deviceId))
+        assertEquals(ResolvedMode.Device(deviceId), p.modes.mode.value)
+        p.manager.end()
+    }
+
+    /**
+     * Without the address check, picking another dispenser is caught by the HELLO device_id_hash
+     * (the label names device ffffffffffff, the dispenser that answers is a0b1c2d3e4f5): WRONG_DEVICE,
+     * before any key exists; nothing is stored and the mode is unchanged.
+     */
+    @Test
+    fun a_label_of_another_dispenser_fails_with_wrong_device_and_stores_nothing() = runBlocking {
+        val p = Phone()
+        wake()
+        val c = p.controller()
+        val other = "ffffffffffff"
+        assertEquals(LabelEntry.Accepted(other), c.enterLabel(SetupLabel.format(other, setup)))
+        assertEquals(AssociationOutcome.Associated(address), c.finishAssociation(null))
+        val r = c.enroll(OnboardingPurpose.CLAIM, "Pixel")
+        assertEquals(EnrollOutcome.Failed(EnrollOutcome.Reason.WRONG_DEVICE), r)
+        assertEquals(CredentialState.Absent, p.store.load(other))
+        assertEquals(CredentialState.Absent, p.store.load(deviceId))
+        assertTrue(p.store.stagedDevices().isEmpty())
+        assertEquals(ResolvedMode.Demo, p.modes.mode.filterNotNull().first())
         p.associator.picked = null
         assertEquals(AssociationOutcome.Cancelled, c.finishAssociation(null))
     }

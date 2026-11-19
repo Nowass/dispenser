@@ -505,7 +505,6 @@
     <string name="onboarding_associate_hint_recovery">Zapněte zařízení s podrženým tlačítkem a vyberte ho v systémovém dialogu.</string>
     <string name="onboarding_associate_search">Vyhledat</string>
     <string name="onboarding_associate_cancelled">Výběr byl zrušen. Zkuste to znovu.</string>
-    <string name="onboarding_associate_other_device">Vybrali jste jiné zařízení, než je na štítku. Vyberte zařízení se stejným identifikátorem.</string>
     <string name="onboarding_associate_failed">Vyhledání se nezdařilo. Je zařízení probuzené a v dosahu?</string>
     <string name="onboarding_name_title">Název tohoto telefonu</string>
     <string name="onboarding_name_hint">Pod tímto názvem uvidíte telefon v seznamu telefonů zařízení.</string>

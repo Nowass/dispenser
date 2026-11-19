@@ -41,7 +41,7 @@ enum class OnboardingStep {
     UNCONFIRMED,
 }
 
-enum class AssociationProblem { CANCELLED, OTHER_DEVICE, UNSUPPORTED, FAILED }
+enum class AssociationProblem { CANCELLED, UNSUPPORTED, FAILED }
 
 data class OnboardingUiState(
     val purpose: OnboardingPurpose,
@@ -156,7 +156,6 @@ class OnboardingViewModel(
             when (controller.finishAssociation(result)) {
                 is AssociationOutcome.Associated -> afterAssociation()
                 AssociationOutcome.Cancelled -> _state.update { it.copy(associationProblem = AssociationProblem.CANCELLED) }
-                is AssociationOutcome.OtherDevice -> _state.update { it.copy(associationProblem = AssociationProblem.OTHER_DEVICE) }
             }
         }
     }

@@ -354,7 +354,6 @@ private fun Associate(state: OnboardingUiState, recovery: Boolean, actions: Onbo
                 stringResource(
                     when (it) {
                         AssociationProblem.CANCELLED -> R.string.onboarding_associate_cancelled
-                        AssociationProblem.OTHER_DEVICE -> R.string.onboarding_associate_other_device
                         AssociationProblem.UNSUPPORTED -> R.string.onboarding_unsupported
                         AssociationProblem.FAILED -> R.string.onboarding_associate_failed
                     },

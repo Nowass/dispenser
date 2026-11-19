@@ -63,8 +63,6 @@ sealed interface AssociationBegin {
 sealed interface AssociationOutcome {
     data class Associated(val address: String) : AssociationOutcome
     data object Cancelled : AssociationOutcome
-    /** The user picked another dispenser than the one on the label (address = factory MAC = device ID). */
-    data class OtherDevice(val address: String) : AssociationOutcome
 }
 
 /** Progress of a running enrollment, for the UI. */
@@ -244,13 +242,14 @@ class OnboardingController(
     }
 
     /**
-     * The dialog's result. The address is the device's factory MAC, which is also its device ID, so a
-     * different pick is reported before any connection (a match grants nothing: 4.1).
+     * The dialog's result. The address is only a locator (4.1, E8) and is NOT compared with the device
+     * ID: the device ID is the factory (base) MAC, while the ESP32-C3 advertises with its Bluetooth MAC,
+     * which ESP-IDF derives from it (base + 2 on the first board: base `…:1f:34`, BLE `…:1F:36`). The
+     * device is identified by the HELLO `device_id_hash` and the handshake (a different dispenser fails
+     * with WRONG_DEVICE before any key is created); the dialog only lists dispensers (service UUID).
      */
     suspend fun finishAssociation(result: Intent?): AssociationOutcome {
         val address = associator.addressFrom(result) ?: return AssociationOutcome.Cancelled
-        val id = deviceId
-        if (id != null && address.replace(":", "").lowercase() != id) return AssociationOutcome.OtherDevice(address)
         useAddress(address)
         return AssociationOutcome.Associated(address)
     }
