@@ -3,6 +3,7 @@ package cz.nowass.dispenser.ui.onboarding
 import android.content.Intent
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.viewModelScope
 import cz.nowass.dispenser.crypto.NativeNoiseProvider
 import cz.nowass.dispenser.crypto.SetupLabel
 import cz.nowass.dispenser.crypto.TestNative
@@ -31,6 +32,8 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -74,6 +77,13 @@ class OnboardingViewModelTest {
 
     @After
     fun tearDown() {
+        // Every ViewModel ends before Main is reset (CI run 44579725885): a continuation still on IO (e.g.
+        // init's stagedDevices) would otherwise resume through the reset Main, and that uncaught error
+        // surfaces in a later runTest. Cancelling is not enough (a cancelled continuation still resumes
+        // through Main); the ViewModels' jobs are joined while the test's Main still runs.
+        val jobs = viewModels.map { (_, vm) -> vm.viewModelScope.coroutineContext.job }
+        viewModels.forEach { (owner, _) -> owner.clear() }
+        runBlocking { withTimeout(10_000) { jobs.joinAll() } }
         if (FirmwareSim.wakeRunning()) {
             FirmwareSim.advance(24L * 3600 * 1000)
             assertTrue(FirmwareSim.joinWake(20_000))
@@ -98,8 +108,11 @@ class OnboardingViewModelTest {
 
     private suspend fun OnboardingViewModel.awaitStep(step: OnboardingStep) = withTimeout(20_000) { state.first { it.step == step } }
 
-    private fun vmIn(store: ViewModelStore, c: OnboardingController = controller()) =
-        ViewModelProvider(store, OnboardingViewModel.factory(OnboardingPurpose.CLAIM) { c })[OnboardingViewModel::class.java]
+    /** Every ViewModel of a test, cleared and joined in [tearDown]. */
+    private val viewModels = mutableListOf<Pair<ViewModelStore, OnboardingViewModel>>()
+
+    private fun vmIn(store: ViewModelStore, c: OnboardingController = controller(), purpose: OnboardingPurpose = OnboardingPurpose.CLAIM) =
+        ViewModelProvider(store, OnboardingViewModel.factory(purpose) { c })[OnboardingViewModel::class.java].also { viewModels += store to it }
 
     @Test
     fun the_whole_claim_flow_ends_in_device_mode() = runBlocking {
@@ -122,7 +135,7 @@ class OnboardingViewModelTest {
 
     @Test
     fun scans_are_routed_by_step_and_never_trigger_a_second_action() = runBlocking {
-        val vm = ViewModelProvider(ViewModelStore(), OnboardingViewModel.factory(OnboardingPurpose.ADD) { controller() })[OnboardingViewModel::class.java]
+        val vm = vmIn(ViewModelStore(), purpose = OnboardingPurpose.ADD)
         vm.start()
         vm.awaitStep(OnboardingStep.INVITATION)
         // another QR code (a label) in the invitation step: rejected, still in the step
