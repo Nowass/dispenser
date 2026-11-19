@@ -179,12 +179,19 @@ class ForgetDeviceTest {
         val reached = CompletableDeferred<Unit>()
         val gate = CompletableDeferred<Unit>()
         sessions.graceful = { reached.complete(Unit); gate.await() }
-        val caller = scope.async { forget()(id) }
+        // The cancelled caller never receives the result, so completion is observed at Forget's last
+        // step: afterCredentialChange (the credential-health refresh) runs in the outermost finally,
+        // after the exclusive section has removed the session block and after the switch to DEMO.
+        val cleanupDone = CompletableDeferred<Unit>()
+        val forget = ForgetDevice(store, addresses, associator, modes, sessions,
+            afterCredentialChange = { health.refresh(); cleanupDone.complete(Unit) }, gracefulEndMs = 500)
+        val caller = scope.async { forget(id) }
         withTimeout(5_000) { reached.await() }
         caller.cancel()
         gate.complete(Unit)
         // the NonCancellable cleanup runs to the end even though its caller is gone
-        withTimeout(5_000) { while (modes.mode.value != ResolvedMode.Demo) kotlinx.coroutines.delay(5) }
+        withTimeout(10_000) { cleanupDone.await() }
+        assertTrue(caller.isCancelled)
         assertForgotten(ForgetResult.Forgotten(true))
     }
 
