@@ -16,6 +16,13 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
     @Volatile var dropFrameType: Int? = null
     @Volatile var disconnectAfterDrop = false
     @Volatile var dropped = 0
+    /**
+     * Hold the next device frame of this type until [holdRelease] is counted down ([holdReached] is
+     * counted down when it arrives); later frames wait behind it. For forcing interleavings.
+     */
+    @Volatile var holdFrameType: Int? = null
+    @Volatile var holdReached = java.util.concurrent.CountDownLatch(1)
+    @Volatile var holdRelease = java.util.concurrent.CountDownLatch(1)
     /** Delay the next device frame of this type by [delayMs] (later frames wait behind it, order kept). */
     @Volatile var delayFrameType: Int? = null
     @Volatile var delayMs = 0L
@@ -109,6 +116,11 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
                     sink(GattCallback.RequestWritten(133)) // the write the device answered "failed"
                 }
                 return
+            }
+            if (first && frag.size > 3 && holdFrameType == (frag[3].toInt() and 0xFF)) {
+                holdFrameType = null
+                holdReached.countDown()
+                holdRelease.await(60, java.util.concurrent.TimeUnit.SECONDS)
             }
             if (first && frag.size > 3 && delayFrameType == (frag[3].toInt() and 0xFF)) {
                 delayFrameType = null

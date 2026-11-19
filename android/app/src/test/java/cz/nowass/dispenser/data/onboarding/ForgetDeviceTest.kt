@@ -67,11 +67,15 @@ class ForgetDeviceTest {
         var closes = 0
         val blocked = mutableSetOf<String>()
         var blockedDuringClose = false
-        override suspend fun endGracefully() = graceful()
-        override fun closeNow() { closes++; blockedDuringClose = blocked.isNotEmpty(); if (closeWorks) live = false }
-        override val hasLiveSession: Boolean get() = live
-        override fun block(deviceId: String) { blocked += deviceId }
-        override fun unblock(deviceId: String) { blocked -= deviceId }
+        val devices = mutableListOf<String>()
+        val hasLiveSession: Boolean get() = live
+        override suspend fun <T> exclusive(deviceId: String, cleanup: suspend () -> T): T {
+            blocked += deviceId
+            try { return cleanup() } finally { blocked -= deviceId }
+        }
+        override suspend fun endGracefully(deviceId: String) { devices += deviceId; graceful() }
+        override fun closeNow(deviceId: String) { devices += deviceId; closes++; blockedDuringClose = deviceId in blocked; if (closeWorks) live = false }
+        override fun hasLiveSession(deviceId: String): Boolean { devices += deviceId; return live }
     }
 
     private class Associator(var result: () -> Boolean = { true }) : DeviceAssociator {
@@ -138,6 +142,7 @@ class ForgetDeviceTest {
         assertEquals(StoredMode.DEFAULT, modeStore.stored.first())
         assertEquals(DeviceAccess.RECORD_MISSING, health.state.value)
         assertTrue("unblocked afterwards", sessions.blocked.isEmpty())
+        assertTrue("only the forgotten device's session is touched", sessions.devices.all { it == id })
     }
 
     private suspend fun assertStillDeviceMode() {

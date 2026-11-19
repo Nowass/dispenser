@@ -1465,6 +1465,23 @@ znovu"). The CDM association is a locator, not a secret: its removal failure doe
 reported ("odeberte ho v nastavení systému"). Every step is idempotent, so a retry after any partial
 failure completes. The journal and the cache are kept.
 
+**F4 — an enrollment in flight vs Forget (confirmed, fixed).** Before the fix, an `open()` already in
+progress (e.g. a CLAIM still waiting for HELLO, before its key existed) ran independently of Forget:
+Forget could finish its deletion, final check and the switch to DEMO, and the enrollment then created
+a new key, staged and committed a usable credential and — Forget having unblocked — was adopted.
+Fix (smallest change, in `DeviceSessionManager`): Forget runs its whole cleanup inside
+`forgetting(deviceId) { … }`, which blocks the device, increments a per-device forget epoch and holds the
+manager's `openLock` — the lock every `open()` holds for its whole duration. So an open in progress is
+waited for (it is bounded by its own timeouts) and its credential, if it committed one, is deleted by
+the cleanup that follows; such an open is never adopted (blocked, or its start epoch changed); a new
+open of the device during Forget is refused at once (`Blocked`, never queued behind Forget); an open
+that started just before Forget but reached the lock after it is refused by the epoch check. No
+credential can be created or restored for the device while the cleanup runs; the final record check
+is now defense in depth only. Cancellation-safe: the cleanup is NonCancellable; waiting for the lock
+cannot be interrupted. No deadlock: the cleanup never calls `open()`; ending and closing sessions do not
+take the lock. Session calls are device-scoped (`endFor`, `closeNow(deviceId)`,
+`hasLiveSession(deviceId)`): Forget never closes another device's session.
+
 **F3 — credential health.** `CredentialHealth` (one per device) is refreshed after a successful
 enrollment or recovery and after every "Forget device" attempt; the same DEVICE UI source leaves the
 recovery-required state without a restart.
@@ -1486,7 +1503,15 @@ failing; address-store and mode-store failures; CDM disassociation returning fal
 after every partial failure; forgetting twice; verified removal reports an undeletable file);
 `OnboardingFirmwareTest` (+2, real firmware: no session can be opened for the device while it is
 forgotten; recovery in the same process leaves the recovery-required state); `OnboardingUiTest` (+1:
-the failure notice in Settings). Mutation checks (each fails a test): no hard close (13 failures),
+the failure notice in Settings). F4: `OnboardingFirmwareTest` (+3, real firmware, the interleaving
+forced by holding the device's HELLO answer: Forget waits for the in-flight CLAIM, which is refused and
+never adopted; after a successful Forget no record, no key, no session, DEMO; after a failed Forget
+(Keystore failure) DEVICE mode, no session, and a retry completes; Forget never closes another device's
+session); mutation checks: cleanup without the open lock (2 failures), a new open queued behind Forget
+(1), an in-flight open adopted (2), closing any device's session (1), Forget not exclusive (4). The
+epoch check for an open that reached the lock after Forget is not forced by a test (it needs the
+open to pass its pre-lock check and lose the lock race to Forget); it is defense in depth over the
+blocked checks. Mutation checks (each fails a test): no hard close (13 failures),
 cancellable cleanup (1), no live-session check (1), file deleted before the key (3), key removal
 unchecked (1), file removal unchecked (1, with the new direct test; the final record check also catches
 it), no session block (1), no health refresh after an enrollment (1).

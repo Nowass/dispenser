@@ -255,11 +255,10 @@ class AppContainer(private val context: Context) {
         ForgetDevice(
             credentials, modeStore, associator, modes,
             sessions = object : ForgetSessions {
-                override suspend fun endGracefully() = sessionManager.end(graceful = true)
-                override fun closeNow() = sessionManager.closeNow()
-                override val hasLiveSession: Boolean get() = sessionManager.hasLiveSession
-                override fun block(deviceId: String) = sessionManager.block(deviceId)
-                override fun unblock(deviceId: String) = sessionManager.unblock(deviceId)
+                override suspend fun <T> exclusive(deviceId: String, cleanup: suspend () -> T): T = sessionManager.forgetting(deviceId, cleanup)
+                override suspend fun endGracefully(deviceId: String) = sessionManager.endFor(deviceId)
+                override fun closeNow(deviceId: String) = sessionManager.closeNow(deviceId)
+                override fun hasLiveSession(deviceId: String): Boolean = sessionManager.hasLiveSession(deviceId)
             },
             afterCredentialChange = { id -> healths.get(id).refresh() },
         )

@@ -107,11 +107,10 @@ class OnboardingFirmwareTest {
         fun controller() = OnboardingController({ BluetoothReadiness.Ready }, associator, manager, store, modeStore, modes,
             afterEnrollment = { after++; health.refresh() })
         val sessions = object : ForgetSessions {
-            override suspend fun endGracefully() = manager.end(graceful = true)
-            override fun closeNow() = manager.closeNow()
-            override val hasLiveSession: Boolean get() = manager.hasLiveSession
-            override fun block(deviceId: String) = manager.block(deviceId)
-            override fun unblock(deviceId: String) = manager.unblock(deviceId)
+            override suspend fun <T> exclusive(deviceId: String, cleanup: suspend () -> T): T = manager.forgetting(deviceId, cleanup)
+            override suspend fun endGracefully(deviceId: String) = manager.endFor(deviceId)
+            override fun closeNow(deviceId: String) = manager.closeNow(deviceId)
+            override fun hasLiveSession(deviceId: String): Boolean = manager.hasLiveSession(deviceId)
         }
         fun forget(end: ForgetSessions = sessions) = ForgetDevice(store, modeStore, associator, modes, end, afterCredentialChange = { health.refresh() })
     }
@@ -311,7 +310,7 @@ class OnboardingFirmwareTest {
         val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
         val reached = kotlinx.coroutines.CompletableDeferred<Unit>()
         val slowEnd = object : ForgetSessions by p.sessions {
-            override suspend fun endGracefully() { reached.complete(Unit); gate.await(); p.sessions.endGracefully() }
+            override suspend fun endGracefully(deviceId: String) { reached.complete(Unit); gate.await(); p.sessions.endGracefully(deviceId) }
         }
         val forgetting = async(Dispatchers.Default) { p.forget(slowEnd)(deviceId) }
         withTimeout(5_000) { reached.await() }
@@ -320,7 +319,7 @@ class OnboardingFirmwareTest {
             p.manager.open(address, cz.nowass.dispenser.device.session.OpenRequest.Session(deviceId)))
         gate.complete(Unit)
         assertEquals(ForgetResult.Forgotten(associationRemoved = true), forgetting.await())
-        assertTrue(!p.manager.hasLiveSession)
+        assertTrue(!p.manager.hasLiveSession(deviceId))
         assertEquals(CredentialState.Absent, p.store.load(deviceId))
         assertEquals(cz.nowass.dispenser.domain.DeviceAccess.RECORD_MISSING, p.health.state.value)
     }
@@ -355,6 +354,78 @@ class OnboardingFirmwareTest {
         assertEquals(cz.nowass.dispenser.domain.DeviceAccess.OK, p.health.state.value)
         assertEquals(cz.nowass.dispenser.domain.ConnectionState.CONNECTED,
             withTimeout(5_000) { ui.observeDevice().first { it.connection != cz.nowass.dispenser.domain.ConnectionState.RECOVERY_REQUIRED } }.connection)
+        p.manager.end()
+    }
+
+    // ---- security review F4: an enrollment in flight vs Forget ------------------------------
+
+    /**
+     * Forced interleaving: a CLAIM is in flight (its HELLO answer is held, before any key exists) when
+     * "Forget device" starts. Forget must not finish its destructive cleanup before that open is over,
+     * and the open must not create a usable credential or a session that outlives Forget.
+     */
+    private suspend fun raceEnrollmentWithForget(p: Phone, beforeRelease: suspend () -> Unit = {}): Pair<ForgetResult, EnrollOutcome> = kotlinx.coroutines.coroutineScope {
+        ports.holdReached = java.util.concurrent.CountDownLatch(1)
+        ports.holdRelease = java.util.concurrent.CountDownLatch(1)
+        ports.holdFrameType = SecureSession.T_HELLO
+        val c = p.controller()
+        c.enterLabel(labelText())
+        c.finishAssociation(null)
+        val enroll = async(Dispatchers.Default) { c.enroll(OnboardingPurpose.CLAIM, "Pixel") }
+        assertTrue("the open is in flight", ports.holdReached.await(10, java.util.concurrent.TimeUnit.SECONDS))
+        val forgetting = async(Dispatchers.Default) { p.forget()(deviceId) }
+        kotlinx.coroutines.delay(300)
+        assertFalse("Forget waits for the open in flight", forgetting.isCompleted)
+        beforeRelease()
+        ports.holdRelease.countDown()
+        withTimeout(60_000) { forgetting.await() } to withTimeout(60_000) { enroll.await() }
+    }
+
+    @Test
+    fun an_enrollment_in_flight_cannot_outlive_a_successful_forget() = runBlocking {
+        val p = Phone(modeStore = InMemoryAppModeStore(cz.nowass.dispenser.data.mode.StoredMode(cz.nowass.dispenser.data.mode.AppMode.DEVICE, deviceId)))
+        assertEquals(ResolvedMode.Device(deviceId), p.modes.mode.filterNotNull().first())
+        wake()
+        val (f, e) = raceEnrollmentWithForget(p)
+        assertEquals(ForgetResult.Forgotten(associationRemoved = true), f)
+        assertEquals("the enrollment is refused, never adopted", EnrollOutcome.Failed(EnrollOutcome.Reason.BUSY), e)
+        assertEquals(CredentialState.Absent, p.store.load(deviceId))
+        assertEquals(CredentialState.Absent, p.store.loadPending(deviceId))
+        assertTrue("no key survives", p.wrapper.keys.isEmpty())
+        assertFalse(p.manager.hasLiveSession(deviceId))
+        assertEquals(ResolvedMode.Demo, p.modes.mode.value)
+        // and the device is not left blocked: a new pairing later is possible
+        assertTrue(FirmwareSim.waitAdvertising(5_000))
+        assertEquals(EnrollOutcome.Failed(EnrollOutcome.Reason.ALREADY_CLAIMED), p.claim()) // the device did store the in-flight claim
+    }
+
+    @Test
+    fun an_enrollment_in_flight_cannot_outlive_a_failed_forget() = runBlocking {
+        val p = Phone(modeStore = InMemoryAppModeStore(cz.nowass.dispenser.data.mode.StoredMode(cz.nowass.dispenser.data.mode.AppMode.DEVICE, deviceId)))
+        assertEquals(ResolvedMode.Device(deviceId), p.modes.mode.filterNotNull().first())
+        wake()
+        val (f, e) = raceEnrollmentWithForget(p) { p.wrapper.failDelete = true }
+        assertEquals(ForgetResult.Failed(ForgetResult.Step.CREDENTIALS), f)
+        assertEquals(EnrollOutcome.Failed(EnrollOutcome.Reason.BUSY), e)
+        // failed Forget: DEVICE mode kept, nothing claimed as removed, but no session was adopted
+        assertEquals(ResolvedMode.Device(deviceId), p.modes.mode.value)
+        assertFalse(p.manager.hasLiveSession(deviceId))
+        p.wrapper.failDelete = false
+        assertEquals(ForgetResult.Forgotten(associationRemoved = true), p.forget()(deviceId))
+        assertEquals(CredentialState.Absent, p.store.load(deviceId))
+        assertTrue(p.wrapper.keys.isEmpty())
+        assertEquals(ResolvedMode.Demo, p.modes.mode.value)
+    }
+
+    @Test
+    fun forget_never_closes_another_devices_session() = runBlocking {
+        val p = Phone()
+        wake()
+        assertTrue(p.claim() is EnrollOutcome.Enrolled)
+        assertTrue(p.manager.hasLiveSession(deviceId))
+        p.manager.closeNow("ffffffffffff")
+        assertTrue("a session of another device is never closed", p.manager.hasLiveSession(deviceId))
+        assertFalse(p.manager.hasLiveSession("ffffffffffff"))
         p.manager.end()
     }
 }

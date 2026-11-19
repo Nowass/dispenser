@@ -11,17 +11,19 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
-/** The session side of "Forget device" (implemented over DeviceSessionManager). */
+/** The session side of "Forget device" (implemented over DeviceSessionManager); every call is per device. */
 interface ForgetSessions {
-    /** Encrypted END_SESSION (best effort; may throw, time out or be cancelled). */
-    suspend fun endGracefully()
-    /** Hard close; synchronous, never throws, cannot be cancelled. */
-    fun closeNow()
-    /** An authenticated session is still exposed. */
-    val hasLiveSession: Boolean
-    /** No new session for the device until [unblock] (an open in progress is not adopted). */
-    fun block(deviceId: String)
-    fun unblock(deviceId: String)
+    /**
+     * Runs [cleanup] exclusively with every session open for [deviceId] (F4): an open in progress is
+     * waited for and never adopted, new ones are refused, so no credential can be created meanwhile.
+     */
+    suspend fun <T> exclusive(deviceId: String, cleanup: suspend () -> T): T
+    /** Encrypted END_SESSION of the device's live session (best effort; may throw, time out or be cancelled). */
+    suspend fun endGracefully(deviceId: String)
+    /** Hard close of the device's live session only; synchronous, never throws, cannot be cancelled. */
+    fun closeNow(deviceId: String)
+    /** An authenticated session of the device is still exposed. */
+    fun hasLiveSession(deviceId: String): Boolean
 }
 
 sealed interface ForgetResult {
@@ -54,7 +56,10 @@ sealed interface ForgetResult {
  * enrolled phone removes it or a recovery replaces all phones). The journal and the device cache are
  * kept (unresolved operations are never dropped silently; nothing is re-sent).
  *
- * The whole cleanup runs NonCancellable; new sessions for the device are blocked while it runs. Order:
+ * The whole cleanup runs NonCancellable and exclusively with session opens for the device (F4: an open
+ * already in progress — e.g. an enrollment that has not created its key yet — is waited for and not
+ * adopted; new and queued ones are refused), so no credential can be created or restored while it runs
+ * and none of its checks can be overtaken by an enrollment. Order:
  * 1. graceful END_SESSION (bounded), then — always — a hard close; the manager must expose no session;
  * 2. both credential records and their Keystore keys removed and verified (key first, then file);
  * 3. the CDM association (best effort) and the stored address;
@@ -74,14 +79,12 @@ class ForgetDevice(
     private val gracefulEndMs: Long = 3_000,
 ) {
     suspend operator fun invoke(deviceId: String): ForgetResult = withContext(NonCancellable) {
-        sessions.block(deviceId)
         try {
-            forget(deviceId)
+            sessions.exclusive(deviceId) { forget(deviceId) }
         } catch (e: Throwable) {
             // unexpected: reported, never thrown; the state is consistent for a retry
             ForgetResult.Failed(ForgetResult.Step.CREDENTIALS)
         } finally {
-            sessions.unblock(deviceId)
             runCatching { afterCredentialChange(deviceId) }
         }
     }
@@ -89,13 +92,13 @@ class ForgetDevice(
     private suspend fun forget(deviceId: String): ForgetResult {
         // 1. session: graceful attempt bounded, then always the hard close
         try {
-            withTimeout(gracefulEndMs) { sessions.endGracefully() }
+            withTimeout(gracefulEndMs) { sessions.endGracefully(deviceId) }
         } catch (e: Throwable) {
             // thrown, timed out or cancelled: the hard close below still runs
         } finally {
-            sessions.closeNow()
+            sessions.closeNow(deviceId)
         }
-        if (sessions.hasLiveSession) return ForgetResult.Failed(ForgetResult.Step.SESSION)
+        if (sessions.hasLiveSession(deviceId)) return ForgetResult.Failed(ForgetResult.Step.SESSION)
 
         // 2. credentials (confirmed and staged) with their keys, verified
         val problem = try {
@@ -118,9 +121,9 @@ class ForgetDevice(
             return ForgetResult.Failed(ForgetResult.Step.ADDRESS)
         }
 
-        // 4. nothing came back (e.g. an enrollment that committed concurrently), then DEMO
+        // 4. defense in depth (no open can run here): nothing came back, then DEMO
         val stillThere = withContext(io) { credentials.hasConfirmedRecord(deviceId) || credentials.stagedDevices().contains(deviceId) }
-        if (stillThere || sessions.hasLiveSession) return ForgetResult.Failed(ForgetResult.Step.CREDENTIALS)
+        if (stillThere || sessions.hasLiveSession(deviceId)) return ForgetResult.Failed(ForgetResult.Step.CREDENTIALS)
         try {
             modes.clearSelection()
         } catch (e: Exception) {
