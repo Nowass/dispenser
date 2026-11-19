@@ -1210,6 +1210,46 @@ static void test_c10_with_security(void)
     invariants();
 }
 
+/* The security layer closes a connection that has not authenticated within DSP_LINK_UNAUTH_MS
+ * (30 s; BLE_PROTOCOL.md: "an unauthenticated connection is closed after 30 s") and the service
+ * window continues: a later connection can still complete a CLAIM. Observed on the first board
+ * (HARDWARE_ACCEPTANCE.md 8b.1): a phone that never sent HELLO was disconnected after 30.082 s. */
+static int g_disc_mark;
+static void h_mark_disconnects(int step_i)
+{
+    (void)step_i;
+    g_disc_mark = g_disconnects_seen;
+}
+static void h_expect_no_new_disconnect(int step_i)
+{
+    (void)step_i;
+    DSP_CHECK_EQ_INT(g_disc_mark, g_disconnects_seen);
+}
+static void h_expect_disconnect(int step_i)
+{
+    (void)step_i;
+    DSP_CHECK(g_disconnects_seen > g_disc_mark);
+}
+
+static void test_unauthenticated_connection_closed_after_30s(void)
+{
+    fresh_unclaimed();
+    window_begin();
+    dsp_utc_t t = g_true;
+    step(t, hk(h_mark_disconnects, 0, 0));          /* connected at the window start, no HELLO */
+    step(t + 29, hk(h_expect_no_new_disconnect, 0, 0)); /* still open after 29 s */
+    step(t + 31, hk(h_expect_disconnect, 0, 0));        /* closed by the device after 30 s */
+    dsp_utc_t u = t + 32; /* the window continues: the reconnected phone claims */
+    script_handshake(&u, DSP_SEC_CLAIM);
+    step(u + 1, mk(OP_END_TIMEOUT));
+    DSP_CHECK(session());
+    drain();
+    dsp_auth_t a = durable_auth();
+    DSP_CHECK_EQ_INT(DSP_AUTH_CLAIMED, a.claim_state);
+    dsp_auth_wipe(&a);
+    invariants();
+}
+
 /* Lifecycle: EV_SESSION_CLOSING near the window maximum; manual dose suspends BLE (event, then the
  * session is gone; the reconnect needs a new handshake); reboot leaves nothing. */
 static void test_lifecycle_events(void)
@@ -1766,6 +1806,7 @@ int main(void)
     DSP_RUN(test_transport_manipulations);
     DSP_RUN(test_response_cache);
     DSP_RUN(test_c10_with_security);
+    DSP_RUN(test_unauthenticated_connection_closed_after_30s);
     DSP_RUN(test_lifecycle_events);
     DSP_RUN(test_recovery_flow);
     DSP_RUN(test_identity_key_fault);
