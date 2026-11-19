@@ -2,6 +2,7 @@ package cz.nowass.dispenser.data.onboarding
 
 import android.content.Intent
 import android.content.IntentSender
+import cz.nowass.dispenser.crypto.Invitation
 import cz.nowass.dispenser.crypto.SetupLabel
 import cz.nowass.dispenser.crypto.credentials.CredentialState
 import cz.nowass.dispenser.crypto.credentials.CredentialStore
@@ -23,8 +24,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
-/** What the onboarding establishes (docs/ANDROID_BLE_DESIGN.md 7, 7.1, 11.3). Invitations: M1.10e.4c. */
-enum class OnboardingPurpose { CLAIM, RECOVERY }
+/** What the onboarding establishes (docs/ANDROID_BLE_DESIGN.md 7, 7.1, 11.3). ADD: by an owner's invitation (M1.10e.4c). */
+enum class OnboardingPurpose { CLAIM, RECOVERY, ADD }
 
 /** Bluetooth readiness in UI terms (no transport types reach the UI). */
 sealed interface OnboardingReadiness {
@@ -37,8 +38,20 @@ sealed interface OnboardingReadiness {
 sealed interface LabelEntry {
     data class Accepted(val deviceId: String) : LabelEntry
     data class Rejected(val problem: Problem) : LabelEntry
-    /** PREFIX/FIELDS: not a "DSP2:" label; DEVICE_ID; CODE: length, characters or padding; CHECK: a typing error. */
-    enum class Problem { FORMAT, DEVICE_ID, CODE, CHECK }
+    /**
+     * PREFIX/FIELDS: not a "DSP2:" label; DEVICE_ID; CODE: length, characters or padding; CHECK: a typing
+     * error; OTHER_DEVICE: the label is not of the device the invitation names (ADD).
+     */
+    enum class Problem { FORMAT, DEVICE_ID, CODE, CHECK, OTHER_DEVICE }
+}
+
+/** A scanned owner invitation (`DSP2I1:`, 7.1 B; QR only, no manual entry). */
+sealed interface InvitationEntry {
+    /** [clockWarning]: the phones' clocks differ (still usable; the device alone decides validity). */
+    data class Accepted(val deviceId: String, val clockWarning: Boolean) : InvitationEntry
+    data class Rejected(val problem: Problem) : InvitationEntry
+    /** NOT_INVITATION: another QR code; CORRUPT: a damaged invitation; UNSUPPORTED: a newer format; EXPIRED. */
+    enum class Problem { NOT_INVITATION, CORRUPT, UNSUPPORTED, EXPIRED }
 }
 
 sealed interface AssociationBegin {
@@ -124,8 +137,11 @@ class OnboardingController(
     /** After a confirmed enrollment (e.g. journal resolution and a live status read in DEVICE mode). */
     private val afterEnrollment: suspend (deviceId: String) -> Unit = {},
     private val io: CoroutineDispatcher = Dispatchers.IO,
+    /** This phone's UTC seconds, for the convenience expiry check of invitations (the device decides). */
+    private val nowUtc: () -> Long = { System.currentTimeMillis() / 1000 },
 ) : AutoCloseable {
     private var label: SetupLabel? = null
+    private var invitation: Invitation? = null
     private var associated: String? = null
 
     /** The device the flow is about: the label's, or a staged one being confirmed. */
@@ -151,11 +167,49 @@ class OnboardingController(
     /** Staged enrollments awaiting confirmation (file names only). */
     suspend fun stagedDevices(): List<String> = withContext(io) { credentials.stagedDevices() }
 
+    /**
+     * Parses a scanned invitation (ADD); the previous one is zeroized. Strict canonical format (7.1 B);
+     * an invitation that is expired on this phone's clock is refused; a clock difference only warns.
+     */
+    fun enterInvitation(text: String): InvitationEntry {
+        clearInvitation()
+        return when (val r = Invitation.parse(text.trim())) {
+            is Invitation.Result.Ok -> {
+                val inv = r.invitation
+                when (inv.timing(nowUtc())) {
+                    Invitation.Timing.EXPIRED -> {
+                        inv.close()
+                        InvitationEntry.Rejected(InvitationEntry.Problem.EXPIRED)
+                    }
+                    else -> {
+                        val id = inv.deviceId.joinToString("") { "%02x".format(it) }
+                        invitation = inv
+                        if (deviceId != id) { associated = null; clearLabel() }
+                        deviceId = id
+                        InvitationEntry.Accepted(id, clockWarning = inv.timing(nowUtc()) == Invitation.Timing.CLOCK_WARNING)
+                    }
+                }
+            }
+            is Invitation.Result.Invalid -> InvitationEntry.Rejected(
+                when (r.problem) {
+                    Invitation.Problem.PREFIX -> InvitationEntry.Problem.NOT_INVITATION
+                    Invitation.Problem.UNSUPPORTED -> InvitationEntry.Problem.UNSUPPORTED
+                    else -> InvitationEntry.Problem.CORRUPT
+                },
+            )
+        }
+    }
+
     /** Parses a typed (or scanned) label; the previous one is zeroized. The text itself is not kept. */
     fun enterLabel(text: String): LabelEntry {
         clearLabel()
         return when (val r = SetupLabel.parse(text)) {
             is SetupLabel.Result.Ok -> {
+                val invited = invitation?.deviceId?.joinToString("") { "%02x".format(it) }
+                if (invited != null && invited != r.label.deviceIdHex) {
+                    r.label.close()
+                    return LabelEntry.Rejected(LabelEntry.Problem.OTHER_DEVICE)
+                }
                 label = r.label
                 if (deviceId != r.label.deviceIdHex) associated = null
                 deviceId = r.label.deviceIdHex
@@ -175,6 +229,7 @@ class OnboardingController(
     /** Confirming a staged enrollment needs no label: the staged key is used (11.7). */
     fun selectStaged(id: String) {
         clearLabel()
+        clearInvitation()
         if (deviceId != id) associated = null
         deviceId = id
     }
@@ -217,6 +272,7 @@ class OnboardingController(
         val request = when (purpose) {
             OnboardingPurpose.CLAIM -> OpenRequest.Claim(l, name)
             OnboardingPurpose.RECOVERY -> OpenRequest.Recovery(l, name)
+            OnboardingPurpose.ADD -> OpenRequest.Add(l, invitation ?: return EnrollOutcome.Failed(EnrollOutcome.Reason.INCOMPLETE), name)
         }
         return finish(l.deviceIdHex, manager.open(address, request))
     }
@@ -240,8 +296,9 @@ class OnboardingController(
 
     private suspend fun finish(id: String, r: OpenResult): EnrollOutcome = when (r) {
         is OpenResult.Opened -> {
-            // the enrollment is committed (or the staged one confirmed): the flow's secret is no longer needed
+            // the enrollment is committed (or the staged one confirmed): the flow's secrets are no longer needed
             clearLabel()
+            clearInvitation()
             val confirmed = withContext(io) { (credentials.load(id) as? CredentialState.Present)?.credential?.use { true } ?: false }
             if (!confirmed) {
                 EnrollOutcome.Failed(EnrollOutcome.Reason.PROTOCOL)
@@ -266,7 +323,15 @@ class OnboardingController(
         label = null
     }
 
-    override fun close() = clearLabel()
+    private fun clearInvitation() {
+        invitation?.close()
+        invitation = null
+    }
+
+    override fun close() {
+        clearLabel()
+        clearInvitation()
+    }
 
     companion object {
         fun reasonOf(f: SessionFailure): EnrollOutcome.Reason = when (f) {

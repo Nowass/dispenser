@@ -24,3 +24,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Dispenser"
 include(":app")
+include(":onboarding-scanner")

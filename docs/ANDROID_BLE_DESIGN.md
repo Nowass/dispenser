@@ -9,13 +9,14 @@ Status: **revision 10 (current implementation status).**
 | M1.10e.2b secure session, firmware-in-the-loop | committed `4b126b2`, `582ad3c`, accepted |
 | M1.10e.3 device repository and operations (section 15) | committed `f7b8c22`, accepted; review fixes `4d7e3b2`, `2a9d20a` (15.5), accepted |
 | M1.10e.4a app mode and data plumbing (section 16) | committed `e7564da`, accepted |
-| M1.10e.4b onboarding / CDM (section 17) | implemented and tested, uncommitted, awaiting the onboarding/security review |
-| M1.10e.4c scanner and invitations, M1.10e.4d device operations | not started; each stops for its review |
+| M1.10e.4b onboarding / CDM (section 17) | committed `75c08a3`, `a811732`, `78f5b97`, `9e51c0b`, accepted |
+| M1.10e.4c scanner and invitations (section 18) | implemented and tested, uncommitted, awaiting the architecture/security review |
+| M1.10e.4d device operations | not started; stops for final M1.10e.4 acceptance |
 | M1.10e.5 real-device interop and acceptance | OPEN (hardware) |
 
 Sections 1–11 are the design baseline written before implementation (revision 2–8); where they
 describe the app "today" they describe the state before M1.10e.1. The implemented state is in
-sections 12–17.
+sections 12–18.
 M1.10d.2, M1.10c.2b and M1.10e.5 stay OPEN; nothing here is evidence for radio behavior.
 
 Baseline: `docs/BLE_PROTOCOL.md` v1.0 as amended by M1.10d.1 (sections 2, 3, 10.4a, 11.3),
@@ -692,14 +693,19 @@ Payload: exactly **79 bytes**, all integers little-endian.
   before sending message 3 — and (3) the XXpsk3 handshake completes (proving the device knows the
   setup code PSK). The QR alone never authenticates the device, and the device never accepts B
   because of the QR alone (it needs the PSK from the setup code **and** the token, plus presence).
-- **Token lifetime and handling:** on A the token exists only in a `SecretBytes` and in the QR
-  bitmap while the invitation screen is shown; both are cleared when the screen closes, the
-  invitation expires, succeeds or is cancelled (`INVITE_CANCEL` offered). On B the decoded payload
+- **Token lifetime and handling (as implemented, M1.10e.4c review F7):** on A the device's token is
+  decrypted into the session's plaintext frame buffer, decoded into a field array (zeroized at once by
+  `Records.invite` after copying it into the `InviteRecord`), and the record's copy is wrapped into a
+  `SecretBytes`, encoded into the QR text and zeroized — on every completion path, also when the caller
+  was cancelled (F6). The decrypted frame buffer is not zeroized (it lives until garbage collection;
+  general hardening item, 18.5). The QR text is a JVM `String` and the rendered QR a `BitMatrix`; neither
+  can be wiped: they are dropped when the invitation expires, is cancelled or the screen closes and live
+  until garbage collection. The invitation screen offers `INVITE_CANCEL`. On B the decoded payload
   lives in a `SecretBytes` only until the ADD attempt ends (success, failure, cancel, expiry,
   process death). Never persisted (no Room, DataStore, files, `SavedStateHandle`, Intent extras),
   never logged (the log spy of 3.3 covers the token), never on the clipboard or in a share
-  intent; the scanner and display screens use `FLAG_SECURE`; ML Kit runs bundled and offline, so
-  camera frames never leave the process.
+  intent; the scanner and display screens use `FLAG_SECURE`; QR decoding (ZXing core, E15 as
+  revised) runs on the device and offline, so camera frames never leave the process.
 
 Reference vector (all values synthetic; `device_static_pub` is a byte pattern, not a real key;
 the token is the "rand" token of `ble_session_v1.txt`):
@@ -733,17 +739,29 @@ length, charset, pad bits, check, version, digest, zero key), manual-entry norma
 binding expectations (`device_id_hash` values) — consumed by Kotlin; the label cases also by the
 provisioning tool's tests.
 
-### 7.2 QR scanning **[E15, approved: ML Kit, bundled]**
+### 7.2 QR scanning **[E15, revised in M1.10e.4c: CameraX + ZXing core; ML Kit rejected]**
 
-- **ML Kit barcode scanning, bundled model** (`com.google.mlkit:barcode-scanning`, offline, no
-  Google Play services or model download at first use; supports the app's minSdk 26) with
-  **CameraX** for the preview, restricted to QR format.
-- **Scoped to onboarding:** a separate Gradle library module `:onboarding-scanner` that only the
-  onboarding/invite screens depend on; `CAMERA` permission requested only when the user opens the
-  scanner; manual code entry always available (no camera needed).
-- Implications to confirm in M1.10e.4: APK size (bundled model, measured per ABI), ML Kit's
-  license terms (Google APIs terms, not open source) recorded in the bundled third-party list,
-  R8 rules; versions pinned in the catalog.
+- **CameraX** (1.6.2: `camera-core`, `camera-camera2`, `camera-lifecycle`, `camera-compose`) for the
+  preview and the frames; **ZXing core** (3.5.4, Apache-2.0, pure Java) decodes the frames' luminance
+  plane on the device, **QR format only** (`QRCodeReader`, `POSSIBLE_FORMATS = QR_CODE`). Fully offline.
+- **Scoped to onboarding:** the separate Gradle library module `:onboarding-scanner` holds every
+  scanner dependency and the implementation; only the onboarding screen uses it; `CAMERA` is
+  requested only when the user opens the scanner; manual setup-code entry always available; an
+  invitation can only be scanned (7.1 B: no manual entry).
+- **Why not ML Kit (original E15 choice, measured in M1.10e.4c):** the bundled
+  `com.google.mlkit:barcode-scanning` 17.3.0 brought (1) Google's telemetry transport
+  (`com.google.android.datatransport` CCT backend, Firebase components, `ACCESS_NETWORK_STATE`,
+  a JobScheduler service and an AlarmManager receiver for deferred uploads) — usage and diagnostic
+  data sent to Google, contradicting the app's rule that the user-initiated update check is its only
+  network use; (2) `MlKitInitProvider`, initializing ML Kit at every app start, DEMO included; (3)
+  +17.8 MB of release APK (3,304,892 → 21,079,703 bytes; `libbarhopper_v3.so` 3.2–5.9 MB per ABI,
+  stored uncompressed, plus 0.9 MB of models); (4) ten proprietary artifacts (ML Kit Terms of
+  Service, Android SDK License) with about 5.8 MB of embedded third-party notices. ZXing has none of
+  these; its trade-off is a lower tolerance of blurred or tilted codes — our codes are short,
+  high-contrast QR codes (46 and 134 characters), verified on real phones in M1.10e.5.
+- **CameraX version:** 1.6.2, the newest whose `camera-compose` does not upgrade the app's Compose /
+  Lifecycle (1.7.0 would move Compose 1.10 → 1.11 and Lifecycle 2.9 → 2.10 app-wide); `camera-view`
+  was not used (it adds AppCompat, Fragment, camera-video and Media3).
 
 ## 8. Implementation milestones
 
@@ -769,7 +787,7 @@ M1.10e.1–.4 need no hardware; .5 depends on the hardware gates (RNG gate first
 | Build-time network | first configure fetches noise-c and libsodium by commit (same as the firmware); CI caches the fetched trees (`DSP_DEPS_CACHE` under the Gradle cache) |
 | APK size | estimate +60–100 KB per ABI (gate probe 54–79 KB stripped); ABIs: arm64-v8a, armeabi-v7a, x86_64 (emulators) — x86 dropped **[E16]**; universal APK ≈ +250 KB |
 | CI time | + NDK/CMake install and 3 ABI builds, host JNI test library and `libdsp_fwsim` builds (estimate +5–10 min, measured in M1.10e.1/.2) |
-| Gradle libraries | none required for e.1–e.3 (coroutines already present via lifecycle; `kotlinx-coroutines-android` pinned explicitly if needed). e.4: ML Kit barcode scanning (bundled) + CameraX in `:onboarding-scanner` only (E15) |
+| Gradle libraries | none required for e.1–e.3 (coroutines already present via lifecycle; `kotlinx-coroutines-android` pinned explicitly if needed). e.4: CameraX + ZXing core in `:onboarding-scanner` only (E15 as revised in M1.10e.4c); ZXing core in `:app` to render invitation QR codes |
 | Vector tooling | Rust toolchain (present locally) + pinned `snow`, `hkdf`, `sha2` crates with committed `Cargo.lock` for `ble_handshake_v1` (generator only; not built in CI unless approved — CI consumes the committed vector file) |
 | FIL build | host CMake + gcc + JDK JNI headers on the CI runner; reuses the firmware's pinned noise-c/libsodium fetch (cached) |
 | R8 | keep rules for JNI classes/`external` methods |
@@ -790,8 +808,9 @@ M1.10e.1–.4 need no hardware; .5 depends on the hardware gates (RNG gate first
 - **No emulator in CI**: instrumented tests remain manual unless [E17] adds an emulator job.
 - **FIL fidelity:** the host build shares all domain/security code with the target but not the
   NimBLE adapter, FreeRTOS scheduling or radio timing; those stay M1.10d.2/M1.10e.5 items.
-- **ML Kit** is proprietary (Google terms) and adds a bundled model; confined to one module and
-  measured in M1.10e.4.
+- **QR decoding robustness:** ZXing (E15 as revised) is less tolerant of blurred or tilted codes than
+  ML Kit would have been; verified with real phones and labels in M1.10e.5; manual setup-code entry
+  stays available.
 
 ## 11. Decisions (E1–E17)
 
@@ -816,7 +835,7 @@ decide them. E9 and E12 are restated more precisely than in revision 2 (scope, n
 | E12 | DEVICE-mode mutations are online only: no offline queue of device edits; every mutation is journaled when its outcome can be lost (11.4) and resolved by read-back; a manual dose is journaled before sending and **never re-issued with a new `seq` automatically** | approve | + no stale offline edits, no duplicate dose; − every change needs a connection (button press); unresolved items block a new manual dose until resolved | for final approval |
 | E13 | SET_TIME only with Android automatic network time on and an uncertainty bound ≤ 2 s; sent when the device clock is not trusted or after REFUSED detail 3 | approve | + never feeds an unreliable phone clock; − phones with a manual clock cannot set device time | for final approval |
 | E14 | Wi-Fi provisioning out of M1.10e (firmware answers UNAVAILABLE) | approve | + smaller scope; − time stays BLE/phone-based until later | for final approval |
-| E15 | Bundled offline ML Kit barcode scanning + CameraX in `:onboarding-scanner`; manual setup-code entry always available (7.2) | — | + reliable offline scanning on minSdk 26; − proprietary dependency and size, confined to one module | **approved** |
+| E15 | **Revised (M1.10e.4c):** CameraX preview/frames + ZXing core QR decoding (QR only) in `:onboarding-scanner`; manual setup-code entry always available (7.2). Originally bundled ML Kit — rejected after measurement: Google telemetry transport, an app-start initializer and +17.8 MB | — | + offline, no telemetry, Apache-2.0, +0.86 MB APK; − less tolerant of poor images (M1.10e.5) | **approved (revised)** |
 | E16 | ABIs arm64-v8a, armeabi-v7a, x86_64 (drop x86) | approve | + smaller APK, x86_64 covers emulators; − no 32-bit x86 | for final approval |
 | E17 | No CI emulator job now; instrumented tests (Keystore, JNI on ART, CDM, UI) run manually and are reported as such | defer | + no CI cost/flakiness; − those tests are not automated | for final approval |
 
@@ -1526,6 +1545,102 @@ The CDM system dialog and its result on real phones (API 26–32 and 33+), permi
 "don't ask again", Bluetooth enable, vendor CDM behaviour with Location Services off, and
 `neverForLocation` (with the fallback scan, if added) are verified on hardware in M1.10e.5; the
 instrumented tests compile in CI and are not run there (E17).
+
+## 18. Implementation notes (M1.10e.4c — QR scanning, invitations and phones)
+
+Implemented and tested, uncommitted, awaiting the architecture/security review. E15 revised (7.2):
+CameraX + ZXing core instead of ML Kit.
+
+### 18.1 Implemented
+
+| Part | Implemented |
+|---|---|
+| `:onboarding-scanner` (new library module) | `QrFrameDecoder` (ZXing `QRCodeReader`, QR only, hybrid binarizer, try-harder; the Y plane with its row stride; returns null for unreadable frames, never throws); `QrResultGate` (one delivery per scanner session: the first non-blank value with a `DSP2` prefix; later frames ignored); `QrScanner` composable: `ImageAnalysis` (keep-only-latest, YUV_420_888) on a single-thread executor and a `camera-compose` viewfinder, bound to the host lifecycle (CameraX stops the camera in the background and closes it on destroy), everything unbound and the executor stopped when it leaves the composition. Manifest: `CAMERA`, `camera` / `camera.autofocus` features not required. |
+| Onboarding | label step: "Načíst QR kód" (camera permission asked only then) next to manual entry; the scanned text goes through the same `SetupLabel.parse` as typed text. ADD ("Připojit pomocí pozvánky", DEMO Settings): invitation step (scan only) → `Invitation.parse` (strict canonical, 7.1 B) and the convenience expiry check (expired on this phone → refused; clocks differ → a warning, still usable; the device decides) → label of the **same** device (another device's label refused) → association → name → `OpenRequest.Add(label, invitation, name)` (the device pins the identity from the invitation, 7.1 B). The ViewModel routes a scanned text by the current step only (invitation or label); repeated detections and late frames after a step change are ignored. The invitation is a SecretBytes in the controller, zeroized with the label (enrollment, cancel, ViewModel cleared). Whole onboarding (camera preview included) FLAG_SECURE. |
+| Owner invitation (`InviteController`, Settings → "Pozvat další telefon") | IK session → `INVITE_CREATE{name_hint}` → the device's 128-bit token wrapped `SecretBytes.takeAndClear` (the response array zeroized) → `Invitation.encode(device id, pinned device key, token, now, expires_s)` → token zeroized; the link is then dropped **without** END_SESSION, so the new phone can connect in the same button-press window (END_SESSION would end the window; the device serves one connection). The QR text is rendered with ZXing (`qrMatrix`, level M, alphanumeric mode, quiet zone 4; dark on white) only on the FLAG_SECURE invitation screen, dropped on expiry, cancel ("Zrušit pozvánku": reconnect + `INVITE_CANCEL`) and when the screen closes. Not journaled (an uncertain invitation is harmless: single use, ≤ 10 min, its token is lost). |
+| Phones (`PhonesController`, Settings → "Telefony") | `PHONES_LIST` (this phone marked) and `PHONE_REMOVE` of **other** phones (journaled, M1.10e.3; Uncertain → "verified at the next connection, do not repeat"); this phone's own slot is not removable here ("Forget device" here, removal from another phone); the session is ended when the screen closes. |
+| Licences | `third_party_licenses.json` regenerated (19 new artifacts, Apache-2.0 except `camera-core`); `notices/androidx-camera-core.txt`: the artifact's own Apache-2.0 LICENSE verbatim plus libyuv's BSD-3-Clause LICENSE verbatim (the POM declares BSD-3-Clause for CameraX's native image processing). Only existing library upgraded transitively: `androidx.tracing` 1.2.0 → 1.3.0. |
+
+### 18.2 Release APK and manifest
+
+- Release APK **4,167,242 bytes** vs the 3,304,892-byte baseline (main `9e51c0b`): **+862,350 bytes
+  (+26.1 %)** (the ML Kit build was 21,079,703 bytes). Native code added: CameraX's
+  `libimage_processing_util_jni` + `libsurface_util_jni` (37 / 28 / 54 KB for arm64-v8a / armeabi-v7a /
+  x86_64); the rest is dex (CameraX, ZXing, Dagger from `camera-camera2-pipe`).
+- Merged release manifest (aapt2): permissions `INTERNET` (update check), `BLUETOOTH_CONNECT`,
+  `BLUETOOTH`/`BLUETOOTH_ADMIN` (≤ 30), `CAMERA`; components added: only CameraX's
+  `MetadataHolderService` (not exported). No ML Kit initializer, no Google telemetry transport, no
+  `ACCESS_NETWORK_STATE`, no scheduler service or boot/alarm receiver (also asserted by a test).
+
+### 18.3 Tests
+
+- `:onboarding-scanner`: `QrFrameDecoderTest` (3: a label and an invitation decoded from padded,
+  noisy camera-like frames; Code 128 and Data Matrix not decoded; no code / malformed input → null),
+  `QrResultGateTest` (2: one delivery per session, unknown codes ignored).
+- `QrCodeTest` (2: the reference invitation is alphanumeric mode, level M; a rendered matrix reads back
+  exactly).
+- `InviteAndPhonesTest` (3, scripted device: the device token zeroized after encoding, the QR text
+  carries the pinned device key, id and times, the connection freed, `toString` never shows the code;
+  typed invitation failures, an over-long name hint refused before connecting; phone list, own slot
+  never removed (nothing sent), removal outcomes incl. Uncertain / Unresolved / InProgress).
+- `InvitationFirmwareTest` (3, real firmware): the owner invites (connection freed, the invitation
+  names the pinned identity, lifetime ≤ 600 s), the new phone joins with the scanned text and the
+  label (slot 1), the owner lists both phones, cannot remove itself, removes the new phone, which then
+  fails to authenticate; a cancelled invitation no longer works and nothing is stored; expiry beyond
+  the grace refused, clock difference warned, another device's label refused, a label QR or a damaged
+  invitation rejected.
+- `OnboardingViewModelTest` (+1): scans routed by step; a label QR in the invitation step rejected;
+  another device's label refused; late frames after the step changed ignored.
+- `OnboardingUiTest` (+6, Robolectric): merged manifest (CAMERA requested, camera features not
+  required, no location / scan / network-state / boot / wake-lock permission); no ML Kit, Google
+  telemetry, Firebase or Play-services component merged and no such class on the classpath; the
+  invitation screen is FLAG_SECURE and shows the code; the label step asks for the camera only when the
+  scanner is opened and keeps manual entry; the phone list offers removal of other phones only, with a
+  confirmation; Settings entries (phones, invite, join by invitation). `FullScreenRouteTest`: the two
+  new routes.
+- Mutation checks (each fails a test): the gate delivering every frame, scans routed in every step,
+  the device token not zeroized, an expired invitation accepted, another device's label accepted, the
+  own slot removable, the invitation screen without FLAG_SECURE, the owner keeping the connection.
+
+### 18.5 Security review fixes (F6, F7) and a hardening item
+
+**F6 — invitation creation under cancellation and exceptions (fixed).** Before: if the invitation
+screen was closed while INVITE_CREATE was in flight, the manager-owned request completed but the
+cancelled caller never processed it — the owner's authenticated session stayed open (blocking the new
+phone until the device's idle timeout) and the token copy was never cleared; an exception after the
+answer (e.g. the encoder rejecting an implausible phone clock) skipped the disconnect and escaped the
+ViewModel (crash). Now `InviteController.create`: once INVITE_CREATE is submitted, its outcome is
+processed `NonCancellable` (the token is cleared after its last use in a `finally`); the hard disconnect
+(never END_SESSION, to keep the service window) runs in a `finally` on every path, also for a cancelled
+caller; credential, transport, repository and encoding exceptions become `InviteOutcome.Failed`
+(`CREDENTIAL`, `NOT_CONNECTED`, `INVALID`); `cancel()` likewise never throws and always drops the link;
+the ViewModel additionally maps anything unexpected to a failure. One INVITE_CREATE per user action, no
+retry (a cancelled caller's invitation is simply never shown: single use, ≤ 10 min on the device).
+
+**F7 — token copies (limited fix).** The decoded field array is NOT aliased by the `InviteRecord` (the
+record holds a copy); `Records.invite` now zeroizes the decoded array right after copying, so the
+record is the only codec-level copy, and F6 clears it on every path. Accurate residuals (7.1): the
+decrypted frame buffer in `SecureSession` (not zeroized; garbage collection), the QR text `String` and
+the QR `BitMatrix` (not wipeable on the JVM; dropped when the screen closes).
+
+**Hardening item (separate, for later review):** zeroize decrypted plaintext buffers (and decoded byte
+fields of sensitive responses) generally in `SecureSession` / the codec after decoding — not done in
+M1.10e.4c to avoid a broad change in the session layer.
+
+Tests (`InviteAndPhonesTest`, +4): a caller cancelled while INVITE_CREATE is in flight still clears the
+token and gets exactly one hard disconnect, with exactly one INVITE_CREATE; an encoding failure (lifetime
+over 600 s, implausible clock) clears the token, disconnects and reports `Failed(INVALID)`; transport and
+repository exceptions are failures with a hard disconnect (also for `cancel()`); the decoded token array
+is not aliased and is zeroized. Mutation checks: outcome processing cancellable (1 failure), no
+disconnect in `finally` (4), encoding failure thrown (1), decoded array not zeroized (1).
+
+### 18.4 Notes for the review
+
+- ZXing's `QRCodeReader` cannot decode other symbologies, so the QR-only restriction does not depend on
+  the hint alone.
+- The scanned or typed text is a JVM String (as in 17.1); the parsed secrets are SecretBytes.
+- CameraX stopping the camera in the background is CameraX's lifecycle contract (bound to the
+  onboarding screen's lifecycle owner); it is verified on real phones in M1.10e.5 (no camera in CI).
 
 ---
 

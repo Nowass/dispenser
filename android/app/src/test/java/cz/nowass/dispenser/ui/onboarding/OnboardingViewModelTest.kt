@@ -121,6 +121,34 @@ class OnboardingViewModelTest {
     }
 
     @Test
+    fun scans_are_routed_by_step_and_never_trigger_a_second_action() = runBlocking {
+        val vm = ViewModelProvider(ViewModelStore(), OnboardingViewModel.factory(OnboardingPurpose.ADD) { controller() })[OnboardingViewModel::class.java]
+        vm.start()
+        vm.awaitStep(OnboardingStep.INVITATION)
+        // another QR code (a label) in the invitation step: rejected, still in the step
+        vm.onScanned(SetupLabel.format(deviceId, setup))
+        assertEquals(cz.nowass.dispenser.data.onboarding.InvitationEntry.Problem.NOT_INVITATION, vm.state.value.invitationProblem)
+        assertEquals(OnboardingStep.INVITATION, vm.state.value.step)
+        val now = System.currentTimeMillis() / 1000
+        val invite = cz.nowass.dispenser.crypto.Invitation.encode(
+            ByteArray(6) { deviceId.substring(2 * it, 2 * it + 2).toInt(16).toByte() }, ByteArray(32) { 9 },
+            cz.nowass.dispenser.crypto.SecretBytes.wrap(ByteArray(16) { 3 }), now, 600)
+        vm.onScanned(invite)
+        assertEquals(OnboardingStep.LABEL, vm.awaitStep(OnboardingStep.LABEL).step)
+        // a label of another device is refused while the invitation is held
+        vm.onScanned(SetupLabel.format("ffffffffffff", setup))
+        assertEquals(LabelEntry.Problem.OTHER_DEVICE, vm.state.value.labelProblem)
+        vm.onScanned(SetupLabel.format(deviceId, setup))
+        vm.awaitStep(OnboardingStep.ASSOCIATE)
+        // late frames after the step changed are ignored (neither a new label nor an error)
+        vm.onScanned(SetupLabel.format(deviceId, setup))
+        vm.onScanned(invite)
+        assertEquals(OnboardingStep.ASSOCIATE, vm.state.value.step)
+        assertNull(vm.state.value.labelProblem)
+        assertNull(vm.state.value.invitationProblem)
+    }
+
+    @Test
     fun a_staged_enrollment_is_shown_first_and_clearing_the_viewmodel_zeroizes_the_label() = runBlocking {
         wake()
         ports.dropFrameType = SecureSession.T_ENROLL_RESULT

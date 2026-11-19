@@ -45,6 +45,10 @@ import cz.nowass.dispenser.device.transport.GattTransportFactory
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
 import android.content.pm.PackageManager
 import cz.nowass.dispenser.data.onboarding.ForgetDevice
+import cz.nowass.dispenser.data.onboarding.InviteController
+import cz.nowass.dispenser.data.onboarding.PhonesController
+import cz.nowass.dispenser.ui.devices.InviteViewModel
+import cz.nowass.dispenser.ui.devices.PhonesViewModel
 import cz.nowass.dispenser.data.onboarding.ForgetResult
 import cz.nowass.dispenser.data.onboarding.ForgetSessions
 import cz.nowass.dispenser.data.device.CredentialHealth
@@ -295,6 +299,12 @@ class AppContainer(private val context: Context) {
         forget = { (mode as? ResolvedMode.Device)?.deviceId?.let(::forget) },
         forgetNotice = forgetNotice,
         dismissForgetNotice = { forgetNotice.value = null },
+        inviteFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->
+            { InviteViewModel.factory { InviteController(deviceUi(id).device, credentials) } }
+        },
+        phonesFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->
+            { PhonesViewModel.factory({ PhonesController(deviceUi(id).device) }, runAfterClose = { block -> appScope.launch { block() } }) }
+        },
     )
 
     /** Public GitHub Releases source (owner/repo from gradle.properties via resources; no credentials). */

@@ -225,7 +225,20 @@ object Records {
         PhoneRecord(it.int("slot"), it.str("name"), it.long("enrolled_at"), it.long("last_seen"), it.bool("is_self"))
     }
 
-    fun invite(body: Map<String, Any>) = InviteRecord((body["token"] as ByteArray).copyOf(), body.int("expires_s"))
+    /**
+     * INVITE_CREATE response. The token is copied into the record and the decoded field array is zeroized
+     * at once (security review F7, invite only): the record is the only codec-level copy left, and the
+     * invitation controller clears it after its last use. The decrypted frame buffer the codec decoded
+     * from is not zeroized here (general hardening item, docs/ANDROID_BLE_DESIGN.md 18.5).
+     */
+    fun invite(body: Map<String, Any>): InviteRecord {
+        val decoded = body["token"] as ByteArray
+        return try {
+            InviteRecord(decoded.copyOf(), body.int("expires_s"))
+        } finally {
+            decoded.fill(0)
+        }
+    }
 
     fun manualDose(body: Map<String, Any>) =
         ManualDoseRecord(body.int("outcome"), body.long("volume_ul"), body.long("runtime_ms"), statusRecord(body.rec("status")))

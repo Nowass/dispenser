@@ -115,6 +115,11 @@ data class SettingsDeviceAdmin(
     val onSwitchToDevice: () -> Unit = {},
     val onSwitchToDemo: () -> Unit = {},
     val onForget: () -> Unit = {},
+    /** DEMO: join a device with an owner's invitation (ADD). */
+    val onAddByInvitation: () -> Unit = {},
+    /** DEVICE: the device's phone list / an invitation for another phone (null hides them). */
+    val onPhones: (() -> Unit)? = null,
+    val onInvite: (() -> Unit)? = null,
     /** The last "Forget device" outcome that needs attention (shown in either mode). */
     val forgetNotice: ForgetNotice? = null,
     val onDismissForgetNotice: () -> Unit = {},
@@ -342,6 +347,9 @@ fun SettingsScreen(
                         Column(Modifier.padding(horizontal = Spacing.m, vertical = Spacing.s), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                             if (recovery != null) {
                                 OutlinedButton(onClick = deviceAdmin.onRecover, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_recover)) }
+                            } else {
+                                deviceAdmin.onPhones?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_phones)) } }
+                                deviceAdmin.onInvite?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_invite)) } }
                             }
                             OutlinedButton(onClick = deviceAdmin.onSwitchToDemo, modifier = Modifier.fillMaxWidth()) {
                                 Text(stringResource(R.string.settings_device_switch_to_demo))
@@ -372,6 +380,7 @@ fun SettingsScreen(
                                 Button(onClick = deviceAdmin.onConnect, modifier = Modifier.padding(top = Spacing.s).testTag(SETTINGS_DEVICE_CONNECT_TEST_TAG)) {
                                     Text(stringResource(R.string.settings_device_connect))
                                 }
+                                TextButton(onClick = deviceAdmin.onAddByInvitation) { Text(stringResource(R.string.settings_device_add_by_invitation)) }
                                 TextButton(onClick = deviceAdmin.onRecover) { Text(stringResource(R.string.settings_device_recover)) }
                             }
                         }

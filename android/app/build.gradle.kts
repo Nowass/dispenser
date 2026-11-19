@@ -307,6 +307,9 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.kotlinx.serialization.json)
+    // M1.10e.4c: QR scanning only in its own module (E15); ZXing core only renders invitation QR codes.
+    implementation(project(":onboarding-scanner"))
+    implementation(libs.zxing.core)
     ksp(libs.androidx.room.compiler)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)

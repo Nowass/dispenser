@@ -1,10 +1,7 @@
 package cz.nowass.dispenser.ui.onboarding
 
 import android.app.Activity
-import android.content.Context
-import android.content.ContextWrapper
 import android.content.Intent
-import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,7 +27,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,39 +48,22 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cz.nowass.dispenser.R
 import cz.nowass.dispenser.data.onboarding.EnrollOutcome
 import cz.nowass.dispenser.data.onboarding.EnrollPhase
+import cz.nowass.dispenser.data.onboarding.InvitationEntry
 import cz.nowass.dispenser.data.onboarding.LabelEntry
 import cz.nowass.dispenser.data.onboarding.OnboardingPurpose
 import cz.nowass.dispenser.data.onboarding.OnboardingReadiness
 import cz.nowass.dispenser.data.onboarding.PhoneName
 import cz.nowass.dispenser.ui.components.DetailTopBar
+import cz.nowass.dispenser.ui.components.SecureWindow
 import cz.nowass.dispenser.ui.theme.DispenserTheme
 import cz.nowass.dispenser.ui.theme.Spacing
 
 const val ONBOARDING_LABEL_FIELD_TEST_TAG = "onboarding_label_field"
+const val ONBOARDING_SCAN_TEST_TAG = "onboarding_scan"
 const val ONBOARDING_STEP_TEST_TAG = "onboarding_step_"
 
 /** android.bluetooth.adapter.action.REQUEST_ENABLE (the UI layer does not import android.bluetooth). */
 private const val ACTION_REQUEST_ENABLE = "android.bluetooth.adapter.action.REQUEST_ENABLE"
-
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
-}
-
-/**
- * While the onboarding is shown, the window is FLAG_SECURE (no screenshots, screen recording or recents
- * thumbnail of the setup code; docs/ANDROID_BLE_DESIGN.md 7.1).
- */
-@Composable
-internal fun SecureWindow() {
-    val activity = LocalContext.current.findActivity()
-    DisposableEffect(activity) {
-        val window = activity?.window
-        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
-    }
-}
 
 @Composable
 fun OnboardingRoute(viewModel: OnboardingViewModel, isDemo: Boolean, onClose: () -> Unit) {
@@ -94,6 +73,16 @@ fun OnboardingRoute(viewModel: OnboardingViewModel, isDemo: Boolean, onClose: ()
 
     val permissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { viewModel.recheckReadiness() }
     val enableBluetooth = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { viewModel.recheckReadiness() }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var cameraGranted by remember {
+        mutableStateOf(androidx.core.content.ContextCompat.checkSelfPermission(context, CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+    }
+    var cameraDenied by remember { mutableStateOf(false) }
+    // asked only when the user opens the scanner (never in DEMO, never at start)
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        cameraGranted = granted
+        cameraDenied = !granted
+    }
     val association = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { r ->
         viewModel.onAssociationResult(if (r.resultCode == Activity.RESULT_OK) r.data else null)
     }
@@ -120,9 +109,17 @@ fun OnboardingRoute(viewModel: OnboardingViewModel, isDemo: Boolean, onClose: ()
             confirmStaged = viewModel::confirmStaged,
             discardStaged = viewModel::discardStaged,
             finish = viewModel::finish,
+            scanned = viewModel::onScanned,
+            requestCamera = { camera.launch(CAMERA) },
         ),
+        camera = CameraState(granted = cameraGranted, denied = cameraDenied),
     )
 }
+
+private const val CAMERA = "android.permission.CAMERA"
+
+/** Camera permission as the onboarding screen knows it (asked only when the scanner is opened). */
+data class CameraState(val granted: Boolean = false, val denied: Boolean = false)
 
 data class OnboardingActions(
     val start: () -> Unit = {},
@@ -136,22 +133,46 @@ data class OnboardingActions(
     val confirmStaged: () -> Unit = {},
     val discardStaged: () -> Unit = {},
     val finish: () -> Unit = {},
+    /** A QR text from the scanner (routed by the ViewModel to the current step only). */
+    val scanned: (String) -> Unit = {},
+    val requestCamera: () -> Unit = {},
 )
 
 @Composable
-fun OnboardingScreen(state: OnboardingUiState, isDemo: Boolean, onClose: () -> Unit, actions: OnboardingActions) {
+fun OnboardingScreen(
+    state: OnboardingUiState,
+    isDemo: Boolean,
+    onClose: () -> Unit,
+    actions: OnboardingActions,
+    camera: CameraState = CameraState(),
+    /** Renders the camera scanner; replaced in previews and tests (no camera there). */
+    scanner: @Composable (onScanned: (String) -> Unit) -> Unit = { onScanned ->
+        cz.nowass.dispenser.scanner.QrScanner(onScanned, Modifier.fillMaxWidth().heightIn(min = 280.dp), acceptedPrefixes = listOf("DSP2"))
+    },
+) {
+    SecureWindow() // setup code, scanned invitation and camera preview are never captured
     val recovery = state.purpose == OnboardingPurpose.RECOVERY
     Column(Modifier.fillMaxSize()) {
-        DetailTopBar(stringResource(if (recovery) R.string.onboarding_title_recovery else R.string.onboarding_title), isDemo, onClose)
+        DetailTopBar(
+            stringResource(
+                when (state.purpose) {
+                    OnboardingPurpose.RECOVERY -> R.string.onboarding_title_recovery
+                    OnboardingPurpose.ADD -> R.string.onboarding_title_add
+                    OnboardingPurpose.CLAIM -> R.string.onboarding_title
+                },
+            ),
+            isDemo, onClose,
+        )
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = Spacing.m, vertical = Spacing.s)
                 .testTag(ONBOARDING_STEP_TEST_TAG + state.step.name),
             verticalArrangement = Arrangement.spacedBy(Spacing.m),
         ) {
             when (state.step) {
-                OnboardingStep.INTRO -> Intro(recovery, actions)
+                OnboardingStep.INTRO -> Intro(state.purpose, actions)
                 OnboardingStep.READINESS -> Readiness(state.readiness, actions)
-                OnboardingStep.LABEL -> Label(state.labelProblem, actions)
+                OnboardingStep.INVITATION -> InvitationStep(state.invitationProblem, camera, actions, scanner)
+                OnboardingStep.LABEL -> Label(state, camera, actions, scanner)
                 OnboardingStep.ASSOCIATE -> Associate(state, recovery, actions)
                 OnboardingStep.NAME -> Name(recovery, actions)
                 OnboardingStep.WORKING -> Working(state.phase, recovery)
@@ -190,11 +211,12 @@ private fun Problem(text: String) = Text(
 )
 
 @Composable
-private fun Intro(recovery: Boolean, actions: OnboardingActions) {
+private fun Intro(purpose: OnboardingPurpose, actions: OnboardingActions) {
     Section {
         Text(stringResource(R.string.onboarding_intro_title), style = MaterialTheme.typography.titleMedium)
+        if (purpose == OnboardingPurpose.ADD) Body(stringResource(R.string.onboarding_intro_invitation))
         Body(stringResource(R.string.onboarding_intro_label))
-        Body(stringResource(if (recovery) R.string.onboarding_intro_window_recovery else R.string.onboarding_intro_window))
+        Body(stringResource(if (purpose == OnboardingPurpose.RECOVERY) R.string.onboarding_intro_window_recovery else R.string.onboarding_intro_window))
         Body(stringResource(R.string.onboarding_intro_bluetooth))
     }
     Primary(stringResource(R.string.onboarding_continue), onClick = actions.start)
@@ -220,13 +242,73 @@ private fun Readiness(readiness: OnboardingReadiness?, actions: OnboardingAction
     }
 }
 
+/** The camera scanner, opened by the user; asks for the camera permission first. */
 @Composable
-private fun Label(problem: LabelEntry.Problem?, actions: OnboardingActions) {
+private fun ScannerArea(
+    camera: CameraState,
+    actions: OnboardingActions,
+    scanner: @Composable (onScanned: (String) -> Unit) -> Unit,
+    deniedText: Int,
+    open: Boolean,
+    onOpen: () -> Unit,
+) {
+    when {
+        !open -> OutlinedButton(onClick = { onOpen(); if (!camera.granted) actions.requestCamera() }, modifier = Modifier.fillMaxWidth().testTag(ONBOARDING_SCAN_TEST_TAG)) {
+            Text(stringResource(R.string.onboarding_scan_open))
+        }
+        camera.granted -> scanner(actions.scanned)
+        camera.denied -> Problem(stringResource(deniedText))
+        else -> Body(stringResource(R.string.onboarding_scan_permission))
+    }
+}
+
+@Composable
+private fun InvitationStep(
+    problem: InvitationEntry.Problem?,
+    camera: CameraState,
+    actions: OnboardingActions,
+    scanner: @Composable (onScanned: (String) -> Unit) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Section {
+        Text(stringResource(R.string.onboarding_invitation_title), style = MaterialTheme.typography.titleMedium)
+        Body(stringResource(R.string.onboarding_invitation_hint))
+        problem?.let {
+            Problem(
+                stringResource(
+                    when (it) {
+                        InvitationEntry.Problem.NOT_INVITATION -> R.string.onboarding_invitation_err_not_invitation
+                        InvitationEntry.Problem.CORRUPT -> R.string.onboarding_invitation_err_corrupt
+                        InvitationEntry.Problem.UNSUPPORTED -> R.string.onboarding_invitation_err_unsupported
+                        InvitationEntry.Problem.EXPIRED -> R.string.onboarding_invitation_err_expired
+                    },
+                ),
+            )
+        }
+        // a rejected scan opens a fresh scanner (a new gate) on the next attempt
+        ScannerArea(camera, actions, scanner, R.string.onboarding_scan_denied_invitation, open && problem == null) { open = true }
+    }
+}
+
+@Composable
+private fun Label(
+    state: OnboardingUiState,
+    camera: CameraState,
+    actions: OnboardingActions,
+    scanner: @Composable (onScanned: (String) -> Unit) -> Unit,
+) {
+    val problem = state.labelProblem
+    var scanning by remember { mutableStateOf(false) }
     // The setup code is held only in this non-saveable state (never in the saved instance state) and
     // cleared as soon as it was handed over; the keyboard is told not to learn or suggest it.
     var text by remember { mutableStateOf("") }
     Section {
         Text(stringResource(R.string.onboarding_label_title), style = MaterialTheme.typography.titleMedium)
+        if (state.purpose == OnboardingPurpose.ADD) {
+            state.deviceId?.let { Body(stringResource(R.string.onboarding_invitation_accepted, it)) }
+            if (state.invitationClockWarning) Body(stringResource(R.string.onboarding_invitation_clock_warning))
+        }
+        ScannerArea(camera, actions, scanner, R.string.onboarding_scan_denied_label, scanning && problem == null) { scanning = true }
         Body(stringResource(R.string.onboarding_label_hint))
         OutlinedTextField(
             value = text,
@@ -250,11 +332,11 @@ private fun Label(problem: LabelEntry.Problem?, actions: OnboardingActions) {
                         LabelEntry.Problem.DEVICE_ID -> R.string.onboarding_label_err_device
                         LabelEntry.Problem.CODE -> R.string.onboarding_label_err_code
                         LabelEntry.Problem.CHECK -> R.string.onboarding_label_err_check
+                        LabelEntry.Problem.OTHER_DEVICE -> R.string.onboarding_label_err_other_device
                     },
                 ),
             )
         }
-        Body(stringResource(R.string.onboarding_label_scan_later))
     }
     Primary(stringResource(R.string.onboarding_continue), enabled = text.isNotBlank()) {
         if (actions.submitLabel(text)) text = ""

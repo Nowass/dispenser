@@ -11,6 +11,7 @@ import cz.nowass.dispenser.data.onboarding.AssociationBegin
 import cz.nowass.dispenser.data.onboarding.AssociationOutcome
 import cz.nowass.dispenser.data.onboarding.EnrollOutcome
 import cz.nowass.dispenser.data.onboarding.EnrollPhase
+import cz.nowass.dispenser.data.onboarding.InvitationEntry
 import cz.nowass.dispenser.data.onboarding.LabelEntry
 import cz.nowass.dispenser.data.onboarding.OnboardingController
 import cz.nowass.dispenser.data.onboarding.OnboardingPurpose
@@ -28,6 +29,8 @@ enum class OnboardingStep {
     INTRO,
     /** Bluetooth off, permission missing or unsupported. */
     READINESS,
+    /** ADD: scan the owner's invitation QR code (no manual entry). */
+    INVITATION,
     LABEL,
     ASSOCIATE,
     NAME,
@@ -46,6 +49,9 @@ data class OnboardingUiState(
     val readiness: OnboardingReadiness? = null,
     val deviceId: String? = null,
     val labelProblem: LabelEntry.Problem? = null,
+    val invitationProblem: InvitationEntry.Problem? = null,
+    /** ADD: the phones' clocks differ (the invitation is still usable; the device decides). */
+    val invitationClockWarning: Boolean = false,
     val associationProblem: AssociationProblem? = null,
     val phase: EnrollPhase? = null,
     val failure: EnrollOutcome.Reason? = null,
@@ -82,10 +88,37 @@ class OnboardingViewModel(
         }
     }
 
-    fun start() = checkReadiness(next = OnboardingStep.LABEL)
+    private val firstStep: OnboardingStep get() = if (_state.value.purpose == OnboardingPurpose.ADD) OnboardingStep.INVITATION else OnboardingStep.LABEL
+
+    fun start() = checkReadiness(next = firstStep)
 
     /** After a permission or Bluetooth-enable result. */
-    fun recheckReadiness() = checkReadiness(next = if (_state.value.confirmingStaged) OnboardingStep.UNCONFIRMED else OnboardingStep.LABEL)
+    fun recheckReadiness() = checkReadiness(next = if (_state.value.confirmingStaged) OnboardingStep.UNCONFIRMED else firstStep)
+
+    /**
+     * A QR text from the scanner. Routed by the current step only (label or invitation), so repeated
+     * detections across frames, or a late frame after the step changed, never trigger a second action.
+     */
+    fun onScanned(text: String) {
+        when (_state.value.step) {
+            OnboardingStep.INVITATION -> submitInvitation(text)
+            OnboardingStep.LABEL -> submitLabel(text)
+            else -> Unit
+        }
+    }
+
+    fun submitInvitation(text: String): Boolean = when (val r = controller.enterInvitation(text)) {
+        is InvitationEntry.Accepted -> {
+            _state.update {
+                it.copy(deviceId = r.deviceId, invitationProblem = null, invitationClockWarning = r.clockWarning, labelProblem = null, step = OnboardingStep.LABEL)
+            }
+            true
+        }
+        is InvitationEntry.Rejected -> {
+            _state.update { it.copy(invitationProblem = r.problem) }
+            false
+        }
+    }
 
     private fun checkReadiness(next: OnboardingStep) {
         val r = controller.readiness()
@@ -187,7 +220,7 @@ class OnboardingViewModel(
                 step = when {
                     s.confirmingStaged || s.failedWithStaged -> OnboardingStep.UNCONFIRMED
                     s.failure == EnrollOutcome.Reason.WRONG_DEVICE || s.failure == EnrollOutcome.Reason.HANDSHAKE -> OnboardingStep.LABEL
-                    s.failure == EnrollOutcome.Reason.INCOMPLETE -> OnboardingStep.LABEL
+                    s.failure == EnrollOutcome.Reason.INCOMPLETE -> firstStep
                     else -> OnboardingStep.NAME
                 },
             )

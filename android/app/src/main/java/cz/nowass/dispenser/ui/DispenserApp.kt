@@ -111,8 +111,12 @@ const val ABOUT_LICENSE_TEXT_ROUTE = "about_license_text"
 /** Backup and restore (full-screen route, A1.4c.1). */
 const val BACKUP_ROUTE = "backup"
 
-/** Onboarding: pairing (CLAIM) or recovery (full-screen route, M1.10e.4b). */
+/** Onboarding: pairing (CLAIM), recovery or joining by invitation (full-screen route, M1.10e.4b/c). */
 const val ONBOARDING_ROUTE = "onboarding"
+
+/** DEVICE mode: invite another phone / the device's phone list (full-screen routes, M1.10e.4c). */
+const val INVITE_ROUTE = "invite"
+const val PHONES_ROUTE = "phones"
 
 /**
  * Device administration for the shell (M1.10e.4b): pairing entry, mode switch, "Forget device". The
@@ -130,6 +134,9 @@ class DeviceAdminUi(
     val forgetNotice: kotlinx.coroutines.flow.StateFlow<cz.nowass.dispenser.ui.settings.ForgetNotice?> =
         kotlinx.coroutines.flow.MutableStateFlow(null),
     val dismissForgetNotice: () -> Unit = {},
+    /** DEVICE mode only: the owner's invitation and phone list screens. */
+    val inviteFactory: (() -> androidx.lifecycle.ViewModelProvider.Factory)? = null,
+    val phonesFactory: (() -> androidx.lifecycle.ViewModelProvider.Factory)? = null,
 )
 
 /**
@@ -138,7 +145,7 @@ class DeviceAdminUi(
  */
 internal fun isFullScreenRoute(route: String?): Boolean {
     val base = route?.substringBefore('?') ?: return false
-    return base in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE, BACKUP_ROUTE, ONBOARDING_ROUTE) || base.startsWith(ABOUT_ROUTE)
+    return base in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE, BACKUP_ROUTE, ONBOARDING_ROUTE, INVITE_ROUTE, PHONES_ROUTE) || base.startsWith(ABOUT_ROUTE)
 }
 
 private const val ARG_TITLE = "title"
@@ -286,6 +293,9 @@ fun DispenserApp(
                             onForget = admin.forget,
                             forgetNotice = notice,
                             onDismissForgetNotice = admin.dismissForgetNotice,
+                            onAddByInvitation = { navController.navigate("$ONBOARDING_ROUTE?purpose=ADD") { launchSingleTop = true } },
+                            onPhones = admin.phonesFactory?.let { { navController.navigate(PHONES_ROUTE) { launchSingleTop = true } } },
+                            onInvite = admin.inviteFactory?.let { { navController.navigate(INVITE_ROUTE) { launchSingleTop = true } } },
                         )
                     },
                     initialTab = entry.arguments?.getString(ARG_TAB),
@@ -319,6 +329,16 @@ fun DispenserApp(
                         isDemo = isDemo,
                         onClose = { navController.popBackStack() },
                     )
+                }
+            }
+            deviceAdmin?.inviteFactory?.let { factory ->
+                composable(INVITE_ROUTE) {
+                    cz.nowass.dispenser.ui.devices.InviteRoute(viewModel(factory = factory()), onBack = { navController.popBackStack() })
+                }
+            }
+            deviceAdmin?.phonesFactory?.let { factory ->
+                composable(PHONES_ROUTE) {
+                    cz.nowass.dispenser.ui.devices.PhonesRoute(viewModel(factory = factory()), onBack = { navController.popBackStack() })
                 }
             }
             if (backupViewModelFactory != null) {

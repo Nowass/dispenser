@@ -84,6 +84,8 @@ val nativeComponents = listOf(
  */
 val libraryNotices = mapOf(
     "androidx.datastore:datastore-preferences-external-protobuf" to "notices/datastore-preferences-external-protobuf.txt",
+    // M1.10e.4c (CameraX in :onboarding-scanner): Apache-2.0 + libyuv's BSD-3-Clause
+    "androidx.camera:camera-core" to "notices/androidx-camera-core.txt",
 )
 
 fun String.json(): String = buildString {

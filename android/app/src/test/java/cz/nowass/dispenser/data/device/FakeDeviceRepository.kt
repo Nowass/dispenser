@@ -47,8 +47,18 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
     val pendingF = MutableStateFlow<List<PendingOp>>(emptyList())
     override fun pendingOperations(): Flow<List<PendingOp>> = pendingF
 
-    override suspend fun connect(): ConnectOutcome = ConnectOutcome.NoAddress
-    override suspend fun disconnect(graceful: Boolean) = Unit
+    var connectOutcome: ConnectOutcome = ConnectOutcome.NoAddress
+    var connectThrows: Exception? = null
+    var disconnects = 0
+    val disconnectModes = mutableListOf<Boolean>()
+    override suspend fun connect(): ConnectOutcome { connectThrows?.let { throw it }; return connectOutcome }
+    override suspend fun disconnect(graceful: Boolean) { disconnects++; disconnectModes += graceful }
+    /** Runs inside createInvite before it answers (e.g. suspends while the caller is cancelled). */
+    var inviteHook: suspend () -> Unit = {}
+    var inviteOutcome: OpResult<InviteRecord> = OpResult.NotSent("not connected")
+    var cancelOutcome: OpResult<Unit> = OpResult.NotSent("not connected")
+    var phonesOutcome: OpResult<List<PhoneRecord>> = OpResult.NotSent("not connected")
+    var removeOutcome: OpResult<Unit> = OpResult.NotSent("not connected")
 
     override suspend fun createSchedule(draft: ScheduleDraft): OpResult<ScheduleWrite> { calls += "create"; return writeOutcome }
     override suspend fun updateSchedule(id: String, expectedRevision: Long, draft: ScheduleDraft): OpResult<ScheduleWrite> {
@@ -70,10 +80,10 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
     override suspend fun acknowledge(journalId: Long): OpResult<Unit> = no()
     override suspend fun setReadiness(readiness: Readiness): OpResult<StatusRecord> = no()
     override suspend fun setTime(): OpResult<TimeDecisionRecord> = no()
-    override suspend fun refreshPhones(): OpResult<List<PhoneRecord>> = no()
-    override suspend fun removePhone(slot: Int): OpResult<Unit> = no()
-    override suspend fun createInvite(nameHint: String): OpResult<InviteRecord> = no()
-    override suspend fun cancelInvite(): OpResult<Unit> = no()
+    override suspend fun refreshPhones(): OpResult<List<PhoneRecord>> = phonesOutcome
+    override suspend fun removePhone(slot: Int): OpResult<Unit> { calls += "remove $slot"; return removeOutcome }
+    override suspend fun createInvite(nameHint: String): OpResult<InviteRecord> { calls += "invite $nameHint"; inviteHook(); return inviteOutcome }
+    override suspend fun cancelInvite(): OpResult<Unit> { calls += "cancel"; return cancelOutcome }
     override suspend fun cancelRecovery(): OpResult<Unit> = no()
 
     fun authenticated(generation: Long = 7) {
