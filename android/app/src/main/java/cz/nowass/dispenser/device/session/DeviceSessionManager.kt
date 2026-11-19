@@ -50,8 +50,12 @@ class DeviceSessionManager(
     /** The live session, if any (for diagnostics and tests). */
     val session: SecureSession? get() = current.get()?.takeIf { it.isOpen }
 
-    /** Devices being forgotten (F1): no session may be opened or adopted for them. */
-    private val blocked: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /**
+     * Devices being forgotten (F1), with the number of Forget runs in progress: overlapping runs keep the
+     * device blocked until the LAST one ends (review of 78f5b97). No session may be opened or adopted.
+     */
+    private val forgetsInProgress = java.util.concurrent.ConcurrentHashMap<String, Int>()
+    private fun isBlocked(id: String): Boolean = forgetsInProgress.containsKey(id)
 
     /**
      * Per device, how many times "Forget device" has started (F4). An open that began before (or while)
@@ -69,12 +73,13 @@ class DeviceSessionManager(
      */
     suspend fun <T> forgetting(deviceIdHex: String, cleanup: suspend () -> T): T {
         val id = deviceIdHex.lowercase()
-        blocked += id
+        forgetsInProgress.merge(id, 1, Int::plus)
         forgetEpochs.merge(id, 1L, Long::plus)
         try {
             return openLock.withLock { cleanup() }
         } finally {
-            blocked -= id
+            // atomic decrement; the entry (the block) disappears only when the last run ends
+            forgetsInProgress.computeIfPresent(id) { _, n -> if (n > 1) n - 1 else null }
         }
     }
 
@@ -103,11 +108,11 @@ class DeviceSessionManager(
         val id = request.deviceIdHex.lowercase()
         val startEpoch = epochOf(id)
         // started while the device is being forgotten: refused at once (never queued behind Forget)
-        if (id in blocked) return OpenResult.Failed(SessionFailure.Blocked)
+        if (isBlocked(id)) return OpenResult.Failed(SessionFailure.Blocked)
         return openLock.withLock { openLocked(address, request, id, startEpoch) }
     }
 
-    private fun forgottenSince(id: String, startEpoch: Long) = id in blocked || epochOf(id) != startEpoch
+    private fun forgottenSince(id: String, startEpoch: Long) = isBlocked(id) || epochOf(id) != startEpoch
 
     private suspend fun openLocked(address: String, request: OpenRequest, id: String, startEpoch: Long): OpenResult {
         if (forgottenSince(id, startEpoch)) return OpenResult.Failed(SessionFailure.Blocked)

@@ -428,4 +428,47 @@ class OnboardingFirmwareTest {
         assertFalse(p.manager.hasLiveSession("ffffffffffff"))
         p.manager.end()
     }
+
+    /**
+     * Review of 78f5b97: two overlapping "Forget device" runs for the same device. The block must hold
+     * until the LAST one completes: a new open during the second cleanup is refused at once, no
+     * credential can be created during either cleanup, and only afterwards are opens possible again.
+     */
+    @Test
+    fun overlapping_forgets_keep_the_device_blocked_until_the_last_one_ends() = runBlocking {
+        val p = Phone()
+        wake()
+        val in1 = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val in2 = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val g1 = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val g2 = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val blocked = cz.nowass.dispenser.device.session.OpenResult.Failed(cz.nowass.dispenser.device.session.SessionFailure.Blocked)
+        suspend fun openNow() = withTimeout(2_000) { // "immediately": never waits behind a cleanup
+            (cz.nowass.dispenser.crypto.SetupLabel.parse(labelText()) as cz.nowass.dispenser.crypto.SetupLabel.Result.Ok).label.use {
+                p.manager.open(address, cz.nowass.dispenser.device.session.OpenRequest.Claim(it, "Pixel"))
+            }
+        }
+
+        val first = async(Dispatchers.Default) { p.manager.forgetting(deviceId) { in1.complete(Unit); g1.await(); "first" } }
+        withTimeout(5_000) { in1.await() }
+        val second = async(Dispatchers.Default) { p.manager.forgetting(deviceId) { in2.complete(Unit); g2.await(); "second" } }
+        kotlinx.coroutines.delay(200) // the second waits for the lock: both overlap
+        assertFalse(in2.isCompleted)
+        assertEquals(blocked, openNow())
+
+        // the first finishes while the second is still active (it now runs its cleanup)
+        g1.complete(Unit)
+        assertEquals("first", withTimeout(5_000) { first.await() })
+        withTimeout(5_000) { in2.await() }
+        assertEquals("still blocked during the second cleanup", blocked, openNow())
+        assertEquals(CredentialState.Absent, p.store.load(deviceId))
+        assertEquals(CredentialState.Absent, p.store.loadPending(deviceId))
+        assertTrue(p.wrapper.keys.isEmpty())
+
+        // only after the last one ends may a session be opened again
+        g2.complete(Unit)
+        assertEquals("second", withTimeout(5_000) { second.await() })
+        assertEquals(EnrollOutcome.Enrolled(deviceId, 0), p.controller().let { c -> c.enterLabel(labelText()); c.finishAssociation(null); c.enroll(OnboardingPurpose.CLAIM, "Pixel") })
+        p.manager.end()
+    }
 }

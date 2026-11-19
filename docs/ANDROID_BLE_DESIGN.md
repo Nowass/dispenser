@@ -1480,7 +1480,11 @@ credential can be created or restored for the device while the cleanup runs; the
 is now defense in depth only. Cancellation-safe: the cleanup is NonCancellable; waiting for the lock
 cannot be interrupted. No deadlock: the cleanup never calls `open()`; ending and closing sessions do not
 take the lock. Session calls are device-scoped (`endFor`, `closeNow(deviceId)`,
-`hasLiveSession(deviceId)`): Forget never closes another device's session.
+`hasLiveSession(deviceId)`): Forget never closes another device's session. Overlapping Forget runs for the same device (review of `78f5b97`): the block is a per-device count of
+runs in progress, removed only when the last run ends (a plain set let the first run unblock the device
+while the second still waited for or held the lock, so a new open queued behind it instead of being
+refused); `OnboardingFirmwareTest.overlapping_forgets_keep_the_device_blocked_until_the_last_one_ends`
+failed with the set and passes with the count.
 
 **F3 — credential health.** `CredentialHealth` (one per device) is refreshed after a successful
 enrollment or recovery and after every "Forget device" attempt; the same DEVICE UI source leaves the
