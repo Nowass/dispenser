@@ -1,5 +1,12 @@
 package cz.nowass.dispenser.ui.calendar
 
+import cz.nowass.dispenser.domain.ConnectionState
+import cz.nowass.dispenser.domain.Freshness
+import cz.nowass.dispenser.ui.schedule.ScheduleWriteNotice
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.time.Instant
+
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -44,6 +51,11 @@ sealed interface CalendarUiState {
         val schedules: List<ScheduleListItemUi> = emptyList(),
         /** Stored schedules that could not be loaded (corrupted); shown as a warning, never deleted. */
         val unreadableScheduleCount: Int = 0,
+        /** DEVICE mode: the schedules are the device's set as last read back (live, or cached with its time). */
+        val scheduleFreshness: Freshness = Freshness.NotApplicable,
+        /** DEVICE mode while not connected: changes need a live session (E12) and are not offered. */
+        val editingNeedsConnection: Boolean = false,
+        val now: Instant = Instant.EPOCH,
     ) : CalendarUiState
 }
 
@@ -89,14 +101,20 @@ class CalendarViewModel(
         savedState.getStateFlow(KEY_SELECTED, parseIsoOrNull(savedState.get<String>(ARG_DATE))?.toString())
     private val modeName: StateFlow<String> = savedState.getStateFlow(KEY_MODE, CalendarMode.MONTH.name)
 
-    private data class StoreView(val schedules: List<Schedule>, val sync: Map<String, SyncState>, val unreadable: Int)
+    private data class StoreView(val schedules: List<Schedule>, val sync: Map<String, SyncState>, val unreadable: Int, val freshness: Freshness)
 
     private val storeView = combine(
         repository.observeSchedules(),
         repository.observeScheduleSync(),
         repository.observeUnreadableScheduleCount(),
+        repository.observeScheduleFreshness(),
         ::StoreView,
     )
+
+    private val _writeNotice = MutableStateFlow<ScheduleWriteNotice?>(null)
+
+    /** DEVICE-mode outcome of the last quick enable/disable (null in DEMO and after success). */
+    val writeNotice: StateFlow<ScheduleWriteNotice?> = _writeNotice.asStateFlow()
 
     val uiState: StateFlow<CalendarUiState> = combine(
         repository.observeDevice(),
@@ -111,6 +129,10 @@ class CalendarViewModel(
             mode = CalendarMode.entries.firstOrNull { it.name == mode } ?: CalendarMode.MONTH,
             sync = store.sync,
             unreadableScheduleCount = store.unreadable,
+        ).copy(
+            scheduleFreshness = store.freshness,
+            editingNeedsConnection = repository.writesRequireConnection && device.connection != ConnectionState.CONNECTED,
+            now = device.now,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CalendarUiState.Loading)
 
@@ -139,9 +161,11 @@ class CalendarViewModel(
         val state = uiState.value as? CalendarUiState.Ready ?: return
         val schedule = state.schedules.firstOrNull { it.schedule.id == scheduleId }?.schedule ?: return
         if (schedule.enabled == enabled) return
+        _writeNotice.value = null
         viewModelScope.launch {
-            // On Conflict the observed state already reflects the newer stored version.
-            repository.updateSchedule(schedule.id, schedule.revision, schedule.toDraft().copy(enabled = enabled))
+            // On Conflict the observed state already reflects the newer stored version. DEVICE-only
+            // outcomes are shown (an uncertain change is verified at the next connection, not retried).
+            _writeNotice.value = ScheduleWriteNotice.of(repository.updateSchedule(schedule.id, schedule.revision, schedule.toDraft().copy(enabled = enabled)))
         }
     }
 

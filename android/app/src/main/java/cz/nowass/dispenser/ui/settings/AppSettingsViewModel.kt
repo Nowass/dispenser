@@ -1,5 +1,11 @@
 package cz.nowass.dispenser.ui.settings
 
+import cz.nowass.dispenser.domain.ConnectionState
+import cz.nowass.dispenser.domain.DataSource
+import cz.nowass.dispenser.domain.DeviceAccess
+import cz.nowass.dispenser.domain.Freshness
+import java.time.Instant
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -26,6 +32,16 @@ sealed interface AppSettingsUiState {
         /** Read-only reservoir summary; null when unknown (no device, no simulation). */
         val reservoir: ReservoirState?,
         val simulationActive: Boolean,
+        /** False in DEVICE mode: no "simulace" labels, device freshness instead. */
+        val isDemo: Boolean = true,
+        /** Freshness of [reservoir] in DEVICE mode (never shown as live when cached). */
+        val freshness: Freshness = Freshness.NotApplicable,
+        val connection: ConnectionState = ConnectionState.DEMO,
+        val now: Instant = Instant.EPOCH,
+        /** DEVICE mode: credential health (recovery required when the credential is unusable). */
+        val access: DeviceAccess? = null,
+        /** DEVICE mode: unresolved operations of the device (always shown, never dropped). */
+        val unresolvedOperations: Int = 0,
     ) : AppSettingsUiState
 }
 
@@ -41,7 +57,15 @@ class AppSettingsViewModel(
         repository.observeReservoir(),
         repository.observeDevice(),
     ) { name, reservoir, device ->
-        AppSettingsUiState.Ready(name, version, reservoir, device.simulationActive)
+        AppSettingsUiState.Ready(
+            name, version, reservoir, device.simulationActive,
+            isDemo = device.source == DataSource.DEMO,
+            freshness = device.freshness,
+            connection = device.connection,
+            now = device.now,
+            access = device.access,
+            unresolvedOperations = device.unresolvedOperations,
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppSettingsUiState.Loading)
 
     fun validateName(text: String): DisplayNameRules.Error? = DisplayNameRules.validate(text)

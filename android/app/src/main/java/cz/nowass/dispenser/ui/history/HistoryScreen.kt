@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.platform.testTag
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -40,6 +41,8 @@ import cz.nowass.dispenser.ui.theme.DispenserTheme
 import cz.nowass.dispenser.ui.theme.Spacing
 import java.time.ZoneId
 
+const val HISTORY_UNAVAILABLE_TEST_TAG = "history_unavailable"
+
 @Composable
 fun HistoryRoute(viewModel: HistoryViewModel, modifier: Modifier = Modifier) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
@@ -50,6 +53,9 @@ fun HistoryRoute(viewModel: HistoryViewModel, modifier: Modifier = Modifier) {
 fun HistoryScreen(state: HistoryUiState, modifier: Modifier = Modifier) {
     when (state) {
         HistoryUiState.Loading -> Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        HistoryUiState.Unavailable -> Box(modifier.fillMaxSize().padding(Spacing.m).testTag(HISTORY_UNAVAILABLE_TEST_TAG)) {
+            Text(stringResource(R.string.history_device_unavailable), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         is HistoryUiState.Ready -> LazyColumn(
             modifier = modifier.fillMaxSize(),
             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = Spacing.m, vertical = Spacing.s),

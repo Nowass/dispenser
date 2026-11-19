@@ -126,7 +126,8 @@ private const val ARG_PATH = "path"
 @Composable
 fun DispenserApp(
     repository: DispenserRepository,
-    simulation: SimulationController,
+    /** DEMO-only simulation controls; null in DEVICE mode (the Simulace card is not shown). */
+    simulation: SimulationController?,
     appSettings: AppSettingsRepository,
     appVersion: AppVersion,
     isDemo: Boolean,
@@ -135,6 +136,8 @@ fun DispenserApp(
     sourceCodeUrl: String?,
     /** Backup screen dependencies; null hides the entry (previews, tests without storage). */
     backupViewModelFactory: androidx.lifecycle.ViewModelProvider.Factory? = null,
+    lowStockPolicy: cz.nowass.dispenser.domain.simulation.LowStockPolicy =
+        simulation?.lowStockPolicy ?: cz.nowass.dispenser.domain.simulation.LowStockPolicy(),
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -163,7 +166,9 @@ fun DispenserApp(
 
     // Confirmation after a successful editor write ("Uloženo v telefonu" — never a device sync claim).
     val snackbarHostState = remember { SnackbarHostState() }
-    val savedMessage = stringResource(R.string.editor_saved_snackbar)
+    // DEVICE mode: saved = read back from the device; uncertain = verified at the next connection (no retry).
+    val savedMessage = stringResource(if (isDemo) R.string.editor_saved_snackbar else R.string.editor_saved_device_snackbar)
+    val uncertainMessage = stringResource(R.string.editor_uncertain_snackbar)
     val deletedMessage = stringResource(R.string.editor_deleted_snackbar)
     val appLicenseTitle = stringResource(R.string.about_app_license_title)
 
@@ -204,6 +209,7 @@ fun DispenserApp(
                 },
                 showDemoBadge = isDemo,
                 simulationClock = simulationClockText,
+                connection = if (isDemo) null else device?.connection ?: cz.nowass.dispenser.domain.ConnectionState.DISCONNECTED,
             )
         },
         bottomBar = {
@@ -297,7 +303,7 @@ fun DispenserApp(
             }
             composable(RESERVOIR_ROUTE) {
                 ReservoirRoute(
-                    viewModel = viewModel(factory = ReservoirViewModel.factory(repository, simulation.lowStockPolicy)),
+                    viewModel = viewModel(factory = ReservoirViewModel.factory(repository, lowStockPolicy)),
                     isDemo = isDemo,
                     onBack = { navController.popBackStack() },
                 )
@@ -329,6 +335,7 @@ fun DispenserApp(
                             val message = when (result) {
                                 EditorResult.SAVED -> savedMessage
                                 EditorResult.DELETED -> deletedMessage
+                                EditorResult.UNCERTAIN -> uncertainMessage
                                 null -> null
                             }
                             if (message != null) scope.launch { snackbarHostState.showSnackbar(message) }
@@ -355,7 +362,7 @@ fun DispenserApp(
 private fun MainPager(
     pagerState: PagerState,
     repository: DispenserRepository,
-    simulation: SimulationController,
+    simulation: SimulationController?,
     appSettings: AppSettingsRepository,
     appVersion: AppVersion,
     onOpenReservoir: () -> Unit,
@@ -406,7 +413,8 @@ private fun MainPager(
             )
             TopLevelDestination.HISTORY -> HistoryRoute(viewModel(factory = HistoryViewModel.factory(repository)))
             TopLevelDestination.SETTINGS -> SettingsRoute(
-                simulationViewModel = viewModel(factory = SimulationSettingsViewModel.factory(simulation, repository)),
+                // DEMO only: in DEVICE mode no simulation ViewModel exists at all.
+                simulationViewModel = simulation?.let { viewModel(factory = SimulationSettingsViewModel.factory(it, repository)) },
                 appViewModel = viewModel(factory = AppSettingsViewModel.factory(appSettings, repository, appVersion)),
                 onOpenReservoir = onOpenReservoir,
                 onOpenAbout = onOpenAbout,

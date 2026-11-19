@@ -31,6 +31,8 @@ fun AppHeader(
     modifier: Modifier = Modifier,
     /** Visible simulation-clock indicator (D1); null outside simulation mode. */
     simulationClock: String? = null,
+    /** DEVICE mode: the connection-state chip shown instead of the DEMO badge; null in DEMO. */
+    connection: cz.nowass.dispenser.domain.ConnectionState? = null,
 ) {
     Row(
         modifier = modifier
@@ -65,5 +67,6 @@ fun AppHeader(
             }
         }
         if (showDemoBadge) DemoBadge(Modifier.testTag(DEMO_BADGE_TEST_TAG))
+        if (connection != null) ConnectionChip(connection)
     }
 }

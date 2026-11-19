@@ -1,5 +1,7 @@
 package cz.nowass.dispenser.ui.schedule
 
+import cz.nowass.dispenser.domain.ConnectionState
+
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -53,8 +55,11 @@ data class EditorForm(
     }
 }
 
-/** How the editor finished; null = closed without writing. */
-enum class EditorResult { SAVED, DELETED }
+/**
+ * How the editor finished; null = closed without writing. [UNCERTAIN] (DEVICE mode): the change may
+ * have been applied and is verified at the next connection — the editor closes and no retry is offered.
+ */
+enum class EditorResult { SAVED, DELETED, UNCERTAIN }
 
 enum class EditorFieldError {
     AMOUNT_MISSING,
@@ -104,6 +109,10 @@ sealed interface ScheduleEditorUiState {
         val conflict: Boolean,
         /** Stored schedule disappeared while editing. */
         val deletedMeanwhile: Boolean,
+        /** DEVICE mode while not connected: saving and deleting need a live session (E12). */
+        val needsConnection: Boolean = false,
+        /** DEVICE-mode outcome of the last write that kept the editor open (nothing changed). */
+        val notice: ScheduleWriteNotice? = null,
     ) : ScheduleEditorUiState
 }
 
@@ -119,6 +128,7 @@ private data class EditorMeta(
     val isSaving: Boolean = false,
     val conflict: Boolean = false,
     val deletedMeanwhile: Boolean = false,
+    val notice: ScheduleWriteNotice? = null,
 )
 
 private const val NO_REVISION = -1
@@ -221,7 +231,7 @@ class ScheduleEditorViewModel(
             commit(f, meta.value.copy(showErrors = true))
             return
         }
-        meta.update { it.copy(isSaving = true, conflict = false) }
+        meta.update { it.copy(isSaving = true, conflict = false, notice = null) }
         viewModelScope.launch {
             val result = if (scheduleId == null) {
                 repository.createSchedule(draft)
@@ -235,7 +245,7 @@ class ScheduleEditorViewModel(
     fun delete() {
         val id = scheduleId ?: return
         if (meta.value.isSaving) return
-        meta.update { it.copy(isSaving = true, conflict = false) }
+        meta.update { it.copy(isSaving = true, conflict = false, notice = null) }
         viewModelScope.launch { handleWrite(repository.deleteSchedule(id, meta.value.revision)) }
     }
 
@@ -263,6 +273,16 @@ class ScheduleEditorViewModel(
             ScheduleWriteResult.Conflict -> meta.update { it.copy(isSaving = false, conflict = true) }
             ScheduleWriteResult.NotFound -> meta.update { it.copy(isSaving = false, deletedMeanwhile = true) }
             is ScheduleWriteResult.Invalid -> meta.update { it.copy(isSaving = false, showErrors = true) }
+            // DEVICE mode: may have been applied; verified by read-back at the next connection. Not a
+            // failure, and the user is not invited to repeat it: the editor closes with that message.
+            ScheduleWriteResult.Uncertain -> {
+                meta.update { it.copy(isSaving = false) }
+                _closeResult.value = EditorResult.UNCERTAIN
+            }
+            // DEVICE mode, nothing changed on the device: the edit stays open with the reason.
+            ScheduleWriteResult.NotSent, ScheduleWriteResult.AwaitingVerification,
+            is ScheduleWriteResult.DeviceRejected, is ScheduleWriteResult.DeviceLimit ->
+                meta.update { it.copy(isSaving = false, notice = ScheduleWriteNotice.of(result)) }
         }
     }
 
@@ -290,7 +310,7 @@ class ScheduleEditorViewModel(
                 it in LIVE_ERRORS || (it == EditorFieldError.AMOUNT_MISSING && m.amountTouched)
             },
             blockingErrors = errors,
-            canSave = !m.isSaving && !m.deletedMeanwhile && errors.isEmpty() && (scheduleId == null || dirty),
+            canSave = !m.isSaving && !m.deletedMeanwhile && errors.isEmpty() && (scheduleId == null || dirty) && !needsConnection(device),
             preview = preview,
             zoneId = DEFAULT_ZONE.id,
             baseRevision = m.revision.takeIf { it != NO_REVISION },
@@ -299,8 +319,13 @@ class ScheduleEditorViewModel(
             isSaving = m.isSaving,
             conflict = m.conflict,
             deletedMeanwhile = m.deletedMeanwhile,
+            needsConnection = needsConnection(device),
+            notice = m.notice,
         )
     }
+
+    private fun needsConnection(device: DeviceStatus): Boolean =
+        repository.writesRequireConnection && device.connection != ConnectionState.CONNECTED
 
     // ---- Persistence (rotation / process death) ----
 

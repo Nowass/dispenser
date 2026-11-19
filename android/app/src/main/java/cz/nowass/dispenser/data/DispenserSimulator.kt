@@ -23,6 +23,24 @@ sealed interface CommandResult {
     data object NotActive : CommandResult
     /** start() while a simulation is already running; reset first. */
     data object AlreadyActive : CommandResult
+
+    /** DEVICE-mode outcomes of a device command (refill); never produced by the simulation. */
+    sealed interface Device : CommandResult
+
+    /** Provably never reached the device; nothing changed. */
+    data object NotSent : Device
+
+    /** May have been applied: NOT a failure; verified by read-back at the next session, never re-sent automatically. */
+    data object Uncertain : Device
+
+    /** An earlier command of this kind awaits verification; nothing was sent. */
+    data object AwaitingVerification : Device
+
+    /** The device refused ([code]: BLE_PROTOCOL.md 10.1); nothing changed. */
+    data class DeviceRejected(val code: Int) : Device
+
+    /** Refused by the phone before sending (a device limit, unknown capacity); nothing was sent. */
+    data object NotAccepted : Device
 }
 
 /**

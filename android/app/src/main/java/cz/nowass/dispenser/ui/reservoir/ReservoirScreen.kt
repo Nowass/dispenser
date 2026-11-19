@@ -52,6 +52,7 @@ import cz.nowass.dispenser.domain.simulation.PredictionStatus
 import cz.nowass.dispenser.domain.simulation.ReservoirPredictor
 import cz.nowass.dispenser.domain.simulation.ReservoirStatus
 import cz.nowass.dispenser.ui.Format
+import cz.nowass.dispenser.ui.components.freshnessLabel
 import cz.nowass.dispenser.ui.components.DEMO_BADGE_TEST_TAG
 import cz.nowass.dispenser.ui.components.DemoBadge
 import cz.nowass.dispenser.ui.components.MetricProgress
@@ -64,15 +65,18 @@ import cz.nowass.dispenser.ui.theme.Spacing
 import kotlin.math.roundToInt
 
 const val RESERVOIR_REFILL_TEST_TAG = "reservoir_refill"
+const val RESERVOIR_REFILL_OUTCOME_TEST_TAG = "reservoir_refill_outcome"
 
 @Composable
 fun ReservoirRoute(viewModel: ReservoirViewModel, isDemo: Boolean, onBack: () -> Unit) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val refillDone by viewModel.refillDone.collectAsStateWithLifecycle()
+    val refillOutcome by viewModel.refillOutcome.collectAsStateWithLifecycle()
     ReservoirScreen(
         state, isDemo, onBack, viewModel::validateRefill, viewModel::refill,
         refillConfirmed = refillDone,
         onRefillOpened = viewModel::consumeRefillDone,
+        refillOutcome = refillOutcome,
     )
 }
 
@@ -85,6 +89,7 @@ fun ReservoirScreen(
     onRefill: (String) -> Unit,
     refillConfirmed: Boolean = false,
     onRefillOpened: () -> Unit = {},
+    refillOutcome: RefillOutcome? = null,
 ) {
     var showRefill by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
@@ -116,13 +121,37 @@ fun ReservoirScreen(
                     PredictionCard(state)
                     Button(
                         onClick = { onRefillOpened(); showRefill = true },
+                        enabled = !state.refillNeedsConnection,
                         shape = MaterialTheme.shapes.medium,
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary),
                         modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag(RESERVOIR_REFILL_TEST_TAG),
                     ) { Text(stringResource(R.string.reservoir_refill), style = MaterialTheme.typography.titleMedium) }
+                    if (state.refillNeedsConnection) {
+                        Text(
+                            stringResource(R.string.refill_needs_connection),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (refillOutcome != null) {
+                        Text(
+                            stringResource(
+                                when (refillOutcome) {
+                                    RefillOutcome.UNCERTAIN -> R.string.refill_uncertain
+                                    RefillOutcome.NOT_SENT -> R.string.refill_not_sent
+                                    RefillOutcome.AWAITING_VERIFICATION -> R.string.refill_awaiting_verification
+                                    RefillOutcome.REJECTED -> R.string.refill_rejected
+                                    RefillOutcome.NOT_ACCEPTED -> R.string.refill_not_accepted
+                                },
+                            ),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (refillOutcome == RefillOutcome.UNCERTAIN) DispenserTheme.extendedColors.warning else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.testTag(RESERVOIR_REFILL_OUTCOME_TEST_TAG).semantics { liveRegion = LiveRegionMode.Polite },
+                        )
+                    }
                     if (refillConfirmed) {
                         Text(
-                            stringResource(R.string.refill_done),
+                            stringResource(if (state.isDemo) R.string.refill_done else R.string.refill_done_device),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
@@ -161,11 +190,12 @@ private fun LevelCard(state: ReservoirUiState.Ready) = SectionCard {
     val r = state.reservoir
     Row(horizontalArrangement = Arrangement.spacedBy(Spacing.xs)) {
         StatusTag(stringResource(R.string.dashboard_estimate_label))
-        StatusTag(stringResource(R.string.dashboard_simulated_label))
+        if (state.isDemo) StatusTag(stringResource(R.string.dashboard_simulated_label))
+        else freshnessLabel(state.freshness, state.now, state.zone)?.let { StatusTag(it) }
     }
     if (r == null) {
         Text(stringResource(R.string.reservoir_unknown), style = MaterialTheme.typography.headlineMedium)
-        Text(stringResource(R.string.reservoir_simulation_inactive), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(stringResource(if (state.isDemo) R.string.reservoir_simulation_inactive else R.string.reservoir_device_not_read), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         return@SectionCard
     }
     val tone = when (state.status) {

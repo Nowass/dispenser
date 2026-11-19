@@ -33,6 +33,7 @@ import cz.nowass.dispenser.data.MockSeed
 import cz.nowass.dispenser.ui.Format
 import cz.nowass.dispenser.ui.czechPluralStringResource
 import java.time.LocalDate
+import cz.nowass.dispenser.ui.components.freshnessLabel
 import cz.nowass.dispenser.ui.components.MetricProgress
 import cz.nowass.dispenser.ui.components.StatusCard
 import cz.nowass.dispenser.ui.components.StatusTone
@@ -113,12 +114,12 @@ private fun StatusCards(state: DashboardUiState.Ready, onOpenReservoir: () -> Un
                 horizontalArrangement = Arrangement.spacedBy(Spacing.m),
             ) {
                 ReservoirCard(state, onOpenReservoir, Modifier.weight(1f).fillMaxHeight())
-                BatteryCard(state.battery, Modifier.weight(1f).fillMaxHeight())
+                BatteryCard(state.battery, Modifier.weight(1f).fillMaxHeight(), freshnessLabel(state.freshness, state.now.toInstant(), state.now.zone))
             }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(Spacing.m)) {
                 ReservoirCard(state, onOpenReservoir, Modifier.fillMaxWidth())
-                BatteryCard(state.battery, Modifier.fillMaxWidth())
+                BatteryCard(state.battery, Modifier.fillMaxWidth(), freshnessLabel(state.freshness, state.now.toInstant(), state.now.zone))
             }
         }
     }
@@ -137,6 +138,7 @@ private fun ReservoirCard(state: DashboardUiState.Ready, onOpen: () -> Unit, mod
         tags = buildList {
             add(stringResource(R.string.dashboard_estimate_label))
             if (state.isDemo) add(stringResource(R.string.dashboard_simulated_label))
+            else freshnessLabel(state.freshness, state.now.toInstant(), state.now.zone)?.let(::add)
         },
         onClick = onOpen,
         onClickLabel = stringResource(R.string.reservoir_open_detail),
@@ -153,7 +155,7 @@ private fun ReservoirCard(state: DashboardUiState.Ready, onOpen: () -> Unit, mod
             )
             MetricProgress(fraction = null, accessibilityLabel = stringResource(R.string.reservoir_unknown), color = accent)
             Text(
-                stringResource(R.string.reservoir_simulation_inactive),
+                stringResource(if (state.isDemo) R.string.reservoir_simulation_inactive else R.string.reservoir_device_not_read),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -191,14 +193,14 @@ private fun ReservoirCard(state: DashboardUiState.Ready, onOpen: () -> Unit, mod
 }
 
 @Composable
-private fun BatteryCard(battery: BatteryUi, modifier: Modifier) {
+private fun BatteryCard(battery: BatteryUi, modifier: Modifier, freshness: String? = null) {
     val accent = battery.tone.accent(normal = DispenserTheme.extendedColors.battery)
     StatusCard(
         title = stringResource(R.string.dashboard_battery),
         icon = painterResource(R.drawable.ic_battery),
         tone = battery.tone,
         accent = accent,
-        tags = if (battery.isSimulated) listOf(stringResource(R.string.dashboard_simulated_label)) else emptyList(),
+        tags = if (battery.isSimulated) listOf(stringResource(R.string.dashboard_simulated_label)) else listOfNotNull(freshness),
         modifier = modifier,
     ) {
         Text(
@@ -211,7 +213,9 @@ private fun BatteryCard(battery: BatteryUi, modifier: Modifier) {
         )
         MetricProgress(
             fraction = battery.percent?.let { it / 100f },
-            accessibilityLabel = battery.percent?.let { stringResource(R.string.dashboard_battery_a11y, it) }
+            accessibilityLabel = battery.percent?.let {
+                stringResource(if (battery.isSimulated) R.string.dashboard_battery_a11y else R.string.dashboard_battery_a11y_device, it)
+            }
                 ?: stringResource(R.string.dashboard_battery_a11y_unknown),
             color = accent,
         )

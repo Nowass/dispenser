@@ -90,7 +90,47 @@ data class DoseOccurrence(
  */
 enum class SyncState { PENDING, DEVICE_APPLIED }
 
-enum class ConnectionState { DEMO, DISCONNECTED, CONNECTED }
+/**
+ * - [DEMO]: simulated data, no device.
+ * - [DISCONNECTED] / [CONNECTING] / [CONNECTED]: DEVICE mode; CONNECTED only while an authenticated
+ *   session with the selected device is live.
+ */
+enum class ConnectionState { DEMO, DISCONNECTED, CONNECTING, CONNECTED, RECOVERY_REQUIRED }
+
+/**
+ * Whether this phone can still authenticate to the selected device (DEVICE mode, M1.10e.4a). Without
+ * a usable credential DEVICE mode stays shown in a recovery-required state: cached values and
+ * unresolved operations remain visible, every operation is disabled (no session can authenticate).
+ */
+enum class DeviceAccess {
+    /** Not checked yet (startup): operations still need a live session. */
+    CHECKING,
+    OK,
+    /** The credential's Keystore key is missing or invalidated. */
+    KEY_MISSING,
+    /** The credential record exists but cannot be used (tampered, truncated, unknown format). */
+    RECORD_UNREADABLE,
+    /** The confirmed credential record has disappeared. */
+    RECORD_MISSING,
+    ;
+
+    val recoveryRequired: Boolean get() = this == KEY_MISSING || this == RECORD_UNREADABLE || this == RECORD_MISSING
+}
+
+/**
+ * Freshness of device-sourced values as shown in the UI (decision D2). Cached values are never shown
+ * as live: [Cached] always carries the time the device reported the value.
+ */
+sealed interface Freshness {
+    /** DEMO mode: values are simulated (the DEMO badge and "simulace" tags say so). */
+    data object NotApplicable : Freshness
+    /** DEVICE mode: never read from the device. */
+    data object Unknown : Freshness
+    /** Read in the current authenticated session. */
+    data class Live(val readAt: Instant) : Freshness
+    /** The last device-confirmed value, read at [readAt]; informational only. */
+    data class Cached(val readAt: Instant) : Freshness
+}
 
 /** Snapshot of the (demo or physical) dispenser. */
 data class DeviceStatus(
@@ -103,4 +143,10 @@ data class DeviceStatus(
     val zone: ZoneId = DEFAULT_ZONE,
     /** True while [now] is the simulation clock (D1); false = phone clock. */
     val simulationActive: Boolean = false,
+    /** Freshness of [batteryPercent] and the reservoir estimate (one device status record). */
+    val freshness: Freshness = Freshness.NotApplicable,
+    /** DEVICE mode: credential health of the selected device; null in DEMO. */
+    val access: DeviceAccess? = null,
+    /** DEVICE mode: unresolved journal rows of the selected device (never hidden, never dropped). */
+    val unresolvedOperations: Int = 0,
 )

@@ -289,6 +289,7 @@ private fun FloatingSaveButton(state: ScheduleEditorUiState.Editing, onSave: () 
     val reason: String? = when {
         state.isSaving || state.deletedMeanwhile -> null
         firstError != null -> stringResource(firstError.messageRes())
+        state.needsConnection -> stringResource(R.string.editor_needs_connection)
         !state.isNew && !state.isDirty -> stringResource(R.string.editor_save_disabled_unchanged)
         else -> null
     }
@@ -377,6 +378,7 @@ private fun EditorBody(
             Banner(stringResource(R.string.editor_conflict), actionLabel = stringResource(R.string.editor_conflict_reload), onAction = actions.onReload)
         }
         if (state.deletedMeanwhile) Banner(stringResource(R.string.editor_deleted_meanwhile))
+        state.notice?.let { Banner(stringResource(it.text)) }
 
         SectionCard(stringResource(R.string.editor_section_dose)) {
             OutlinedTextField(
@@ -525,7 +527,7 @@ private fun EditorBody(
         if (!state.isNew) {
             OutlinedButton(
                 onClick = { showDelete = true },
-                enabled = !state.isSaving,
+                enabled = !state.isSaving && !state.needsConnection,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.7f)),
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
             ) {

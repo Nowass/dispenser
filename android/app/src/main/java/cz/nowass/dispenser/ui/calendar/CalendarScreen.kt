@@ -57,8 +57,14 @@ import androidx.compose.material3.Switch
 import androidx.compose.ui.semantics.contentDescription
 import cz.nowass.dispenser.ui.theme.DispenserTheme
 import cz.nowass.dispenser.ui.theme.Spacing
+import cz.nowass.dispenser.ui.components.freshnessLabel
+import cz.nowass.dispenser.ui.schedule.ScheduleWriteNotice
+import androidx.compose.ui.platform.testTag
 import java.time.DayOfWeek
 import java.time.LocalDate
+
+const val SCHEDULES_FRESHNESS_TEST_TAG = "schedules_freshness"
+const val SCHEDULE_WRITE_NOTICE_TEST_TAG = "schedule_write_notice"
 
 /** At or above this width the grid and the day details are shown side by side. */
 private val TwoPaneMinWidth = 600.dp
@@ -71,6 +77,7 @@ fun CalendarRoute(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val writeNotice by viewModel.writeNotice.collectAsStateWithLifecycle()
     CalendarScreen(
         state = state,
         onSelectDate = viewModel::selectDate,
@@ -81,6 +88,7 @@ fun CalendarRoute(
         onCreate = onCreate,
         onEdit = onEdit,
         onToggleEnabled = viewModel::setEnabled,
+        writeNotice = writeNotice,
     )
 }
 
@@ -95,6 +103,8 @@ fun CalendarScreen(
     onCreate: (LocalDate) -> Unit = {},
     onEdit: (scheduleId: String) -> Unit = {},
     onToggleEnabled: (scheduleId: String, enabled: Boolean) -> Unit = { _, _ -> },
+    /** DEVICE-mode outcome of the last quick enable/disable. */
+    writeNotice: ScheduleWriteNotice? = null,
 ) {
     when (state) {
         CalendarUiState.Loading -> Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -118,8 +128,8 @@ fun CalendarScreen(
                         Modifier.weight(1f).verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(Spacing.m),
                     ) {
-                        DayDetails(state.selectedDay, onCreate, onEdit)
-                        SchedulesCard(state.schedules, state.unreadableScheduleCount, onCreate = { onCreate(state.selectedDate) }, onEdit, onToggleEnabled)
+                        DayDetails(state.selectedDay, onCreate, onEdit, canEdit = !state.editingNeedsConnection)
+                        SchedulesCard(state.schedules, state.unreadableScheduleCount, onCreate = { onCreate(state.selectedDate) }, onEdit, onToggleEnabled, state, writeNotice)
                     }
                 }
             } else {
@@ -132,8 +142,8 @@ fun CalendarScreen(
                 ) {
                     PeriodControls(state, onShift, onToday, onModeChange)
                     GridCard(state, onSelectDate)
-                    DayDetails(state.selectedDay, onCreate, onEdit)
-                    SchedulesCard(state.schedules, state.unreadableScheduleCount, onCreate = { onCreate(state.selectedDate) }, onEdit, onToggleEnabled)
+                    DayDetails(state.selectedDay, onCreate, onEdit, canEdit = !state.editingNeedsConnection)
+                    SchedulesCard(state.schedules, state.unreadableScheduleCount, onCreate = { onCreate(state.selectedDate) }, onEdit, onToggleEnabled, state, writeNotice)
                 }
             }
         }
@@ -284,7 +294,7 @@ private fun DayCell(day: CalendarDayUi, isWeek: Boolean, onSelectDate: (LocalDat
 }
 
 @Composable
-private fun DayDetails(day: SelectedDayUi, onCreate: (LocalDate) -> Unit, onEdit: (String) -> Unit) {
+private fun DayDetails(day: SelectedDayUi, onCreate: (LocalDate) -> Unit, onEdit: (String) -> Unit, canEdit: Boolean = true) {
     Card(
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -332,6 +342,7 @@ private fun DayDetails(day: SelectedDayUi, onCreate: (LocalDate) -> Unit, onEdit
             }
             TextButton(
                 onClick = { onCreate(day.date) },
+                enabled = canEdit,
                 modifier = Modifier.heightIn(min = 48.dp),
             ) {
                 Icon(Icons.Filled.Add, contentDescription = null)
@@ -349,7 +360,10 @@ private fun SchedulesCard(
     onCreate: () -> Unit,
     onEdit: (String) -> Unit,
     onToggleEnabled: (String, Boolean) -> Unit,
+    state: CalendarUiState.Ready? = null,
+    writeNotice: ScheduleWriteNotice? = null,
 ) {
+    val canEdit = state?.editingNeedsConnection != true
     Card(
         shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -361,6 +375,28 @@ private fun SchedulesCard(
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.semantics { heading() },
             )
+            if (state != null) {
+                // DEVICE mode: where the list comes from and how fresh it is (never presented as live when cached).
+                freshnessLabel(state.scheduleFreshness, state.now, cz.nowass.dispenser.domain.DEFAULT_ZONE)?.let {
+                    Text(
+                        stringResource(R.string.schedules_from_device, it),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.testTag(SCHEDULES_FRESHNESS_TEST_TAG),
+                    )
+                }
+                if (state.editingNeedsConnection) {
+                    Text(stringResource(R.string.schedules_need_connection), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            if (writeNotice != null) {
+                Text(
+                    stringResource(writeNotice.text),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (writeNotice == ScheduleWriteNotice.UNCERTAIN) cz.nowass.dispenser.ui.theme.DispenserTheme.extendedColors.warning else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.testTag(SCHEDULE_WRITE_NOTICE_TEST_TAG),
+                )
+            }
             if (unreadableCount > 0) UnreadableSchedulesWarning(unreadableCount)
             if (items.isEmpty()) {
                 Text(
@@ -372,9 +408,9 @@ private fun SchedulesCard(
             }
             items.forEachIndexed { i, item ->
                 if (i > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                ScheduleListRow(item, onEdit, onToggleEnabled)
+                ScheduleListRow(item, onEdit, onToggleEnabled, canEdit)
             }
-            TextButton(onClick = onCreate, modifier = Modifier.heightIn(min = 48.dp)) {
+            TextButton(onClick = onCreate, enabled = canEdit, modifier = Modifier.heightIn(min = 48.dp)) {
                 Icon(Icons.Filled.Add, contentDescription = null)
                 Spacer(Modifier.width(Spacing.s))
                 Text(stringResource(R.string.schedules_add))
@@ -415,6 +451,7 @@ private fun ScheduleListRow(
     item: ScheduleListItemUi,
     onEdit: (String) -> Unit,
     onToggleEnabled: (String, Boolean) -> Unit,
+    canEdit: Boolean = true,
 ) {
     val s = item.schedule
     val name = scheduleDisplayName(s.name)
@@ -447,6 +484,7 @@ private fun ScheduleListRow(
         Switch(
             checked = s.enabled,
             onCheckedChange = { onToggleEnabled(s.id, it) },
+            enabled = canEdit,
             modifier = Modifier.semantics { contentDescription = switchLabel },
         )
     }

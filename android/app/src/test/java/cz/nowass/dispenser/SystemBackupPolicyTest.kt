@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import androidx.datastore.preferences.preferencesDataStoreFile
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -58,5 +59,37 @@ class SystemBackupPolicyTest {
     fun legacyBackupRules_excludeEverything() {
         val rules = rules(R.xml.backup_rules)
         assertTrue(rules.getValue("full-backup-content").containsAll(setOf("root", "file", "database", "sharedpref", "external")))
+    }
+
+    /**
+     * M1.10e.4a: every location of device-mode data is in a domain excluded from BOTH cloud Auto Backup
+     * and device-to-device transfer (and from the legacy rules): the mode/device-selection DataStore
+     * (files), the device cache and pending-operations journal (`device.db`, databases) and the
+     * credential records (no-backup directory, never backed up by the platform, and under the
+     * excluded root). None of them is part of the JSON export either (BackupService knows none of them).
+     */
+    @Test
+    fun deviceModeData_isInExcludedDomains() {
+        val extraction = rules(R.xml.data_extraction_rules)
+        val legacy = rules(R.xml.backup_rules).getValue("full-backup-content")
+        fun excludedEverywhere(domain: String) {
+            assertTrue("cloud: $domain", domain in extraction.getValue("cloud-backup"))
+            assertTrue("transfer: $domain", domain in extraction.getValue("device-transfer"))
+            assertTrue("legacy: $domain", domain in legacy)
+        }
+        val mode = context.preferencesDataStoreFile(cz.nowass.dispenser.data.mode.DataStoreAppModeStore.FILE_NAME).canonicalFile
+        assertTrue("$mode under files/", mode.path.startsWith(context.filesDir.canonicalPath + java.io.File.separator))
+        excludedEverywhere("file")
+        val deviceDb = context.getDatabasePath(cz.nowass.dispenser.data.device.local.DeviceDatabase.FILE_NAME).canonicalFile
+        assertTrue("$deviceDb under databases/", deviceDb.parentFile!!.name == "databases")
+        excludedEverywhere("database")
+        val credentials = credentialDirectory(context).canonicalFile
+        assertTrue("$credentials under no_backup/", credentials.path.startsWith(context.noBackupFilesDir.canonicalPath + java.io.File.separator))
+        excludedEverywhere("root")
+        // The JSON export/restore service references none of these stores.
+        val backupSources = java.io.File(System.getProperty("dsp.source.dir")!!, "cz/nowass/dispenser/data/backup").walk().filter { it.isFile }.joinToString("\n") { it.readText() }
+        for (forbidden in listOf("DataStoreAppModeStore", "app_mode", "DeviceDatabase", "device.db", "CredentialStore", "credentials")) {
+            assertTrue("backup code must not touch $forbidden", forbidden !in backupSources)
+        }
     }
 }

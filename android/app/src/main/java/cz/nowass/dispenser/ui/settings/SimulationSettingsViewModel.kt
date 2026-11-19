@@ -90,6 +90,8 @@ class SimulationSettingsViewModel(
                 )
                 CommandResult.NotActive -> SimulationMessage.Failed(SimulationFailure.NOT_ACTIVE)
                 CommandResult.AlreadyActive -> SimulationMessage.Failed(SimulationFailure.ALREADY_ACTIVE)
+                // Device outcomes are never produced by the simulation (DEMO and DEVICE are never mixed).
+                is CommandResult.Device -> SimulationMessage.Failed(SimulationFailure.NOT_ACTIVE)
             }
         }
     }

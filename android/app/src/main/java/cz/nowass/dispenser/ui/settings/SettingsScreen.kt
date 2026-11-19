@@ -45,6 +45,9 @@ import cz.nowass.dispenser.domain.DEFAULT_ZONE
 import cz.nowass.dispenser.data.AppVersion
 import cz.nowass.dispenser.data.DisplayNameRules
 import cz.nowass.dispenser.ui.components.StatusTag
+import cz.nowass.dispenser.ui.components.ConnectionChip
+import cz.nowass.dispenser.domain.DeviceAccess
+import cz.nowass.dispenser.ui.components.freshnessLabel
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
@@ -62,15 +65,16 @@ import java.time.ZonedDateTime
 
 @Composable
 fun SettingsRoute(
-    simulationViewModel: SimulationSettingsViewModel,
+    /** Null in DEVICE mode: the Simulace section is not shown. */
+    simulationViewModel: SimulationSettingsViewModel?,
     appViewModel: AppSettingsViewModel,
     onOpenReservoir: () -> Unit,
     onOpenAbout: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenBackup: (() -> Unit)? = null,
 ) {
-    val state by simulationViewModel.uiState.collectAsStateWithLifecycle()
-    val message by simulationViewModel.message.collectAsStateWithLifecycle()
+    val state = simulationViewModel?.uiState?.collectAsStateWithLifecycle()?.value
+    val message = simulationViewModel?.message?.collectAsStateWithLifecycle()?.value
     val app by appViewModel.uiState.collectAsStateWithLifecycle()
     SettingsScreen(
         app = app,
@@ -84,14 +88,16 @@ fun SettingsRoute(
             openAbout = onOpenAbout,
             openBackup = onOpenBackup,
         ),
-        actions = SimulationActions(
-            start = simulationViewModel::start,
-            plusHour = { simulationViewModel.advanceHours(1) },
-            plusDay = { simulationViewModel.advanceDays(1) },
-            advanceTo = { simulationViewModel.advanceTo(it, DEFAULT_ZONE) },
-            outageUntil = { simulationViewModel.outageUntil(it, DEFAULT_ZONE) },
-            reset = simulationViewModel::reset,
-        ),
+        actions = simulationViewModel?.let { vm ->
+            SimulationActions(
+                start = vm::start,
+                plusHour = { vm.advanceHours(1) },
+                plusDay = { vm.advanceDays(1) },
+                advanceTo = { vm.advanceTo(it, DEFAULT_ZONE) },
+                outageUntil = { vm.outageUntil(it, DEFAULT_ZONE) },
+                reset = vm::reset,
+            )
+        } ?: SimulationActions(),
         modifier = modifier,
     )
 }
@@ -120,15 +126,20 @@ const val SETTINGS_BACKUP_ROW_TEST_TAG = "settings_backup_row"
 
 const val SETTINGS_NAME_ROW_TEST_TAG = "settings_name_row"
 const val SETTINGS_RESERVOIR_ROW_TEST_TAG = "settings_reservoir_row"
+const val SETTINGS_CONNECTION_CHIP_TEST_TAG = "settings_connection_chip"
+const val SETTINGS_DEVICE_RECOVERY_TEST_TAG = "settings_device_recovery"
+const val SETTINGS_DEVICE_UNRESOLVED_TEST_TAG = "settings_device_unresolved"
 
 /**
  * Compact settings in four sections (A1.4a): Aplikace, Zásobník (read-only summary +
- * shortcut), Simulace (existing DEMO controls) and Zařízení (placeholder, never "connected").
+ * shortcut), Simulace (existing DEMO controls; absent in DEVICE mode) and Zařízení (DEMO: placeholder,
+ * never "connected"; DEVICE: the connection state of the selected device).
  */
 @Composable
 fun SettingsScreen(
     app: AppSettingsUiState,
-    simulation: SimulationUiState,
+    /** Null in DEVICE mode (no simulation). */
+    simulation: SimulationUiState?,
     message: SimulationMessage?,
     appActions: AppSettingsActions,
     actions: SimulationActions,
@@ -162,7 +173,7 @@ fun SettingsScreen(
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 ListItem(
                     headlineContent = { Text(stringResource(R.string.settings_mode)) },
-                    supportingContent = { Text(stringResource(R.string.settings_mode_demo)) },
+                    supportingContent = { Text(stringResource(if (ready?.isDemo == false) R.string.settings_mode_device else R.string.settings_mode_demo)) },
                     colors = itemColors,
                 )
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -202,7 +213,9 @@ fun SettingsScreen(
                 if (r == null) {
                     ListItem(
                         headlineContent = { Text(stringResource(R.string.reservoir_unknown)) },
-                        supportingContent = { Text(stringResource(R.string.reservoir_simulation_inactive)) },
+                        supportingContent = {
+                            Text(stringResource(if (ready?.isDemo == false) R.string.reservoir_device_not_read else R.string.reservoir_simulation_inactive))
+                        },
                         colors = itemColors,
                     )
                 } else {
@@ -215,7 +228,12 @@ fun SettingsScreen(
                     ListItem(
                         headlineContent = { Text(stringResource(R.string.settings_reservoir_estimate)) },
                         supportingContent = {
-                            Text(stringResource(R.string.unit_ml, Format.ml(r.remainingUl / 1000.0)) + " · " + stringResource(R.string.dashboard_estimate_label) + " · " + stringResource(R.string.dashboard_simulated_label))
+                            val qualifier = if (ready.isDemo) {
+                                stringResource(R.string.dashboard_simulated_label)
+                            } else {
+                                freshnessLabel(ready.freshness, ready.now, DEFAULT_ZONE)
+                            }
+                            Text(listOfNotNull(stringResource(R.string.unit_ml, Format.ml(r.remainingUl / 1000.0)), stringResource(R.string.dashboard_estimate_label), qualifier).joinToString(" · "))
                         },
                         colors = itemColors,
                     )
@@ -229,11 +247,52 @@ fun SettingsScreen(
             }
         }
 
-        SectionLabel(stringResource(R.string.settings_section_simulation))
-        SimulationCard(simulation, message, actions)
+        if (simulation != null) {
+            SectionLabel(stringResource(R.string.settings_section_simulation))
+            SimulationCard(simulation, message, actions)
+        }
 
         SectionLabel(stringResource(R.string.settings_device))
-        SurfaceCard {
+        if (ready?.isDemo == false) {
+            SurfaceCard {
+                Column {
+                    val recovery = ready.access?.takeIf { it.recoveryRequired }
+                    ListItem(
+                        headlineContent = {
+                            Text(stringResource(if (recovery != null) R.string.settings_device_recovery_title else R.string.settings_device_connection))
+                        },
+                        supportingContent = {
+                            Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                                if (recovery != null) {
+                                    Text(
+                                        stringResource(
+                                            when (recovery) {
+                                                DeviceAccess.KEY_MISSING -> R.string.settings_device_recovery_key_missing
+                                                DeviceAccess.RECORD_UNREADABLE -> R.string.settings_device_recovery_unreadable
+                                                else -> R.string.settings_device_recovery_missing
+                                            },
+                                        ),
+                                        modifier = Modifier.testTag(SETTINGS_DEVICE_RECOVERY_TEST_TAG),
+                                    )
+                                    Text(stringResource(R.string.settings_device_recovery_note))
+                                } else {
+                                    Text(stringResource(R.string.settings_device_values_note))
+                                }
+                                if (ready.unresolvedOperations > 0) {
+                                    Text(
+                                        stringResource(R.string.settings_device_unresolved, ready.unresolvedOperations),
+                                        color = DispenserTheme.extendedColors.warning,
+                                        modifier = Modifier.testTag(SETTINGS_DEVICE_UNRESOLVED_TEST_TAG),
+                                    )
+                                }
+                            }
+                        },
+                        trailingContent = { ConnectionChip(ready.connection, testTag = SETTINGS_CONNECTION_CHIP_TEST_TAG) },
+                        colors = itemColors,
+                    )
+                }
+            }
+        } else SurfaceCard {
             ListItem(
                 headlineContent = { Text(stringResource(R.string.settings_device_not_connected)) },
                 supportingContent = {

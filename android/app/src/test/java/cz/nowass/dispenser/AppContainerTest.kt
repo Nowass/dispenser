@@ -3,6 +3,7 @@ package cz.nowass.dispenser
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import cz.nowass.dispenser.data.local.DispenserDatabase
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -57,7 +58,12 @@ class AppContainerTest {
         assertTrue(container.simulation.observeSimulation().first() == null)
         assertTrue(container.appSettings.displayName.first() == null)
         assertTrue(container.repository.observeUnreadableScheduleCount().first() == 0)
-        assertTrue(container.isDemo)
+        // A fresh install resolves to DEMO (no stored selection, no enrollment).
+        container.startModeResolution()
+        val mode = container.modes.mode.filterNotNull().first()
+        org.junit.Assert.assertEquals(cz.nowass.dispenser.data.mode.ResolvedMode.Demo, mode)
+        assertTrue(container.sources(mode).isDemo)
+        assertTrue(container.sources(mode).simulation != null)
     }
 
     @Test

@@ -1,6 +1,7 @@
 package cz.nowass.dispenser.data
 
 import cz.nowass.dispenser.domain.DeviceStatus
+import cz.nowass.dispenser.domain.Freshness
 import cz.nowass.dispenser.domain.simulation.HistoryEvent
 import cz.nowass.dispenser.domain.simulation.ReservoirState
 import cz.nowass.dispenser.domain.Schedule
@@ -8,12 +9,18 @@ import cz.nowass.dispenser.domain.ScheduleDraft
 import cz.nowass.dispenser.domain.SyncState
 import cz.nowass.dispenser.domain.ValidationError
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 
 /**
  * Single boundary between UI/ViewModels and dispenser data.
  *
- * Implemented by [LocalDispenserRepository] (schedules persisted on the phone, device
- * values simulated); a future `BleDispenserRepository` will implement the same contract.
+ * Implemented by [LocalDispenserRepository] (DEMO: schedules persisted on the phone, device values
+ * simulated) and by [cz.nowass.dispenser.data.device.DeviceUiRepository] (DEVICE: an adapter over the
+ * device repository; M1.10e.4). The two are never mixed: the app shows exactly one of them.
+ *
+ * DEVICE-only outcomes are explicit result variants ([ScheduleWriteResult.NotSent],
+ * [ScheduleWriteResult.Uncertain], …, [CommandResult.Uncertain], …); the DEMO implementation never
+ * returns them. An uncertain mutation is never reported as a failure.
  */
 interface DispenserRepository {
     fun observeDevice(): Flow<DeviceStatus>
@@ -52,6 +59,22 @@ interface DispenserRepository {
 
     /** Deletes schedule [id] if its revision matches. Event history is kept. */
     suspend fun deleteSchedule(id: String, expectedRevision: Int): ScheduleWriteResult
+
+    /**
+     * Freshness of [observeSchedules] (DEVICE: the device's schedule set as last read back, live or
+     * cached with its read time). DEMO: [Freshness.NotApplicable].
+     */
+    fun observeScheduleFreshness(): Flow<Freshness> = flowOf(Freshness.NotApplicable)
+
+    /** False when the source keeps no event history (DEVICE mode: not in protocol v1). */
+    val historyAvailable: Boolean get() = true
+
+    /**
+     * True when mutations need a live connection to the device (DEVICE mode: online-only, E12).
+     * The UI disables editing while [cz.nowass.dispenser.domain.DeviceStatus.connection] is not
+     * CONNECTED; a mutation attempted anyway returns a NotSent result.
+     */
+    val writesRequireConnection: Boolean get() = false
 }
 
 sealed interface ScheduleWriteResult {
@@ -61,4 +84,24 @@ sealed interface ScheduleWriteResult {
     /** Stored revision differs from the expected one (concurrent edit). */
     data object Conflict : ScheduleWriteResult
     data object NotFound : ScheduleWriteResult
+
+    // ---- DEVICE mode only (never returned in DEMO) ----
+
+    /** Provably never reached the device (not connected, session ended before sending, nothing persisted): nothing changed. */
+    data object NotSent : ScheduleWriteResult
+
+    /**
+     * May have been applied by the device: NOT a failure. Resolved by read-back at the next session;
+     * the user must not be invited to repeat the change.
+     */
+    data object Uncertain : ScheduleWriteResult
+
+    /** An earlier change of this schedule awaits verification by read-back; nothing was sent. */
+    data object AwaitingVerification : ScheduleWriteResult
+
+    /** The device refused the change ([code]: BLE_PROTOCOL.md 10.1); nothing changed. */
+    data class DeviceRejected(val code: Int) : ScheduleWriteResult
+
+    /** A device limit the phone checks before sending (name length, timezone, ranges); nothing was sent. */
+    data class DeviceLimit(val problems: Set<String>) : ScheduleWriteResult
 }

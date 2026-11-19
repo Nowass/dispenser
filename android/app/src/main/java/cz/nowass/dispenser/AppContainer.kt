@@ -24,7 +24,28 @@ import cz.nowass.dispenser.data.local.DispenserDatabase
 import cz.nowass.dispenser.data.local.RoomScheduleStore
 import cz.nowass.dispenser.data.local.simulation.RoomSimulationStore
 import cz.nowass.dispenser.data.local.simulation.SimulationDatabase
+import cz.nowass.dispenser.data.device.CredentialSeqAllocator
+import cz.nowass.dispenser.data.device.DeviceDispenserRepository
+import cz.nowass.dispenser.data.device.DeviceUiRepository
+import cz.nowass.dispenser.data.device.UnavailablePhoneTimeSource
+import cz.nowass.dispenser.data.device.local.DeviceDatabase
+import cz.nowass.dispenser.data.device.local.RoomDeviceCacheStore
+import cz.nowass.dispenser.data.device.local.RoomPendingOpsJournal
+import cz.nowass.dispenser.data.mode.AppModeController
+import cz.nowass.dispenser.data.mode.DataStoreAppModeStore
+import cz.nowass.dispenser.data.mode.ResolvedMode
+import cz.nowass.dispenser.crypto.NativeNoiseProvider
+import cz.nowass.dispenser.crypto.credentials.AndroidKeystoreKeyWrapper
+import cz.nowass.dispenser.crypto.credentials.CredentialStore
+import cz.nowass.dispenser.device.ops.ManagerSessionPort
+import cz.nowass.dispenser.device.session.DeviceSessionManager
+import cz.nowass.dispenser.device.transport.AndroidBluetoothPrerequisites
+import cz.nowass.dispenser.device.transport.AndroidGattPortFactory
+import cz.nowass.dispenser.device.transport.GattTransportFactory
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
+import cz.nowass.dispenser.domain.DeviceAccess
+import kotlinx.coroutines.flow.MutableStateFlow
+import cz.nowass.dispenser.domain.simulation.LowStockPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,11 +53,22 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.time.Clock
 
-/** Manual dependency container; lives as long as the process. */
-class AppContainer(context: Context) {
-    /** Device values (battery, reservoir, history) are still simulated, so the DEMO badge stays. */
-    val isDemo: Boolean = true
+/**
+ * What the UI shows in one mode (docs/ANDROID_BLE_DESIGN.md 2.3, E1). Built for exactly one
+ * [ResolvedMode]; DEMO and DEVICE sources are never combined.
+ */
+class UiSources(
+    val mode: ResolvedMode,
+    val repository: DispenserRepository,
+    /** DEMO-only simulation controls; null in DEVICE mode. */
+    val simulation: SimulationController?,
+    val lowStockPolicy: LowStockPolicy,
+) {
+    val isDemo: Boolean get() = mode == ResolvedMode.Demo
+}
 
+/** Manual dependency container; lives as long as the process. */
+class AppContainer(private val context: Context) {
     /** Phone clock in the schedule timezone; tests and previews inject fixed clocks instead. */
     val clock: Clock = Clock.system(DEFAULT_ZONE)
 
@@ -97,6 +129,76 @@ class AppContainer(context: Context) {
 
     val appSettings: AppSettingsRepository get() = settingsRepository.also { requireStorageReady() }
 
+    // ---- App mode (M1.10e.4a) ------------------------------------------------------------------
+
+    /** Credential records (never backed up; docs/ANDROID_BLE_DESIGN.md 11.1–11.2). */
+    private val credentialDir: File by lazy { credentialDirectory(context) }
+
+    /** The mode selection, in its own DataStore file (not part of the JSON backup or a restore). */
+    val modes: AppModeController by lazy {
+        AppModeController(
+            store = DataStoreAppModeStore(
+                PreferenceDataStoreFactory.create { context.applicationContext.preferencesDataStoreFile(DataStoreAppModeStore.FILE_NAME) },
+            ),
+            enrollments = { id -> CredentialStore.hasConfirmedRecord(credentialDir, id) },
+            scope = appScope,
+        )
+    }
+
+    /** Resolves the persisted mode once per process (file checks only). */
+    fun startModeResolution() {
+        if (modes.mode.value == null) modes.start()
+    }
+
+    /** The UI's data sources for [mode]. DEMO requires ready local storage (pending restore recovery). */
+    fun sources(mode: ResolvedMode): UiSources = when (mode) {
+        ResolvedMode.Demo -> localRepository.simulation.let { sim ->
+            UiSources(mode, repository, simulation, sim.lowStockPolicy)
+        }
+        is ResolvedMode.Device -> UiSources(mode, deviceUi(mode.deviceId), simulation = null, lowStockPolicy = LowStockPolicy())
+    }
+
+    // ---- Device stack: built only when DEVICE mode is shown -----------------------------------
+
+    private val noise: NativeNoiseProvider by lazy { NativeNoiseProvider() }
+    private val credentials: CredentialStore by lazy { CredentialStore(credentialDir, AndroidKeystoreKeyWrapper(), noise) }
+    private val deviceDatabase: DeviceDatabase by lazy { DeviceDatabase.build(context) }
+
+    /** The process-wide owner of the single live session (docs/ANDROID_BLE_DESIGN.md 4.4, E9). */
+    val sessionManager: DeviceSessionManager by lazy {
+        DeviceSessionManager(
+            GattTransportFactory(AndroidGattPortFactory(context.applicationContext), AndroidBluetoothPrerequisites(context.applicationContext), appScope),
+            noise,
+            credentials,
+            appScope,
+        )
+    }
+
+    private val deviceUis = HashMap<String, DeviceUiRepository>()
+
+    @Synchronized
+    private fun deviceUi(deviceId: String): DeviceUiRepository = deviceUis.getOrPut(deviceId) {
+        val dao = deviceDatabase.dao()
+        // Credential health, checked once off the main thread: a missing key or record keeps DEVICE mode
+        // in the recovery-required state (cached values and unresolved operations stay visible).
+        val access = MutableStateFlow(DeviceAccess.CHECKING)
+        appScope.launch(Dispatchers.IO) { access.value = DeviceUiRepository.credentialAccess(credentials, deviceId) }
+        DeviceUiRepository(
+            device = DeviceDispenserRepository(
+                deviceId = deviceId,
+                address = { null }, // the CDM association address arrives with onboarding (M1.10e.4b)
+                port = ManagerSessionPort(sessionManager),
+                journal = RoomPendingOpsJournal(dao),
+                cache = RoomDeviceCacheStore(dao),
+                seqAllocator = CredentialSeqAllocator(credentials),
+                timeSource = UnavailablePhoneTimeSource, // D6: SET_TIME stays disabled
+                scope = appScope,
+            ),
+            clock = clock,
+            access = access,
+        )
+    }
+
     /** Public GitHub Releases source (owner/repo from gradle.properties via resources; no credentials). */
     private val githubOwner: String by lazy { context.getString(R.string.github_owner) }
     private val githubRepo: String by lazy { context.getString(R.string.github_repo) }
@@ -122,6 +224,9 @@ class AppContainer(context: Context) {
         AppVersion(name = info.versionName ?: "?", code = PackageInfoCompat.getLongVersionCode(info))
     }
 }
+
+/** Credential records: app-private no-backup storage (never in Auto Backup or device transfer). */
+fun credentialDirectory(context: Context): File = File(context.noBackupFilesDir, "credentials")
 
 class DispenserApplication : Application() {
     val container: AppContainer by lazy { AppContainer(this) }

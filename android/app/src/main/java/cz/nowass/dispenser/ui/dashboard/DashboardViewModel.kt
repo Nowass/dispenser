@@ -1,5 +1,7 @@
 package cz.nowass.dispenser.ui.dashboard
 
+import cz.nowass.dispenser.domain.Freshness
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -38,6 +40,8 @@ sealed interface DashboardUiState {
         val battery: BatteryUi,
         /** Today plus six following days, computed from the repository's schedules. */
         val week: List<DayPreviewUi>,
+        /** DEVICE mode: freshness of the reservoir and battery values (one device status record). */
+        val freshness: Freshness = Freshness.NotApplicable,
     ) : DashboardUiState
 }
 
@@ -130,6 +134,7 @@ class DashboardViewModel(repository: DispenserRepository) : ViewModel() {
                     tone = if (device.batteryPercent == null) StatusTone.Unknown else StatusTone.Normal,
                 ),
                 week = weekPreview(schedules, device),
+                freshness = device.freshness,
             )
         }
 

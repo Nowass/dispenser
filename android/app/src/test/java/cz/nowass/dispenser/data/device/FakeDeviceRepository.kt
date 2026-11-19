@@ -1,0 +1,97 @@
+package cz.nowass.dispenser.data.device
+
+import cz.nowass.dispenser.device.ops.ClockTrust
+import cz.nowass.dispenser.device.ops.ConfigRecord
+import cz.nowass.dispenser.device.ops.DiagnosticsRecord
+import cz.nowass.dispenser.device.ops.InviteRecord
+import cz.nowass.dispenser.device.ops.ManualDoseRecord
+import cz.nowass.dispenser.device.ops.OpResult
+import cz.nowass.dispenser.device.ops.PhoneRecord
+import cz.nowass.dispenser.device.ops.Readiness
+import cz.nowass.dispenser.device.ops.StatusRecord
+import cz.nowass.dispenser.device.ops.TimeDecisionRecord
+import cz.nowass.dispenser.device.session.DeviceEvent
+import cz.nowass.dispenser.device.session.SessionState
+import cz.nowass.dispenser.domain.ScheduleDraft
+import cz.nowass.dispenser.domain.toSchedule
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOf
+
+/**
+ * Scripted [DeviceRepository] for the DEVICE-mode adapter and ViewModel tests: freshness and outcomes
+ * are set directly, so every mapping (Live / Cached / Unknown, Uncertain / NotSent / …) is exercised
+ * deterministically. The real repository is covered against the firmware (DeviceRepositoryFirmwareTest,
+ * DeviceUiRepositoryFirmwareTest).
+ */
+class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : DeviceRepository {
+    override val connection = MutableStateFlow<SessionState>(SessionState.Idle)
+    override val events: SharedFlow<DeviceEvent> = MutableSharedFlow()
+
+    val statusF = MutableStateFlow<Fresh<StatusRecord>>(Fresh.Unknown)
+    val schedulesF = MutableStateFlow<Fresh<DeviceSchedules>>(Fresh.Unknown)
+
+    /** Next outcome of a schedule write / refill. */
+    var writeOutcome: OpResult<ScheduleWrite> = OpResult.NotSent("not connected")
+    var refillOutcome: OpResult<StatusRecord> = OpResult.NotSent("not connected")
+    val calls = mutableListOf<String>()
+
+    override fun status(): Flow<Fresh<StatusRecord>> = statusF
+    override fun schedules(): Flow<Fresh<DeviceSchedules>> = schedulesF
+    override fun config(): Flow<Fresh<ConfigRecord>> = flowOf(Fresh.Unknown)
+    override fun diagnostics(): Flow<Fresh<DiagnosticsRecord>> = flowOf(Fresh.Unknown)
+    override fun phones(): Flow<Fresh<List<PhoneRecord>>> = flowOf(Fresh.Unknown)
+    val pendingF = MutableStateFlow<List<PendingOp>>(emptyList())
+    override fun pendingOperations(): Flow<List<PendingOp>> = pendingF
+
+    override suspend fun connect(): ConnectOutcome = ConnectOutcome.NoAddress
+    override suspend fun disconnect(graceful: Boolean) = Unit
+
+    override suspend fun createSchedule(draft: ScheduleDraft): OpResult<ScheduleWrite> { calls += "create"; return writeOutcome }
+    override suspend fun updateSchedule(id: String, expectedRevision: Long, draft: ScheduleDraft): OpResult<ScheduleWrite> {
+        calls += "update $id $expectedRevision enabled=${draft.enabled}"; return writeOutcome
+    }
+    override suspend fun deleteSchedule(id: String, expectedRevision: Long): OpResult<ScheduleWrite> { calls += "delete $id"; return writeOutcome }
+    override suspend fun refill(remainingUl: Long): OpResult<StatusRecord> { calls += "refill $remainingUl"; return refillOutcome }
+
+    private fun no(): Nothing = throw UnsupportedOperationException("not used by the shared-screen adapter")
+    override suspend fun refreshStatus(): OpResult<StatusRecord> = no()
+    override suspend fun refreshDiagnostics(): OpResult<DiagnosticsRecord> = no()
+    override suspend fun ackRejections(): OpResult<Unit> = no()
+    override suspend fun refreshConfig(): OpResult<ConfigRecord> = no()
+    override suspend fun setConfig(expectedRevision: Long, mask: Int, values: ConfigRecord): OpResult<Long> = no()
+    override suspend fun refreshSchedules(): OpResult<DeviceSchedules> = no()
+    override suspend fun manualDose(volumeUl: Long): OpResult<ManualDoseRecord> = no()
+    override suspend fun resendManualDose(journalId: Long): OpResult<ManualDoseRecord> = no()
+    override suspend fun discardManualDose(journalId: Long): OpResult<Unit> = no()
+    override suspend fun acknowledge(journalId: Long): OpResult<Unit> = no()
+    override suspend fun setReadiness(readiness: Readiness): OpResult<StatusRecord> = no()
+    override suspend fun setTime(): OpResult<TimeDecisionRecord> = no()
+    override suspend fun refreshPhones(): OpResult<List<PhoneRecord>> = no()
+    override suspend fun removePhone(slot: Int): OpResult<Unit> = no()
+    override suspend fun createInvite(nameHint: String): OpResult<InviteRecord> = no()
+    override suspend fun cancelInvite(): OpResult<Unit> = no()
+    override suspend fun cancelRecovery(): OpResult<Unit> = no()
+
+    fun authenticated(generation: Long = 7) {
+        connection.value = SessionState.Authenticated(deviceId, generation, slot = 0)
+    }
+
+    companion object {
+        fun status(capacityUl: Long = 200_000, remainingUl: Long = 150_000, battery: Int? = 80) = StatusRecord(
+            readiness = Readiness.READY, dosingFlags = 0, gates = 0, pumpProblems = 0,
+            capacityUl = capacityUl, remainingUl = remainingUl, lowPercent = 20, estimateUncertain = false,
+            clockTrust = ClockTrust.SYNCED, clockReason = 0, deviceUtc = 1_795_000_000, nextDueAt = null,
+            pendingNotes = 0, highestSeverity = 0, storageOk = true, sessionSecondsLeft = 600,
+            batteryPercent = battery, manualFloor = 1,
+        )
+
+        fun schedule(draft: ScheduleDraft, id: String, revision: Long): DeviceSchedule {
+            val record = (DeviceScheduleMapping.toRecord(draft, id, revision) as DeviceScheduleMapping.ToRecord.Ok).record
+            return DeviceSchedule(draft.toSchedule(id, revision.toInt()), record)
+        }
+    }
+}

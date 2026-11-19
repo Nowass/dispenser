@@ -8,6 +8,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import cz.nowass.dispenser.data.DispenserRepository
 import cz.nowass.dispenser.domain.simulation.HistoryEvent
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
@@ -19,14 +20,22 @@ data class HistoryDayUi(val date: LocalDate, val events: List<HistoryEvent>)
 sealed interface HistoryUiState {
     data object Loading : HistoryUiState
     data class Ready(val days: List<HistoryDayUi>, val zone: ZoneId) : HistoryUiState
+
+    /** DEVICE mode: protocol v1 carries no device history (types 0x90–0x9F reserved); nothing is shown or invented. */
+    data object Unavailable : HistoryUiState
 }
 
 /** Newest-first history grouped by local date (D11). Presentation only. */
 class HistoryViewModel(repository: DispenserRepository) : ViewModel() {
 
-    val uiState: StateFlow<HistoryUiState> = combine(repository.observeHistory(), repository.observeDevice()) { events, device ->
-        HistoryUiState.Ready(group(events, device.zone), device.zone)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HistoryUiState.Loading)
+    val uiState: StateFlow<HistoryUiState> =
+        if (!repository.historyAvailable) {
+            MutableStateFlow(HistoryUiState.Unavailable)
+        } else {
+            combine(repository.observeHistory(), repository.observeDevice()) { events, device ->
+                HistoryUiState.Ready(group(events, device.zone), device.zone)
+            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HistoryUiState.Loading)
+        }
 
     companion object {
         fun factory(repository: DispenserRepository): ViewModelProvider.Factory = viewModelFactory {

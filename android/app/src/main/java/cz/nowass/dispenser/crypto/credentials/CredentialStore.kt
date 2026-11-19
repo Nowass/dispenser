@@ -86,6 +86,15 @@ class CredentialStore(
     fun load(deviceIdHex: String): CredentialState = loadFile(deviceIdHex, file(deviceIdHex), pending = false)
 
     /**
+     * A CONFIRMED credential record exists for [deviceIdHex] (usable, lost or unreadable — the record
+     * is never deleted by this check). A staged ([loadPending]) enrollment does not count: it is not a
+     * confirmed enrollment. Reads no key material and does not touch the Keystore (used at startup to
+     * restore DEVICE mode, M1.10e.4).
+     */
+    @Synchronized
+    fun hasConfirmedRecord(deviceIdHex: String): Boolean = hasConfirmedRecord(dir, deviceIdHex)
+
+    /**
      * A staged enrollment whose ENROLL_RESULT was never received (docs/ANDROID_BLE_DESIGN.md 11.7):
      * the device may or may not have stored it. Present (slot -1) until [confirmPending] (after a
      * successful IK SESSION with this key) or an explicit user [discardPending].
@@ -345,13 +354,19 @@ class CredentialStore(
         }
     }
 
-    private companion object {
-        fun normalize(id: String): String {
+    companion object {
+        /**
+         * [hasConfirmedRecord] without a store instance (no native library, no Keystore): used at
+         * startup to resolve the app mode. Same file naming as the store.
+         */
+        fun hasConfirmedRecord(dir: File, deviceIdHex: String): Boolean = File(dir, "${normalize(deviceIdHex)}.cred").isFile
+
+        private fun normalize(id: String): String {
             val s = id.lowercase()
             require(s.length == 12 && s.all { it in '0'..'9' || it in 'a'..'f' }) { "device ID: 12 hex digits" }
             return s
         }
 
-        fun hexToBytes(s: String) = ByteArray(s.length / 2) { s.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
+        private fun hexToBytes(s: String) = ByteArray(s.length / 2) { s.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
     }
 }

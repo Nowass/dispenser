@@ -1,8 +1,8 @@
 # Dispenser V2 — Android BLE client integration (M1.10e)
 
-Status: **revision 8. M1.10e.1 (`6a73441`), M1.10e.2a (`a7bce87`) and M1.10e.2b (`4b126b2`,
-`582ad3c`) committed. M1.10e.3 (device repository and operations, decisions D1–D8, section 15)
-implemented and tested, uncommitted, awaiting review.**
+Status: **revision 9. M1.10e.1 (`6a73441`), M1.10e.2a (`a7bce87`), M1.10e.2b (`4b126b2`,
+`582ad3c`) and M1.10e.3 (`f7b8c22`, section 15) committed. M1.10e.4a (mode and data plumbing,
+section 16) implemented and tested, uncommitted, awaiting the architecture review.**
 M1.10d.2, M1.10c.2b and M1.10e.5 stay OPEN; nothing here is evidence for radio behavior.
 
 Baseline: `docs/BLE_PROTOCOL.md` v1.0 as amended by M1.10d.1 (sections 2, 3, 10.4a, 11.3),
@@ -1235,6 +1235,85 @@ the additional rules below; D6 modified.
   device keeps its own time rules (NTP preferred, holds); dosing gates that need trusted time stay
   in force.
 - UI adaptation to `DispenserRepository`, CDM address, onboarding: M1.10e.4.
+
+## 16. Implementation notes (M1.10e.4a — app mode and data plumbing)
+
+Plan approved with conditions (review of the M1.10e.4 plan, decisions 1–8): one review gate per step
+(a: architecture, b: onboarding/security, c: QR/secret handling, d: final acceptance); nothing is
+committed before its review. Step a adds **no user-reachable behavior**: DEVICE mode can only be
+entered with a confirmed enrollment, and enrollment arrives in step b. DEMO, the visual design, About,
+Check for Updates, the changelog and the licences are unchanged.
+
+### 16.1 Implemented
+
+| Part | Implemented |
+|---|---|
+| `data/mode/AppMode` | `AppMode {DEMO, DEVICE}` + selected device ID in their own DataStore file `app_mode` (not in the JSON backup, not touched by a restore, excluded from system backup like every file); unknown or malformed stored values read as DEMO. DEVICE can only be **selected** with a CONFIRMED credential record (`AppModeController.enterDevice`, `CredentialStore.hasConfirmedRecord`; a staged enrollment, `.pending` 11.7, is not an enrollment). `AppModeResolver` (review of 4a): once selected, DEVICE is restored after every restart — also while disconnected and also when the credential has since become unusable; DEMO is never substituted silently (that would hide cached values and unresolved operations). `enterDemo` keeps the device selection. Mode changes never delete credentials, staged enrollments, the device cache or the journal. |
+| `AppContainer` / `MainActivity` | `UiSources(mode, repository, simulation?, lowStockPolicy)` built for exactly one resolved mode; the UI renders nothing before the mode is resolved and is rebuilt (`key(mode)`: navigation, ViewModels, saved state) on a mode change, so no screen can mix DEMO and DEVICE data. The device stack (native Noise, Keystore credential store, `device.db`, session manager, `AndroidGattPortFactory`) is created lazily, only when DEVICE mode is shown. CDM address: `null` until step b (`connect()` → `NoAddress`). `PhoneTimeSource`: `UnavailablePhoneTimeSource` (SET_TIME disabled, D6). |
+| Recovery-required state (review of 4a) | `DeviceUiRepository.credentialAccess` (container: once per device, off the main thread) loads and at once zeroizes the credential: `OK`, `KEY_MISSING` (Keystore key gone / invalidated), `RECORD_UNREADABLE` (tampered, truncated, unknown format; also any unexpected Keystore error — fail closed), `RECORD_MISSING` (confirmed record gone). Recovery required → connection `RECOVERY_REQUIRED` (chip "Vyžaduje obnovu"), every mutation refused locally (`NotSent`, nothing journaled or sent), cached values with their time and the unresolved-operation count stay visible (Settings explains the cause; "Nevyřešené operace: N … nic se automaticky neopakuje"). No session can authenticate anyway (`NoCredential` / `CredentialLost` / `CredentialUnreadable` after HELLO), so journal resolution never runs and nothing is re-issued; the journal is never touched by a mode change or by the credential state. After re-enrollment (step b) the rows are resolved by read-back at the next session (11.4). |
+| `data/device/DeviceUiRepository` (decision 1) | adapter `DispenserRepository` ← `DeviceRepository` for the shared screens: `DeviceStatus` with `source = DEVICE`, connection per device (CONNECTED only for an authenticated session of the selected device; CONNECTING while connecting/handshaking/confirming), battery and the device's own reservoir estimate with `Freshness` (Live only while that session is live; Cached with the read time; Unknown); schedules = the device's set as read back (`DEVICE_APPLIED`), with their freshness; no history (`historyAvailable = false`); `writesRequireConnection = true`. Outcomes stay explicit (below). |
+| Contract additions (`DispenserRepository`, `CommandResult`) | default members (DEMO implementation unchanged): `observeScheduleFreshness()`, `historyAvailable`, `writesRequireConnection`; DEVICE-only result variants `ScheduleWriteResult.{NotSent, Uncertain, AwaitingVerification, DeviceRejected, DeviceLimit}` and `CommandResult.Device.{NotSent, Uncertain, AwaitingVerification, DeviceRejected, NotAccepted}`; `DeviceStatus.freshness`, `ConnectionState.CONNECTING`, domain `Freshness`. |
+| Shared screens in DEVICE mode | header: connection chip (same shape and place as the DEMO badge) instead of the badge; dashboard/reservoir/settings: no "simulace" tag, "živě" or "uloženo HH:MM" (with the date when not today) on device values; unknown estimate says "not read from the device"; calendar: "Rozvrhy ze zařízení · <freshness>", create/toggle disabled while disconnected; editor: Save/Delete disabled while disconnected ("Uložení vyžaduje připojené zařízení"); reservoir: refill disabled while disconnected; history: "not available from the device in protocol v1"; settings: mode "Zařízení (Bluetooth)", no Simulace section, device connection row. |
+
+### 16.2 Outcome mapping (condition 1)
+
+| Device outcome | Shared-screen result | UI |
+|---|---|---|
+| `Ok` | `Success` (schedule = the device's read-back record) / `Done` | editor closes "Uloženo a potvrzeno zařízením"; refill "Doplnění potvrzeno zařízením" |
+| `Uncertain` | `Uncertain` | **not a failure**: editor closes with "verified at the next connection"; refill/toggle show the same in warning colour, "neopakujte"; never mapped to Conflict, NotFound or NotSent, so nothing invites a retry |
+| `NotSent`; `Refused(SessionChanged / PersistenceFailed / …)` | `NotSent` | nothing changed, the edit stays open (a retry is safe: provably not sent) |
+| `Refused(Unresolved)` | `AwaitingVerification` | earlier change awaits read-back; nothing sent |
+| `Refused(Invalid)` | `DeviceLimit` / `NotAccepted` | device limits; nothing sent |
+| `Rejected(CONFLICT / NOT_FOUND)` | `Conflict` / `NotFound` | existing conflict / deleted-meanwhile banners |
+| `Rejected(other)` | `DeviceRejected(code)` | device refused; nothing changed |
+
+### 16.3 Tests
+
+- `DeviceUiRepositoryTest` (10, scripted device): recovery required for each unusable credential
+  state (even with a stale session: never CONNECTED; unresolved rows counted, resolved rows not; every
+  mutation NotSent without reaching the repository); Unknown → nothing invented; Live only while
+  connected, Cached keeps its read time; connection per device; unusable capacity → no estimate;
+  schedules device-confirmed with freshness; no history; every write and refill outcome above.
+- `AppModeTest` (3): selection needs a confirmed record (staged ≠ confirmed); DEVICE restored after a
+  restart without a session; enter/leave DEVICE never deletes the confirmed or the staged record; back
+  to DEVICE without a new enrollment; a vanished record keeps DEVICE (recovery required), but DEVICE
+  cannot be selected again without a confirmed record; malformed values.
+- `DeviceModeViewModelsTest` (7): dashboard, history, settings, editor (online-only; NotSent and
+  AwaitingVerification keep the editor open; Uncertain closes it, no conflict), confirmed save,
+  reservoir (online-only; Uncertain is neither success nor failure), calendar toggle outcomes.
+- `DeviceUiRepositoryFirmwareTest` (2, real firmware): (new) with an unresolved manual dose journaled,
+  each credential loss (Keystore key deleted, record corrupted, record deleted) after a process restart
+  → recovery required, unresolved count 1, cached values, writes NotSent, `connect()` fails with the
+  matching failure, zero GET_RESULT / MANUAL_DOSE / REFILL / CREATE_SCHEDULE frames, the row kept;
+  credential restored → GET_RESULT at the next session, MANUAL_DOSE never re-issued, row kept. And: live values and CONNECTED after connect;
+  refill and schedule creation confirmed by the device and shown as `DEVICE_APPLIED`; after
+  disconnect the same values Cached, writes `NotSent` with zero frames sent; after a process restart
+  cached values only.
+- `ModeShellTest` (3, Robolectric Compose; recovery-required shell: chip, cached values, disabled
+  schedule creation, Settings cause and unresolved count; test-only dependency `ui-test-junit4` added to
+  `testImplementation`): DEMO keeps the badge and the Simulace section; DEVICE shows the chip, no
+  badge, no "simulace" anywhere, "uloženo 10:30" on the cached device values, disabled schedule
+  creation, history unavailable, no Simulace section.
+- `AppContainerTest`: a fresh install resolves to DEMO with the simulation.
+- `SystemBackupPolicyTest` (+1): the mode DataStore (files domain), `device.db` (databases) and the
+  credential directory (no-backup, under root) are in domains excluded from cloud Auto Backup, device
+  transfer and the legacy rules (`allowBackup=false` as before); the JSON backup code references none
+  of them.
+- Mutation checks (each must fail a test): Uncertain write → Conflict (3 failures), Uncertain refill
+  → NotSent (2), Cached shown as Live (8), DEVICE without a confirmed record (2), editor treating
+  Uncertain as retryable (1), edits offered offline (5), another device's session counted as
+  connected (1); review of 4a: missing record falls back to DEMO (2), mutations not blocked in recovery
+  (1), recovery not shown (3), unresolved count hidden (3), lost key reported as OK (1).
+- DEMO regression: the existing unit and instrumented tests are unchanged.
+
+### 16.4 Notes for the review
+
+- Backup / restore in DEVICE mode: the Backup screen stays available and still covers the phone-local
+  DEMO data only (11.2); a restore never touches the mode, credentials, journal or device cache.
+- The dashboard's low-stock tone uses the default `LowStockPolicy` in both modes (unchanged); the
+  device's own thresholds, gates and readiness are shown by the device status screen (step d).
+- `CredentialStore.hasConfirmedRecord` (file check, also as a static for startup) is the only change
+  in `crypto/`.
 
 ---
 
