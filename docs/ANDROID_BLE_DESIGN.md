@@ -7,15 +7,15 @@ Status: **revision 10 (current implementation status).**
 | M1.10e.1 native Noise provider, vectors, credentials | committed `6a73441`, accepted |
 | M1.10e.2a GATT transport and frame link | committed `a7bce87`, accepted |
 | M1.10e.2b secure session, firmware-in-the-loop | committed `4b126b2`, `582ad3c`, accepted |
-| M1.10e.3 device repository and operations (section 15) | committed `f7b8c22`, accepted; post-acceptance review fixes in 15.5 |
+| M1.10e.3 device repository and operations (section 15) | committed `f7b8c22`, accepted; review fixes `4d7e3b2`, `2a9d20a` (15.5), accepted |
 | M1.10e.4a app mode and data plumbing (section 16) | committed `e7564da`, accepted |
-| M1.10e.4b onboarding / CDM (next) | not started; stops for the onboarding/security review |
+| M1.10e.4b onboarding / CDM (section 17) | implemented and tested, uncommitted, awaiting the onboarding/security review |
 | M1.10e.4c scanner and invitations, M1.10e.4d device operations | not started; each stops for its review |
 | M1.10e.5 real-device interop and acceptance | OPEN (hardware) |
 
 Sections 1–11 are the design baseline written before implementation (revision 2–8); where they
 describe the app "today" they describe the state before M1.10e.1. The implemented state is in
-sections 12–16.
+sections 12–17.
 M1.10d.2, M1.10c.2b and M1.10e.5 stay OPEN; nothing here is evidence for radio behavior.
 
 Baseline: `docs/BLE_PROTOCOL.md` v1.0 as amended by M1.10d.1 (sections 2, 3, 10.4a, 11.3),
@@ -1401,6 +1401,55 @@ Check for Updates, the changelog and the licences are unchanged.
   device's own thresholds, gates and readiness are shown by the device status screen (step d).
 - `CredentialStore.hasConfirmedRecord` (file check, also as a static for startup) is the only change
   in `crypto/`.
+
+## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
+
+Implemented and tested, uncommitted, awaiting the onboarding/security review. QR scanning and
+invitations (ADD) are M1.10e.4c; connect/disconnect, device operations and the background grace period
+are M1.10e.4d.
+
+### 17.1 Implemented
+
+| Part | Implemented |
+|---|---|
+| Manifest (4.1) | `BLUETOOTH_CONNECT` (runtime, API 31+); `BLUETOOTH`, `BLUETOOTH_ADMIN` with `maxSdkVersion="30"`; `uses-feature` `bluetooth_le` and `companion_device_setup`, both `required="false"` (DEMO installs everywhere). **Not added (decision for review):** `BLUETOOTH_SCAN neverForLocation` and `ACCESS_FINE_LOCATION maxSdk 30` belong to the fallback scan of 4.1, which is not implemented; they are added with it (if M1.10e.5 shows direct connect is unreliable), so no unused location-class permission ships. |
+| `device/transport/DeviceAssociator` | Companion Device Manager association, single device, `BluetoothLeDeviceFilter` on the Dispenser service UUID; API 33+ `associate(request, executor, callback)` → `onAssociationPending`; API 26–32 `onDeviceFound`; the result Intent → upper-case public address (`EXTRA_ASSOCIATION` / `EXTRA_DEVICE` ScanResult or BluetoothDevice); `disassociate` for "Forget device"; `Unsupported` without the CDM feature. Untested on a real phone until M1.10e.5 (E17). |
+| Address storage | `DeviceAddressStore` in the mode DataStore file (`address_<device-id>`; excluded from every backup); the repository's locator reads it (`ConnectOutcome.NoAddress` before). A locator only. |
+| `data/onboarding/OnboardingController` | readiness (Bluetooth off / permission / unsupported); setup-label entry (lenient manual parsing of 7.1, typed problems: format, device ID, code, check); association with an early "another device" check (the address is the factory MAC = device ID; a match grants nothing); CLAIM and RECOVERY (`OpenRequest.Claim/Recovery`) with UI phases (connecting, handshake, "press three times, n s"); staged enrollments: listed from file names (`CredentialStore.stagedDevices`), confirmed with IK (`ConfirmStaged`, using the stored address) or discarded **only** on an explicit user decision; a new CLAIM/RECOVERY is refused (`STAGED_PENDING`) while a staged key of that device exists, so a staged key is never overwritten; failures report whether a staged key was left (a plain HANDSHAKE_FAILED to message 3 is unauthenticated, so the key stays: 11.7); after a confirmed enrollment: journal resolution and a live status read on that session, then the switch to DEVICE mode (`enterDevice`, refused without a confirmed record). |
+| Secret handling (E4, 7.1) | the setup code exists only in the parsed `SetupLabel` (SecretBytes) inside the controller for the flow; zeroized after a confirmed enrollment, on a new label, on cancel and when the onboarding ViewModel is cleared; the typed text lives only in non-saveable Compose state (never in the saved instance state) and is cleared when handed over; password-type keyboard without autocorrect (no IME learning); the onboarding window is `FLAG_SECURE` while shown; nothing is logged, persisted, put in an Intent or on the clipboard. The ViewModel holds no secret. |
+| `data/onboarding/ForgetDevice` (condition 4) | local only: ends a live session, deletes this phone's confirmed and staged credential records with their Keystore keys, the stored address and the CDM association, returns to DEMO with no device selected. **Does not revoke** the phone on the device (it keeps the slot until another phone removes it or a recovery replaces all phones) — the confirmation dialog says so. The journal and the device cache are kept: unresolved operations are never dropped silently and resolve again if this phone is enrolled with the device again; nothing is re-sent. |
+| UI | Settings → Zařízení: DEMO: "Připojit zařízení" (onboarding), "Obnovit přístup k zařízení" (recovery), "Přepnout na zařízení" when a confirmed device is selected, "not supported" without Bluetooth LE; DEVICE: "Obnovit přístup" in the recovery-required state, "Přepnout do ukázkového režimu", "Zapomenout zařízení" with the explanation. Onboarding route (full screen, existing design): intro, readiness (permission request / enable Bluetooth), label, association (system dialog), phone name (1–24 UTF-8 bytes), progress, done (→ DEVICE mode), failure with retry, "Spárování nebylo potvrzeno" (verify / discard with a confirmation). Czech strings. DEMO never asks for a permission (only the onboarding screen can). |
+
+### 17.2 Tests
+
+- `OnboardingFirmwareTest` (9, real firmware): CLAIM → enrolled, address stored, journal/status hook,
+  label zeroized (a second enroll has nothing to use), DEVICE mode; tolerant but checked label entry;
+  another device picked → reported before connecting, nothing stored; wrong code → HANDSHAKE with the
+  staged key kept, a new CLAIM refused (STAGED_PENDING), confirmation reports NOTHING_STAGED, explicit
+  discard, then the right code works; a claimed device refuses another phone (ALREADY_CLAIMED); lost
+  ENROLL_RESULT → Unconfirmed, DEVICE mode refused, confirmed after a process restart with the stored
+  address; explicit discard of a staged key; RECOVERY refused without the boot hold, then with the hold
+  the UI phase asks for the presses and the phone owns the device alone; "Forget device" deletes the
+  credential, address and association, returns to DEMO, keeps the journal, and the device still holds
+  the slot.
+- `OnboardingViewModelTest` (2, real firmware): the whole flow from label to DEVICE mode; a staged
+  enrollment is shown first on a new screen; clearing the ViewModel zeroizes the label.
+- `OnboardingUiTest` (10, Robolectric): FLAG_SECURE only while shown; the typed code is not restored
+  from saved instance state; the staged-key failure text; Settings pairing, recovery, switch back,
+  no pairing without BLE, "Forget device" explains non-revocation and unresolved operations; merged
+  manifest: BLUETOOTH_CONNECT, no location, scan or camera permission, features not required; legacy
+  permissions end at API 30; only the onboarding screen requests runtime permissions.
+- `FullScreenRouteTest`: the onboarding route. Architecture rules unchanged (the UI imports no
+  crypto, session or transport types).
+- Mutation checks (each fails a test): staged key overwritable, another device accepted, label kept
+  after the enrollment, label not zeroized on close, label in saved state, no FLAG_SECURE.
+
+### 17.3 Manual / M1.10e.5 items
+
+The CDM system dialog and its result on real phones (API 26–32 and 33+), permission denial and
+"don't ask again", Bluetooth enable, vendor CDM behaviour with Location Services off, and
+`neverForLocation` (with the fallback scan, if added) are verified on hardware in M1.10e.5; the
+instrumented tests compile in CI and are not run there (E17).
 
 ---
 

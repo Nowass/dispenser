@@ -41,7 +41,17 @@ interface AppModeStore {
     suspend fun write(mode: StoredMode)
 }
 
-class DataStoreAppModeStore(private val dataStore: DataStore<Preferences>) : AppModeStore {
+/**
+ * The associated Bluetooth address per device (CDM, docs/ANDROID_BLE_DESIGN.md 4.1): a locator only,
+ * never an identity. Kept in the mode's DataStore file (excluded from every backup).
+ */
+interface DeviceAddressStore {
+    val addresses: Flow<Map<String, String>>
+    suspend fun setAddress(deviceId: String, address: String)
+    suspend fun removeAddress(deviceId: String)
+}
+
+class DataStoreAppModeStore(private val dataStore: DataStore<Preferences>) : AppModeStore, DeviceAddressStore {
     override val stored: Flow<StoredMode> = dataStore.data.map { p ->
         StoredMode(
             mode = when (p[KEY_MODE]) {
@@ -59,7 +69,25 @@ class DataStoreAppModeStore(private val dataStore: DataStore<Preferences>) : App
         }
     }
 
+    override val addresses: Flow<Map<String, String>> = dataStore.data.map { p ->
+        p.asMap().mapNotNull { (k, v) ->
+            val id = k.name.removePrefix(ADDRESS_PREFIX)
+            if (k.name.startsWith(ADDRESS_PREFIX) && DEVICE_ID.matches(id) && v is String && ADDRESS.matches(v)) id to v else null
+        }.toMap()
+    }.distinctUntilChanged()
+
+    override suspend fun setAddress(deviceId: String, address: String) {
+        require(DEVICE_ID.matches(deviceId) && ADDRESS.matches(address)) { "device id / address format" }
+        dataStore.edit { it[stringPreferencesKey(ADDRESS_PREFIX + deviceId)] = address }
+    }
+
+    override suspend fun removeAddress(deviceId: String) {
+        dataStore.edit { it.remove(stringPreferencesKey(ADDRESS_PREFIX + deviceId)) }
+    }
+
     companion object {
+        private const val ADDRESS_PREFIX = "address_"
+        private val ADDRESS = Regex("[0-9A-F]{2}(:[0-9A-F]{2}){5}")
         const val FILE_NAME = "app_mode"
         private val KEY_MODE = stringPreferencesKey("mode")
         private val KEY_DEVICE = stringPreferencesKey("device_id")
@@ -67,10 +95,14 @@ class DataStoreAppModeStore(private val dataStore: DataStore<Preferences>) : App
     }
 }
 
-class InMemoryAppModeStore(initial: StoredMode = StoredMode.DEFAULT) : AppModeStore {
+class InMemoryAppModeStore(initial: StoredMode = StoredMode.DEFAULT) : AppModeStore, DeviceAddressStore {
     private val state = MutableStateFlow(initial)
     override val stored: Flow<StoredMode> = state.asStateFlow()
     override suspend fun write(mode: StoredMode) { state.value = mode }
+    private val map = MutableStateFlow<Map<String, String>>(emptyMap())
+    override val addresses: Flow<Map<String, String>> = map.asStateFlow()
+    override suspend fun setAddress(deviceId: String, address: String) { map.value = map.value + (deviceId to address) }
+    override suspend fun removeAddress(deviceId: String) { map.value = map.value - deviceId }
 }
 
 /** Whether a CONFIRMED enrollment record exists (a staged, unconfirmed enrollment does not count). */
@@ -137,6 +169,15 @@ class AppModeController(
     suspend fun enterDemo() = lock.withLock {
         val selected = store.stored.first().copy(mode = AppMode.DEMO)
         store.write(selected)
+        state.value = ResolvedMode.Demo
+    }
+
+    /** The selected device (also while DEMO is shown), for "switch back to the device". */
+    val selectedDevice: Flow<String?> get() = store.stored.map { it.deviceId }
+
+    /** "Forget device": DEMO, no device selected. Deletes nothing else (the caller removes the credential). */
+    suspend fun clearSelection() = lock.withLock {
+        store.write(StoredMode.DEFAULT)
         state.value = ResolvedMode.Demo
     }
 }

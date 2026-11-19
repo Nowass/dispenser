@@ -6,6 +6,21 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!--
+        Bluetooth (M1.10e.4b, docs/ANDROID_BLE_DESIGN.md 4.1). DEVICE mode only; DEMO never asks for any
+        Bluetooth or location permission. API 31+: BLUETOOTH_CONNECT (runtime) for GATT to the device
+        associated through the Companion Device Manager; CDM association itself needs no location or
+        scan permission. API 26-30: the legacy install-time permissions. The fallback scan
+        (BLUETOOTH_SCAN neverForLocation / ACCESS_FINE_LOCATION on 26-30) is not part of this step.
+    -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+
+    <!-- Not required: the app installs everywhere (DEMO); device features are offered only when present. -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+    <uses-feature android:name="android.software.companion_device_setup" android:required="false" />
+
+    <!--
         System backup is disabled (A1.5): schedules, simulation and settings never go to Google
         cloud backup or device-to-device transfer. Users move data only with the explicit JSON
         export in Nastavení -> Záloha a obnovení. The rule files also exclude every app domain

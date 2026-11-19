@@ -53,6 +53,7 @@ class MainActivity : ComponentActivity() {
                             assets = container.assets,
                             sourceCodeUrl = container.sourceCodeUrl,
                             backupViewModelFactory = BackupViewModel.factory(container.backup, container.documents, container.clock),
+                            deviceAdmin = remember(resolved) { container.deviceAdmin(resolved) },
                         )
                     }
                 }

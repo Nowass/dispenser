@@ -72,6 +72,8 @@ fun SettingsRoute(
     onOpenAbout: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenBackup: (() -> Unit)? = null,
+    /** Pairing, mode switch and "Forget device" (M1.10e.4b); null = the earlier placeholder (previews, tests). */
+    deviceAdmin: SettingsDeviceAdmin? = null,
 ) {
     val state = simulationViewModel?.uiState?.collectAsStateWithLifecycle()?.value
     val message = simulationViewModel?.message?.collectAsStateWithLifecycle()?.value
@@ -99,8 +101,21 @@ fun SettingsRoute(
             )
         } ?: SimulationActions(),
         modifier = modifier,
+        deviceAdmin = deviceAdmin,
     )
 }
+
+/** Device entry points in Settings (M1.10e.4b). */
+data class SettingsDeviceAdmin(
+    val bleSupported: Boolean,
+    /** In DEMO: a device with a confirmed enrollment that can be switched back to. */
+    val selectedDeviceInDemo: String? = null,
+    val onConnect: () -> Unit = {},
+    val onRecover: () -> Unit = {},
+    val onSwitchToDevice: () -> Unit = {},
+    val onSwitchToDemo: () -> Unit = {},
+    val onForget: () -> Unit = {},
+)
 
 data class SimulationActions(
     val start: (LocalDateTime, java.time.ZoneId, String, String) -> Unit = { _, _, _, _ -> },
@@ -129,6 +144,8 @@ const val SETTINGS_RESERVOIR_ROW_TEST_TAG = "settings_reservoir_row"
 const val SETTINGS_CONNECTION_CHIP_TEST_TAG = "settings_connection_chip"
 const val SETTINGS_DEVICE_RECOVERY_TEST_TAG = "settings_device_recovery"
 const val SETTINGS_DEVICE_UNRESOLVED_TEST_TAG = "settings_device_unresolved"
+const val SETTINGS_DEVICE_CONNECT_TEST_TAG = "settings_device_connect"
+const val SETTINGS_DEVICE_FORGET_TEST_TAG = "settings_device_forget"
 
 /**
  * Compact settings in four sections (A1.4a): Aplikace, Zásobník (read-only summary +
@@ -144,7 +161,9 @@ fun SettingsScreen(
     appActions: AppSettingsActions,
     actions: SimulationActions,
     modifier: Modifier = Modifier,
+    deviceAdmin: SettingsDeviceAdmin? = null,
 ) {
+    var showForget by rememberSaveable { mutableStateOf(false) }
     val itemColors = ListItemDefaults.colors(
         containerColor = MaterialTheme.colorScheme.surface,
         supportingColor = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -290,8 +309,47 @@ fun SettingsScreen(
                         trailingContent = { ConnectionChip(ready.connection, testTag = SETTINGS_CONNECTION_CHIP_TEST_TAG) },
                         colors = itemColors,
                     )
+                    if (deviceAdmin != null) {
+                        Column(Modifier.padding(horizontal = Spacing.m, vertical = Spacing.s), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                            if (recovery != null) {
+                                OutlinedButton(onClick = deviceAdmin.onRecover, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_recover)) }
+                            }
+                            OutlinedButton(onClick = deviceAdmin.onSwitchToDemo, modifier = Modifier.fillMaxWidth()) {
+                                Text(stringResource(R.string.settings_device_switch_to_demo))
+                            }
+                            TextButton(onClick = { showForget = true }, modifier = Modifier.testTag(SETTINGS_DEVICE_FORGET_TEST_TAG)) {
+                                Text(stringResource(R.string.settings_device_forget), color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
                 }
             }
+        } else if (deviceAdmin != null) SurfaceCard {
+            ListItem(
+                headlineContent = {
+                    Text(deviceAdmin.selectedDeviceInDemo?.let { stringResource(R.string.settings_device_selected, it) } ?: stringResource(R.string.settings_device_not_connected))
+                },
+                supportingContent = {
+                    Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+                        when {
+                            !deviceAdmin.bleSupported -> Text(stringResource(R.string.settings_device_ble_unsupported))
+                            deviceAdmin.selectedDeviceInDemo != null -> {
+                                Button(onClick = deviceAdmin.onSwitchToDevice, modifier = Modifier.padding(top = Spacing.s)) {
+                                    Text(stringResource(R.string.settings_device_switch_to_device))
+                                }
+                            }
+                            else -> {
+                                Text(stringResource(R.string.settings_device_connect_hint))
+                                Button(onClick = deviceAdmin.onConnect, modifier = Modifier.padding(top = Spacing.s).testTag(SETTINGS_DEVICE_CONNECT_TEST_TAG)) {
+                                    Text(stringResource(R.string.settings_device_connect))
+                                }
+                                TextButton(onClick = deviceAdmin.onRecover) { Text(stringResource(R.string.settings_device_recover)) }
+                            }
+                        }
+                    }
+                },
+                colors = itemColors,
+            )
         } else SurfaceCard {
             ListItem(
                 headlineContent = { Text(stringResource(R.string.settings_device_not_connected)) },
@@ -308,6 +366,20 @@ fun SettingsScreen(
             )
         }
         Spacer(Modifier.height(Spacing.m))
+    }
+
+    if (showForget && deviceAdmin != null) {
+        AlertDialog(
+            onDismissRequest = { showForget = false },
+            title = { Text(stringResource(R.string.settings_device_forget_title)) },
+            text = { Text(stringResource(R.string.settings_device_forget_text)) },
+            confirmButton = {
+                TextButton(onClick = { showForget = false; deviceAdmin.onForget() }) {
+                    Text(stringResource(R.string.settings_device_forget), color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { showForget = false }) { Text(stringResource(R.string.dialog_cancel)) } },
+        )
     }
 
     if (showRename && ready != null) {

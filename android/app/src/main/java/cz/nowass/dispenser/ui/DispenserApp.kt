@@ -111,13 +111,30 @@ const val ABOUT_LICENSE_TEXT_ROUTE = "about_license_text"
 /** Backup and restore (full-screen route, A1.4c.1). */
 const val BACKUP_ROUTE = "backup"
 
+/** Onboarding: pairing (CLAIM) or recovery (full-screen route, M1.10e.4b). */
+const val ONBOARDING_ROUTE = "onboarding"
+
+/**
+ * Device administration for the shell (M1.10e.4b): pairing entry, mode switch, "Forget device". The
+ * actions run in the process scope (a mode change rebuilds the UI that triggered them).
+ */
+class DeviceAdminUi(
+    val bleSupported: Boolean,
+    /** In DEMO: a device with a confirmed enrollment that can be switched back to. */
+    val selectedDeviceInDemo: kotlinx.coroutines.flow.Flow<String?>,
+    val onboardingFactory: (cz.nowass.dispenser.data.onboarding.OnboardingPurpose) -> androidx.lifecycle.ViewModelProvider.Factory,
+    val switchToDevice: (String) -> Unit,
+    val switchToDemo: () -> Unit,
+    val forget: () -> Unit,
+)
+
 /**
  * Detail routes that draw their own [cz.nowass.dispenser.ui.components.DetailTopBar]: the shell
  * then hides its tab header and navigation dock (otherwise two headers would be stacked).
  */
 internal fun isFullScreenRoute(route: String?): Boolean {
     val base = route?.substringBefore('?') ?: return false
-    return base in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE, BACKUP_ROUTE) || base.startsWith(ABOUT_ROUTE)
+    return base in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE, BACKUP_ROUTE, ONBOARDING_ROUTE) || base.startsWith(ABOUT_ROUTE)
 }
 
 private const val ARG_TITLE = "title"
@@ -138,6 +155,8 @@ fun DispenserApp(
     backupViewModelFactory: androidx.lifecycle.ViewModelProvider.Factory? = null,
     lowStockPolicy: cz.nowass.dispenser.domain.simulation.LowStockPolicy =
         simulation?.lowStockPolicy ?: cz.nowass.dispenser.domain.simulation.LowStockPolicy(),
+    /** Pairing, mode switch and "Forget device"; null keeps the earlier placeholder (previews, tests). */
+    deviceAdmin: DeviceAdminUi? = null,
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -250,6 +269,18 @@ fun DispenserApp(
                     onOpenReservoir = { navController.navigate(RESERVOIR_ROUTE) { launchSingleTop = true } },
                     onOpenAbout = { navController.navigate(ABOUT_ROUTE) { launchSingleTop = true } },
                     onOpenBackup = backupViewModelFactory?.let { { navController.navigate(BACKUP_ROUTE) { launchSingleTop = true } } },
+                    deviceAdmin = deviceAdmin?.let { admin ->
+                        val selected by remember(admin) { admin.selectedDeviceInDemo }.collectAsStateWithLifecycle(initialValue = null)
+                        cz.nowass.dispenser.ui.settings.SettingsDeviceAdmin(
+                            bleSupported = admin.bleSupported,
+                            selectedDeviceInDemo = selected.takeIf { isDemo },
+                            onConnect = { navController.navigate("$ONBOARDING_ROUTE?purpose=CLAIM") { launchSingleTop = true } },
+                            onRecover = { navController.navigate("$ONBOARDING_ROUTE?purpose=RECOVERY") { launchSingleTop = true } },
+                            onSwitchToDevice = { selected?.let(admin.switchToDevice) },
+                            onSwitchToDemo = admin.switchToDemo,
+                            onForget = admin.forget,
+                        )
+                    },
                     initialTab = entry.arguments?.getString(ARG_TAB),
                     onCreateSchedule = { date -> openEditor(date = date) },
                     onEditSchedule = { id -> openEditor(scheduleId = id) },
@@ -268,6 +299,20 @@ fun DispenserApp(
                         ) { launchSingleTop = true }
                     },
                 )
+            }
+            if (deviceAdmin != null) {
+                composable(
+                    route = "$ONBOARDING_ROUTE?purpose={purpose}",
+                    arguments = listOf(navArgument("purpose") { type = NavType.StringType; defaultValue = "CLAIM" }),
+                ) { entry ->
+                    val purpose = cz.nowass.dispenser.data.onboarding.OnboardingPurpose.entries
+                        .firstOrNull { it.name == entry.arguments?.getString("purpose") } ?: cz.nowass.dispenser.data.onboarding.OnboardingPurpose.CLAIM
+                    cz.nowass.dispenser.ui.onboarding.OnboardingRoute(
+                        viewModel = viewModel(factory = deviceAdmin.onboardingFactory(purpose)),
+                        isDemo = isDemo,
+                        onClose = { navController.popBackStack() },
+                    )
+                }
             }
             if (backupViewModelFactory != null) {
                 composable(BACKUP_ROUTE) {
@@ -368,6 +413,7 @@ private fun MainPager(
     onOpenReservoir: () -> Unit,
     onOpenAbout: () -> Unit,
     onOpenBackup: (() -> Unit)?,
+    deviceAdmin: cz.nowass.dispenser.ui.settings.SettingsDeviceAdmin?,
     initialTab: String?,
     onCreateSchedule: (LocalDate) -> Unit,
     onEditSchedule: (String) -> Unit,
@@ -419,6 +465,7 @@ private fun MainPager(
                 onOpenReservoir = onOpenReservoir,
                 onOpenAbout = onOpenAbout,
                 onOpenBackup = onOpenBackup,
+                deviceAdmin = deviceAdmin,
             )
         }
     }

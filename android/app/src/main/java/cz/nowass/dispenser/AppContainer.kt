@@ -43,6 +43,17 @@ import cz.nowass.dispenser.device.transport.AndroidBluetoothPrerequisites
 import cz.nowass.dispenser.device.transport.AndroidGattPortFactory
 import cz.nowass.dispenser.device.transport.GattTransportFactory
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
+import android.content.pm.PackageManager
+import cz.nowass.dispenser.data.onboarding.ForgetDevice
+import cz.nowass.dispenser.data.onboarding.OnboardingController
+import cz.nowass.dispenser.device.transport.AndroidDeviceAssociator
+import cz.nowass.dispenser.ui.DeviceAdminUi
+import cz.nowass.dispenser.ui.onboarding.OnboardingViewModel
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import cz.nowass.dispenser.domain.DeviceAccess
 import kotlinx.coroutines.flow.MutableStateFlow
 import cz.nowass.dispenser.domain.simulation.LowStockPolicy
@@ -134,15 +145,22 @@ class AppContainer(private val context: Context) {
     /** Credential records (never backed up; docs/ANDROID_BLE_DESIGN.md 11.1–11.2). */
     private val credentialDir: File by lazy { credentialDirectory(context) }
 
-    /** The mode selection, in its own DataStore file (not part of the JSON backup or a restore). */
+    /** The mode selection and associated addresses, in their own DataStore file (not part of the JSON backup or a restore). */
+    private val modeStore: DataStoreAppModeStore by lazy {
+        DataStoreAppModeStore(PreferenceDataStoreFactory.create { context.applicationContext.preferencesDataStoreFile(DataStoreAppModeStore.FILE_NAME) })
+    }
+
     val modes: AppModeController by lazy {
         AppModeController(
-            store = DataStoreAppModeStore(
-                PreferenceDataStoreFactory.create { context.applicationContext.preferencesDataStoreFile(DataStoreAppModeStore.FILE_NAME) },
-            ),
+            store = modeStore,
             enrollments = { id -> CredentialStore.hasConfirmedRecord(credentialDir, id) },
             scope = appScope,
         )
+    }
+
+    /** Associated addresses (CDM), kept current for the repository's synchronous locator. */
+    private val addresses: StateFlow<Map<String, String>> by lazy {
+        modeStore.addresses.stateIn(appScope, SharingStarted.Eagerly, emptyMap())
     }
 
     /** Resolves the persisted mode once per process (file checks only). */
@@ -161,13 +179,15 @@ class AppContainer(private val context: Context) {
     // ---- Device stack: built only when DEVICE mode is shown -----------------------------------
 
     private val noise: NativeNoiseProvider by lazy { NativeNoiseProvider() }
+    private val prerequisites: AndroidBluetoothPrerequisites by lazy { AndroidBluetoothPrerequisites(context.applicationContext) }
+    private val associator: AndroidDeviceAssociator by lazy { AndroidDeviceAssociator(context.applicationContext) }
     private val credentials: CredentialStore by lazy { CredentialStore(credentialDir, AndroidKeystoreKeyWrapper(), noise) }
     private val deviceDatabase: DeviceDatabase by lazy { DeviceDatabase.build(context) }
 
     /** The process-wide owner of the single live session (docs/ANDROID_BLE_DESIGN.md 4.4, E9). */
     val sessionManager: DeviceSessionManager by lazy {
         DeviceSessionManager(
-            GattTransportFactory(AndroidGattPortFactory(context.applicationContext), AndroidBluetoothPrerequisites(context.applicationContext), appScope),
+            GattTransportFactory(AndroidGattPortFactory(context.applicationContext), prerequisites, appScope),
             noise,
             credentials,
             appScope,
@@ -192,7 +212,7 @@ class AppContainer(private val context: Context) {
         return DeviceUiRepository(
             device = DeviceDispenserRepository(
                 deviceId = deviceId,
-                address = { null }, // the CDM association address arrives with onboarding (M1.10e.4b)
+                address = { addresses.value[deviceId] }, // CDM association (locator only, never an identity)
                 port = ManagerSessionPort(sessionManager),
                 journal = RoomPendingOpsJournal(dao),
                 cache = RoomDeviceCacheStore(dao),
@@ -204,6 +224,34 @@ class AppContainer(private val context: Context) {
             access = access,
         )
     }
+
+    // ---- Onboarding and device administration (M1.10e.4b) --------------------------------------
+
+    /** A new onboarding flow (one per onboarding screen; its ViewModel zeroizes the label when cleared). */
+    fun onboardingController(): OnboardingController = OnboardingController(
+        prerequisites = prerequisites,
+        associator = associator,
+        manager = sessionManager,
+        credentials = credentials,
+        addresses = modeStore,
+        modes = modes,
+        // resolution of unresolved operations and a live status read on the session the enrollment opened
+        afterEnrollment = { id -> appScope.launch { deviceUi(id).device.connect() } },
+    )
+
+    private val forgetDevice: ForgetDevice by lazy {
+        ForgetDevice(credentials, modeStore, associator, modes, endSession = { sessionManager.end(graceful = true) })
+    }
+
+    /** The shell's device administration for [mode]. */
+    fun deviceAdmin(mode: ResolvedMode): DeviceAdminUi = DeviceAdminUi(
+        bleSupported = context.packageManager.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE),
+        selectedDeviceInDemo = modes.selectedDevice.map { id -> id?.takeIf { CredentialStore.hasConfirmedRecord(credentialDir, it) } }.flowOn(Dispatchers.IO),
+        onboardingFactory = { purpose -> OnboardingViewModel.factory(purpose, ::onboardingController) },
+        switchToDevice = { id -> appScope.launch { modes.enterDevice(id) } },
+        switchToDemo = { appScope.launch { modes.enterDemo() } },
+        forget = { (mode as? ResolvedMode.Device)?.deviceId?.let { id -> appScope.launch { forgetDevice(id) } } },
+    )
 
     /** Public GitHub Releases source (owner/repo from gradle.properties via resources; no credentials). */
     private val githubOwner: String by lazy { context.getString(R.string.github_owner) }

@@ -95,6 +95,15 @@ class CredentialStore(
     fun hasConfirmedRecord(deviceIdHex: String): Boolean = hasConfirmedRecord(dir, deviceIdHex)
 
     /**
+     * Devices with a staged enrollment whose ENROLL_RESULT was never confirmed (11.7), from the file
+     * names only (no key material read). Onboarding offers to confirm or explicitly discard them.
+     */
+    @Synchronized
+    fun stagedDevices(): List<String> = dir.listFiles().orEmpty()
+        .mapNotNull { f -> f.name.removeSuffix(".pending").takeIf { f.isFile && f.name.endsWith(".pending") && DEVICE_ID.matches(it) } }
+        .sorted()
+
+    /**
      * A staged enrollment whose ENROLL_RESULT was never received (docs/ANDROID_BLE_DESIGN.md 11.7):
      * the device may or may not have stored it. Present (slot -1) until [confirmPending] (after a
      * successful IK SESSION with this key) or an explicit user [discardPending].
@@ -360,6 +369,8 @@ class CredentialStore(
          * startup to resolve the app mode. Same file naming as the store.
          */
         fun hasConfirmedRecord(dir: File, deviceIdHex: String): Boolean = File(dir, "${normalize(deviceIdHex)}.cred").isFile
+
+        private val DEVICE_ID = Regex("[0-9a-f]{12}")
 
         private fun normalize(id: String): String {
             val s = id.lowercase()
