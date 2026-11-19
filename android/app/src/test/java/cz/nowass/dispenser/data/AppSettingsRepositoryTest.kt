@@ -4,7 +4,8 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -41,7 +42,9 @@ class AppSettingsRepositoryTest {
         assertNull(first.displayName.first())
         first.setDisplayName("  Obývák  ")
         assertEquals("Obývák", first.displayName.first())
-        scope1.cancel() // only one active DataStore per file
+        // Only one active DataStore per file: DataStore releases the file when its scope has COMPLETED
+        // (cancel() only requests it; reopening before completion throws "multiple DataStores active").
+        scope1.coroutineContext.job.cancelAndJoin()
 
         val scope2 = CoroutineScope(Dispatchers.IO + SupervisorJob())
         val reopened = open(file, scope2)
@@ -50,6 +53,6 @@ class AppSettingsRepositoryTest {
         assertNull(reopened.displayName.first())
         assertThrows(IllegalArgumentException::class.java) { runBlocking { reopened.setDisplayName("x".repeat(31)) } }
         assertNull(reopened.displayName.first())
-        scope2.cancel()
+        scope2.coroutineContext.job.cancelAndJoin()
     }
 }
