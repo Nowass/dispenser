@@ -33,7 +33,7 @@ sealed interface CommandResult {
     /** May have been applied: NOT a failure; verified by read-back at the next session, never re-sent automatically. */
     data object Uncertain : Device
 
-    /** An earlier command of this kind awaits verification; nothing was sent. */
+    /** An earlier command of this kind is still being processed or awaits verification; nothing was sent. */
     data object AwaitingVerification : Device
 
     /** The device refused ([code]: BLE_PROTOCOL.md 10.1); nothing changed. */

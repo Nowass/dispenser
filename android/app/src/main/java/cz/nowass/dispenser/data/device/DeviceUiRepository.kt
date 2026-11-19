@@ -137,7 +137,7 @@ class DeviceUiRepository(
         is OpResult.NotSent -> CommandResult.NotSent
         is OpResult.Rejected -> CommandResult.DeviceRejected(r.error.code.wire)
         is OpResult.Refused -> when (r.reason) {
-            is LocalRefusal.Unresolved -> CommandResult.AwaitingVerification
+            is LocalRefusal.Unresolved, LocalRefusal.InProgress -> CommandResult.AwaitingVerification
             is LocalRefusal.Invalid -> CommandResult.NotAccepted
             // Nothing was sent in every remaining case (session changed, persistence failed, …).
             else -> CommandResult.NotSent
@@ -178,7 +178,7 @@ class DeviceUiRepository(
             else -> ScheduleWriteResult.DeviceRejected(r.error.code.wire)
         }
         is OpResult.Refused -> when (val reason = r.reason) {
-            is LocalRefusal.Unresolved -> ScheduleWriteResult.AwaitingVerification
+            is LocalRefusal.Unresolved, LocalRefusal.InProgress -> ScheduleWriteResult.AwaitingVerification
             is LocalRefusal.Invalid -> ScheduleWriteResult.DeviceLimit(reason.problems.map { it.name }.toSet())
             else -> ScheduleWriteResult.NotSent
         }

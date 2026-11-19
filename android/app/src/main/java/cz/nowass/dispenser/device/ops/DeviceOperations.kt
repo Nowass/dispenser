@@ -103,6 +103,9 @@ sealed interface LocalRefusal {
     /** An earlier operation of this kind/target is unresolved (11.4, 11.6: no stacking, no duplicate intents). */
     data class Unresolved(val journalId: Long) : LocalRefusal
 
+    /** The same operation (kind and target) is being processed right now (11.6: duplicate intents); nothing sent. */
+    data object InProgress : LocalRefusal
+
     /** No phone time with a defensible uncertainty ≤ 2,000 ms (E13 / D6): SET_TIME is never sent. */
     data object TimeUntrusted : LocalRefusal
 

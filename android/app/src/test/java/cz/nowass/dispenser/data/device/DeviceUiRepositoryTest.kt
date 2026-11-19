@@ -125,6 +125,7 @@ class DeviceUiRepositoryTest {
         check(OpResult.Rejected(DeviceError(DeviceErrorCode.NOT_FOUND, 0, 0)), ScheduleWriteResult.NotFound)
         check(OpResult.Rejected(DeviceError(DeviceErrorCode.LIMIT, 0, 0)), ScheduleWriteResult.DeviceRejected(DeviceErrorCode.LIMIT.wire))
         check(OpResult.Refused(LocalRefusal.Unresolved(4)), ScheduleWriteResult.AwaitingVerification)
+        check(OpResult.Refused(LocalRefusal.InProgress), ScheduleWriteResult.AwaitingVerification)
         check(OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.NAME_TOO_LONG))), ScheduleWriteResult.DeviceLimit(setOf("NAME_TOO_LONG")))
         check(OpResult.Refused(LocalRefusal.SessionChanged), ScheduleWriteResult.NotSent)
         check(OpResult.Refused(LocalRefusal.PersistenceFailed("journal")), ScheduleWriteResult.NotSent)
@@ -190,9 +191,10 @@ class DeviceUiRepositoryTest {
         check(OpResult.Uncertain("lost reply", 3), CommandResult.Uncertain)
         check(OpResult.NotSent("not connected"), CommandResult.NotSent)
         check(OpResult.Refused(LocalRefusal.Unresolved(3)), CommandResult.AwaitingVerification)
+        check(OpResult.Refused(LocalRefusal.InProgress), CommandResult.AwaitingVerification)
         check(OpResult.Refused(LocalRefusal.SessionChanged), CommandResult.NotSent)
         check(OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.REMAINING_ABOVE_CAPACITY))), CommandResult.NotAccepted)
         check(OpResult.Rejected(DeviceError(DeviceErrorCode.REFUSED, 0, 0)), CommandResult.DeviceRejected(DeviceErrorCode.REFUSED.wire))
-        assertEquals(7, fake.calls.count { it == "refill 100000" })
+        assertEquals(8, fake.calls.count { it == "refill 100000" })
     }
 }

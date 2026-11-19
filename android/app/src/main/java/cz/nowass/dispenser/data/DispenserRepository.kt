@@ -96,7 +96,7 @@ sealed interface ScheduleWriteResult {
      */
     data object Uncertain : ScheduleWriteResult
 
-    /** An earlier change of this schedule awaits verification by read-back; nothing was sent. */
+    /** An earlier change of this schedule is still being processed or awaits verification by read-back; nothing was sent. */
     data object AwaitingVerification : ScheduleWriteResult
 
     /** The device refused the change ([code]: BLE_PROTOCOL.md 10.1); nothing changed. */

@@ -33,6 +33,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.time.Instant
@@ -127,13 +129,16 @@ class DeviceDispenserRepository(
             session() ?: return ConnectOutcome.Failed(SessionFailure.ProtocolError("session closed right after opening"))
         }
         // once per session (also one opened elsewhere, e.g. right after an enrollment): resolution
-        // before any new mutation (11.4.3), then the live status
-        if (resolvedGeneration != s.generation) {
-            resolvePending(s)
+        // before any new mutation (11.4.3), then the live status. An unfinished resolution is reported
+        // and retried by the next connect(); its rows stay unresolved and keep blocking their own
+        // operations (every mutation checks the journal under its reservation), reads stay available.
+        var complete = resolvedGeneration == s.generation
+        if (!complete) {
+            complete = resolvePending(s)
             readStatus(s)
-            resolvedGeneration = s.generation
+            if (complete) resolvedGeneration = s.generation
         }
-        return ConnectOutcome.Connected(s.generation, unresolvedCount())
+        return ConnectOutcome.Connected(s.generation, unresolvedCount(), complete)
     }
 
     override suspend fun disconnect(graceful: Boolean) = port.end(graceful)
@@ -232,6 +237,31 @@ class DeviceDispenserRepository(
 
     // ---- journal helpers ---------------------------------------------------------------------
 
+    /**
+     * Operation-level reservation (review of M1.10e.3, finding 2). The guard (no unresolved journal row
+     * of this kind/target) and the reservation of [key] happen atomically under [reservationLock]; the
+     * reservation is held until the operation has settled (its own row inserted and settled, or nothing
+     * sent). A concurrent caller of the same operation is refused at once ([LocalRefusal.InProgress]),
+     * never queued behind it (11.6: duplicate intents are rejected). Other operations and reads are not
+     * blocked. The session layer serializes single requests only; it does not make check-then-insert
+     * atomic, so this is needed in addition.
+     */
+    private suspend inline fun <V> reserved(key: String, guard: () -> OpResult.Refused?, block: () -> OpResult<V>): OpResult<V> {
+        reservationLock.withLock {
+            if (key in inFlight) return OpResult.Refused(LocalRefusal.InProgress)
+            guard()?.let { return it }
+            inFlight += key
+        }
+        try {
+            return block()
+        } finally {
+            inFlight -= key
+        }
+    }
+
+    private val reservationLock = Mutex()
+    private val inFlight: MutableSet<String> = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
+
     private suspend fun unresolved(kind: PendingKind, target: String? = null): OpResult.Refused? = try {
         journal.list(deviceId).firstOrNull { it.unresolved && it.kind == kind && (target == null || it.target == target) }
             ?.let { OpResult.Refused(LocalRefusal.Unresolved(it.id)) }
@@ -266,25 +296,28 @@ class DeviceDispenserRepository(
     override suspend fun setConfig(expectedRevision: Long, mask: Int, values: ConfigRecord): OpResult<Long> {
         if (mask == 0 || mask and ConfigRecord.F_ALL.inv() != 0) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.CONFIG_MASK_INVALID)))
         val s = session() ?: return notConnected()
-        unresolved(PendingKind.SET_CONFIG)?.let { return it }
-        val fields = mapOf("expected_revision" to expectedRevision, "field_mask" to mask.toLong(),
-            "config" to Records.configFields(values.copy(revision = expectedRevision)))
-        return journaled(s, op(PendingKind.SET_CONFIG, "config", expectedRevision), M.SET_CONFIG, fields, Records::revision) { readConfig(s) }
+        return reserved("SET_CONFIG", { unresolved(PendingKind.SET_CONFIG) }) {
+            val fields = mapOf("expected_revision" to expectedRevision, "field_mask" to mask.toLong(),
+                "config" to Records.configFields(values.copy(revision = expectedRevision)))
+            journaled(s, op(PendingKind.SET_CONFIG, "config", expectedRevision), M.SET_CONFIG, fields, Records::revision) { readConfig(s) }
+        }
     }
 
     override suspend fun setReadiness(readiness: Readiness): OpResult<StatusRecord> {
         val s = session() ?: return notConnected()
-        unresolved(PendingKind.SET_READINESS)?.let { return it }
-        var body: ByteArray? = null
-        return journaled(s, op(PendingKind.SET_READINESS, readiness.name), M.SET_READINESS, mapOf("readiness" to readiness.wire.toLong()),
-            decode = { m -> body = enc(M.SET_READINESS, m); Records.status(m) }) { v -> keep(statusS, KEY_STATUS, v, checkNotNull(body), s) }
+        return reserved("SET_READINESS", { unresolved(PendingKind.SET_READINESS) }) {
+            var body: ByteArray? = null
+            journaled(s, op(PendingKind.SET_READINESS, readiness.name), M.SET_READINESS, mapOf("readiness" to readiness.wire.toLong()),
+                decode = { m -> body = enc(M.SET_READINESS, m); Records.status(m) }) { v -> keep(statusS, KEY_STATUS, v, checkNotNull(body), s) }
+        }
     }
 
     override suspend fun removePhone(slot: Int): OpResult<Unit> {
         if (slot !in 0..3) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.SLOT_INVALID)))
         val s = session() ?: return notConnected()
-        unresolved(PendingKind.PHONE_REMOVE, slot.toString())?.let { return it }
-        return journaled(s, op(PendingKind.PHONE_REMOVE, slot.toString()), M.PHONE_REMOVE, mapOf("slot" to slot.toLong()), decode = { }) { readPhones(s) }
+        return reserved("PHONE_REMOVE:$slot", { unresolved(PendingKind.PHONE_REMOVE, slot.toString()) }) {
+            journaled(s, op(PendingKind.PHONE_REMOVE, slot.toString()), M.PHONE_REMOVE, mapOf("slot" to slot.toLong()), decode = { }) { readPhones(s) }
+        }
     }
 
     override suspend fun createInvite(nameHint: String): OpResult<InviteRecord> {
@@ -311,20 +344,21 @@ class DeviceDispenserRepository(
 
     override suspend fun refill(remainingUl: Long): OpResult<StatusRecord> {
         val s = session() ?: return notConnected()
-        unresolved(PendingKind.REFILL)?.let { return it }
-        // the capacity comes from THIS session, immediately before; never from the cache
-        val st = when (val r = readStatus(s)) {
-            is OpResult.Ok -> r.value
-            is OpResult.Uncertain -> return OpResult.NotSent("status read failed: ${r.reason}") // REFILL itself was never sent
-            else -> return r.cast()
+        return reserved("REFILL", { unresolved(PendingKind.REFILL) }) {
+            // the capacity comes from THIS session, immediately before; never from the cache
+            val st = when (val r = readStatus(s)) {
+                is OpResult.Ok -> r.value
+                is OpResult.Uncertain -> return OpResult.NotSent("status read failed: ${r.reason}") // REFILL itself was never sent
+                else -> return r.cast()
+            }
+            if (!same(s)) return OpResult.Refused(LocalRefusal.SessionChanged)
+            if (st.capacityUl <= 0) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.CAPACITY_UNKNOWN)))
+            if (remainingUl !in 0..st.capacityUl) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.REMAINING_ABOVE_CAPACITY)))
+            var body: ByteArray? = null
+            journaled(s, op(PendingKind.REFILL).copy(volumeUl = remainingUl), M.REFILL,
+                mapOf("capacity_ul" to st.capacityUl, "remaining_ul" to remainingUl),
+                decode = { m -> body = enc(M.REFILL, m); Records.status(m) }) { v -> keep(statusS, KEY_STATUS, v, checkNotNull(body), s) }
         }
-        if (!same(s)) return OpResult.Refused(LocalRefusal.SessionChanged)
-        if (st.capacityUl <= 0) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.CAPACITY_UNKNOWN)))
-        if (remainingUl !in 0..st.capacityUl) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.REMAINING_ABOVE_CAPACITY)))
-        var body: ByteArray? = null
-        return journaled(s, op(PendingKind.REFILL).copy(volumeUl = remainingUl), M.REFILL,
-            mapOf("capacity_ul" to st.capacityUl, "remaining_ul" to remainingUl),
-            decode = { m -> body = enc(M.REFILL, m); Records.status(m) }) { v -> keep(statusS, KEY_STATUS, v, checkNotNull(body), s) }
     }
 
     // ---- schedules ---------------------------------------------------------------------------
@@ -336,8 +370,10 @@ class DeviceDispenserRepository(
             is DeviceScheduleMapping.ToRecord.Ok -> m.record
         }
         val s = session() ?: return notConnected()
-        return journaled(s, op(PendingKind.CREATE_SCHEDULE, id), M.CREATE_SCHEDULE, mapOf("schedule" to Records.scheduleFields(rec)),
-            decode = { m -> ScheduleWrite(id, 1, Records.setRevision(m)) }) { readSchedules(s) }
+        return reserved("SCHEDULE:$id", { null }) { // a fresh ID: no earlier operation can target it
+            journaled(s, op(PendingKind.CREATE_SCHEDULE, id), M.CREATE_SCHEDULE, mapOf("schedule" to Records.scheduleFields(rec)),
+                decode = { m -> ScheduleWrite(id, 1, Records.setRevision(m)) }) { readSchedules(s) }
+        }
     }
 
     override suspend fun updateSchedule(id: String, expectedRevision: Long, draft: ScheduleDraft): OpResult<ScheduleWrite> {
@@ -346,18 +382,20 @@ class DeviceDispenserRepository(
             is DeviceScheduleMapping.ToRecord.Ok -> m.record
         }
         val s = session() ?: return notConnected()
-        scheduleUnresolved(id)?.let { return it }
-        return journaled(s, op(PendingKind.UPDATE_SCHEDULE, id, expectedRevision), M.UPDATE_SCHEDULE,
-            mapOf("expected_revision" to expectedRevision, "schedule" to Records.scheduleFields(rec)),
-            decode = { m -> ScheduleWrite(id, Records.revision(m), Records.setRevision(m)) }) { readSchedules(s) }
+        return reserved("SCHEDULE:$id", { scheduleUnresolved(id) }) {
+            journaled(s, op(PendingKind.UPDATE_SCHEDULE, id, expectedRevision), M.UPDATE_SCHEDULE,
+                mapOf("expected_revision" to expectedRevision, "schedule" to Records.scheduleFields(rec)),
+                decode = { m -> ScheduleWrite(id, Records.revision(m), Records.setRevision(m)) }) { readSchedules(s) }
+        }
     }
 
     override suspend fun deleteSchedule(id: String, expectedRevision: Long): OpResult<ScheduleWrite> {
         val s = session() ?: return notConnected()
-        scheduleUnresolved(id)?.let { return it }
-        return journaled(s, op(PendingKind.DELETE_SCHEDULE, id, expectedRevision), M.DELETE_SCHEDULE,
-            mapOf("id" to id.toByteArray(), "expected_revision" to expectedRevision),
-            decode = { m -> ScheduleWrite(id, null, Records.setRevision(m)) }) { readSchedules(s) }
+        return reserved("SCHEDULE:$id", { scheduleUnresolved(id) }) {
+            journaled(s, op(PendingKind.DELETE_SCHEDULE, id, expectedRevision), M.DELETE_SCHEDULE,
+                mapOf("id" to id.toByteArray(), "expected_revision" to expectedRevision),
+                decode = { m -> ScheduleWrite(id, null, Records.setRevision(m)) }) { readSchedules(s) }
+        }
     }
 
     private suspend fun scheduleUnresolved(id: String): OpResult.Refused? =
@@ -368,7 +406,11 @@ class DeviceDispenserRepository(
     override suspend fun manualDose(volumeUl: Long): OpResult<ManualDoseRecord> {
         if (volumeUl !in 1..DeviceScheduleMapping.U32_MAX) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.VOLUME_INVALID)))
         val s = session() ?: return notConnected()
-        unresolved(PendingKind.MANUAL_DOSE)?.let { return it } // no stacking (11.4.4)
+        // no stacking (11.4.4), and no concurrent second dose: one MANUAL_DOSE reservation at a time
+        return reserved(KEY_DOSE, { unresolved(PendingKind.MANUAL_DOSE) }) { prepareAndSendDose(s, volumeUl) }
+    }
+
+    private suspend fun prepareAndSendDose(s: LiveSession, volumeUl: Long): OpResult<ManualDoseRecord> {
         // the floor comes from THIS session, immediately before; a cached status never authorizes a dose
         val st = when (val r = readStatus(s)) {
             is OpResult.Ok -> r.value
@@ -399,6 +441,10 @@ class DeviceDispenserRepository(
 
     override suspend fun resendManualDose(journalId: Long): OpResult<ManualDoseRecord> {
         val s = session() ?: return notConnected()
+        return reserved(KEY_DOSE, { null }) { resendDose(s, journalId) }
+    }
+
+    private suspend fun resendDose(s: LiveSession, journalId: Long): OpResult<ManualDoseRecord> {
         val row = try {
             journal.list(deviceId).firstOrNull { it.id == journalId }
         } catch (e: Exception) {
@@ -457,8 +503,9 @@ class DeviceDispenserRepository(
         }
     }
 
-    override suspend fun discardManualDose(journalId: Long): OpResult<Unit> = removeRow(journalId) {
-        it.kind == PendingKind.MANUAL_DOSE && it.state == PendingState.AWAITING_USER
+    // under the dose reservation: a discard can never race a re-send of the same row
+    override suspend fun discardManualDose(journalId: Long): OpResult<Unit> = reserved(KEY_DOSE, { null }) {
+        removeRow(journalId) { it.kind == PendingKind.MANUAL_DOSE && it.state == PendingState.AWAITING_USER }
     }
 
     override suspend fun acknowledge(journalId: Long): OpResult<Unit> = removeRow(journalId) { it.state == PendingState.RESOLVED }
@@ -472,21 +519,29 @@ class DeviceDispenserRepository(
 
     // ---- resolution at session start (11.4.3, table 5.1) -------------------------------------
 
-    /** Resolves PREPARED rows by read-back; stops at the first request the session could not answer. */
-    private suspend fun resolvePending(s: LiveSession) {
+    /**
+     * Resolves PREPARED rows by read-back; stops at the first request the session could not answer.
+     * True only when no PREPARED row is left (every read-back answered and recorded).
+     */
+    private suspend fun resolvePending(s: LiveSession): Boolean {
         val rows = try {
             journal.list(deviceId).filter { it.state == PendingState.PREPARED }
         } catch (e: Exception) {
-            return
+            return false
         }
         for (row in rows) {
-            if (!same(s)) return
+            if (!same(s)) return false
             val continueOn = try {
                 resolveOne(s, row)
             } catch (e: Exception) {
-                false // a journal write failed: the row stays unresolved, retried next session
+                false // a journal write failed: the row stays unresolved, retried by the next connect()
             }
-            if (!continueOn) return
+            if (!continueOn) return false
+        }
+        return try {
+            journal.list(deviceId).none { it.state == PendingState.PREPARED }
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -634,6 +689,8 @@ class DeviceDispenserRepository(
     companion object {
         const val MAX_TIME_UNCERTAINTY_MS = 2_000L
         private const val KEY_STATUS = "status"
+        /** The one manual-dose reservation (new dose, re-send, discard). */
+        private const val KEY_DOSE = "MANUAL_DOSE"
         private const val KEY_CONFIG = "config"
         private const val KEY_DIAG = "diagnostics"
         private const val KEY_PHONES = "phones"

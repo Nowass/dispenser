@@ -55,7 +55,16 @@ data class ScheduleWrite(val id: String, val revision: Long?, val setRevision: L
 
 sealed interface ConnectOutcome {
     /** Authenticated; pending operations were resolved first (11.4); [unresolved] remain (PENDING, awaiting the user, or interrupted resolution). */
-    data class Connected(val generation: Long, val unresolved: Int) : ConnectOutcome
+    data class Connected(
+        val generation: Long,
+        val unresolved: Int,
+        /**
+         * False when the journal resolution of this session could not finish (a journal read/write
+         * failed, or the device did not answer a read-back). Unfinished rows stay unresolved and keep
+         * blocking their own operations; reads stay available; calling connect() again retries.
+         */
+        val resolutionComplete: Boolean = true,
+    ) : ConnectOutcome
     data class Failed(val failure: SessionFailure) : ConnectOutcome
     /** No associated address for this device (CDM association, M1.10e.4). */
     data object NoAddress : ConnectOutcome

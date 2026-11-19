@@ -456,14 +456,14 @@
     <string name="refill_done_device">Doplnění potvrzeno zařízením</string>
     <string name="refill_uncertain">Nepodařilo se ověřit, zda zařízení doplnění přijalo. Ověří se při příštím připojení – doplnění neopakujte.</string>
     <string name="refill_not_sent">Doplnění nebylo odesláno (zařízení není připojeno nebo se spojení přerušilo). Nic se nezměnilo.</string>
-    <string name="refill_awaiting_verification">Předchozí doplnění čeká na ověření při příštím připojení. Nic nebylo odesláno.</string>
+    <string name="refill_awaiting_verification">Předchozí doplnění se ještě zpracovává nebo čeká na ověření. Nic nebylo odesláno.</string>
     <string name="refill_rejected">Zařízení doplnění odmítlo. Nic se nezměnilo.</string>
     <string name="refill_not_accepted">Hodnotu nelze odeslat (mimo limity zařízení). Nic nebylo odesláno.</string>
     <string name="schedules_from_device">Rozvrhy ze zařízení · %1$s</string>
     <string name="schedules_need_connection">Změny rozvrhů vyžadují připojené zařízení.</string>
     <string name="schedule_write_not_sent">Změna nebyla odeslána (zařízení není připojeno nebo se spojení přerušilo). Nic se nezměnilo.</string>
     <string name="schedule_write_uncertain">Nepodařilo se ověřit, zda zařízení změnu přijalo. Ověří se při příštím připojení – změnu neopakujte.</string>
-    <string name="schedule_write_awaiting_verification">Předchozí změna tohoto rozvrhu čeká na ověření při příštím připojení. Nic nebylo odesláno.</string>
+    <string name="schedule_write_awaiting_verification">Předchozí změna tohoto rozvrhu se ještě zpracovává nebo čeká na ověření. Nic nebylo odesláno.</string>
     <string name="schedule_write_rejected">Zařízení změnu odmítlo. Nic se nezměnilo.</string>
     <string name="schedule_write_device_limit">Rozvrh překračuje limity zařízení (název, časové pásmo nebo rozsah). Nic nebylo odesláno.</string>
     <string name="editor_needs_connection">Uložení vyžaduje připojené zařízení</string>

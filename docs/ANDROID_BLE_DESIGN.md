@@ -1,8 +1,21 @@
 # Dispenser V2 — Android BLE client integration (M1.10e)
 
-Status: **revision 9. M1.10e.1 (`6a73441`), M1.10e.2a (`a7bce87`), M1.10e.2b (`4b126b2`,
-`582ad3c`) and M1.10e.3 (`f7b8c22`, section 15) committed. M1.10e.4a (mode and data plumbing,
-section 16) implemented and tested, uncommitted, awaiting the architecture review.**
+Status: **revision 10 (current implementation status).**
+
+| Milestone | Status |
+|---|---|
+| M1.10e.1 native Noise provider, vectors, credentials | committed `6a73441`, accepted |
+| M1.10e.2a GATT transport and frame link | committed `a7bce87`, accepted |
+| M1.10e.2b secure session, firmware-in-the-loop | committed `4b126b2`, `582ad3c`, accepted |
+| M1.10e.3 device repository and operations (section 15) | committed `f7b8c22`, accepted; post-acceptance review fixes in 15.5 |
+| M1.10e.4a app mode and data plumbing (section 16) | committed `e7564da`, accepted |
+| M1.10e.4b onboarding / CDM (next) | not started; stops for the onboarding/security review |
+| M1.10e.4c scanner and invitations, M1.10e.4d device operations | not started; each stops for its review |
+| M1.10e.5 real-device interop and acceptance | OPEN (hardware) |
+
+Sections 1–11 are the design baseline written before implementation (revision 2–8); where they
+describe the app "today" they describe the state before M1.10e.1. The implemented state is in
+sections 12–16.
 M1.10d.2, M1.10c.2b and M1.10e.5 stay OPEN; nothing here is evidence for radio behavior.
 
 Baseline: `docs/BLE_PROTOCOL.md` v1.0 as amended by M1.10d.1 (sections 2, 3, 10.4a, 11.3),
@@ -17,7 +30,10 @@ changes the wire protocol, the Noise patterns, the PSK derivation or any firmwar
 
 ---
 
-## 1. Starting point (inspected)
+## 1. Starting point (historical baseline, inspected before M1.10e.1)
+
+*Historical: this is the app as it was before M1.10e (e.g. `isDemo = true` hard-coded, no native
+code). The current state is described in sections 12–16.*
 
 | Area | Current state |
 |---|---|
@@ -572,7 +588,7 @@ firmware application and security logic compiled for the host:
 | UI regression | existing JVM ViewModel tests and instrumented Compose tests unchanged and green in DEMO mode; DEVICE-mode UI tests on a fake repository |
 | Architecture | `ArchitectureRulesTest`; native symbol check |
 
-## 7. Functional integration (plan only; no UI change in this milestone)
+## 7. Functional integration (design plan, written before M1.10e.4; implemented state: section 16)
 
 | Screen / feature | Device source (protocol) | Notes |
 |---|---|---|
@@ -730,6 +746,8 @@ provisioning tool's tests.
   R8 rules; versions pinned in the catalog.
 
 ## 8. Implementation milestones
+
+*The plan as approved; the current status of each milestone is the table at the top of this document.*
 
 | Milestone | Content | Exit criteria | App behavior change |
 |---|---|---|---|
@@ -1125,6 +1143,8 @@ not built by the firmware CTest and never enters a firmware image or the APK.
 
 ## 15. Implementation notes (M1.10e.3 — device repository and operations)
 
+Committed `f7b8c22` and accepted; post-acceptance review fixes in 15.5.
+
 Decisions D1–D8 (review of M1.10e.3): D1, D2, D3, D4, D5, D7 and D8 approved as recommended with
 the additional rules below; D6 modified.
 
@@ -1236,11 +1256,54 @@ the additional rules below; D6 modified.
   in force.
 - UI adaptation to `DispenserRepository`, CDM address, onboarding: M1.10e.4.
 
+### 15.5 Post-acceptance review fixes (independent review of M1.10e.3)
+
+**Finding 2 — concurrent mutations could bypass the pending-operation guard (genuine; fixed).**
+`unresolved(kind, target)` and the insert of the caller's own journal row were separate suspending
+steps; the session layer serializes single requests (`sendLock`) but does not make the guard and the
+insert atomic. Demonstrated deterministically before the fix (`DeviceRepositoryConcurrencyTest`, a
+journal that parks the first caller between its guard read and its insert): two concurrent manual
+doses both reached the scripted device (**2 pump runs**, on the path where the device answers DONE and
+keeps the link), two REFILLs were both applied, two SET_CONFIG and two writes of the same schedule were
+both sent (the device's revision check refused the second). On the real firmware the normal dose path
+closes the link after the first dose, which hides — but does not remove — the gap.
+Fix (operation-level, no journal-semantics change): `DeviceDispenserRepository.reserved(key, guard)`
+performs the journal guard and reserves the operation key atomically under one mutex and holds the
+reservation until the operation has settled; a concurrent caller of the same operation is refused at
+once with the new `LocalRefusal.InProgress` (11.6: duplicate intents are rejected, not queued). Keys:
+`MANUAL_DOSE` (new dose, re-send with the original seq, discard — so a discard can never race a
+re-send), `REFILL`, `SET_CONFIG`, `SET_READINESS`, `PHONE_REMOVE:<slot>`, `SCHEDULE:<id>` (create,
+update, delete). Other operations and all reads are not blocked. A cancelled caller releases the
+reservation, but by then its row is already inserted (or nothing was sent), so the journal guard still
+holds. The shared screens map `InProgress` like `Unresolved` ("still being processed or awaiting
+verification; nothing was sent").
+
+**Finding 1 — incomplete journal resolution (no unsafe mutation; reporting fixed).** Verified:
+unfinished rows stay PREPARED/AWAITING_USER and keep blocking their own operation (every journaled
+mutation checks the journal under its reservation; a journal that cannot be read refuses every
+mutation with `PersistenceFailed`); no row is ever dropped or re-sent by resolution; reads stay
+available in the authenticated session. Gap: `connect()` returned `Connected` without saying the
+resolution was unfinished and never retried it within the same session. Fix:
+`ConnectOutcome.Connected.resolutionComplete` (true only when no PREPARED row is left), and the
+session is marked resolved only then, so the next `connect()` retries. Cross-kind mutations stay
+allowed while another kind is unresolved, as approved (11.4.5, per operation and target).
+
+Tests: `DeviceRepositoryConcurrencyTest` (10: concurrent manual doses, refills, SET_CONFIG and writes
+of the same schedule each send exactly one request; other kinds and reads are not blocked; the
+reservation is released after Rejected and NotSent; a resolution that cannot write, an unreadable
+journal, a lost GET_RESULT and a refused read-back each report `resolutionComplete = false`, keep the
+guard, allow reads, and are retried by the next `connect()`; nothing re-issued);
+`DeviceRepositoryConcurrencyFirmwareTest` (1, real firmware: a second REFILL and a second manual dose
+arriving while the first is between guard and insert are refused; one REFILL frame, one MANUAL_DOSE
+frame, exactly one pump run, pump oracle clean); `DeviceUiRepositoryTest` (+InProgress mapping).
+7 of the first 9 concurrency tests failed before the fix (the 10th was added for a surviving mutant). Mutation checks: no in-flight check (2 failures),
+no reservation (2), no retry of an unfinished resolution (1), "complete" despite PREPARED rows (1).
+
 ## 16. Implementation notes (M1.10e.4a — app mode and data plumbing)
 
-Plan approved with conditions (review of the M1.10e.4 plan, decisions 1–8): one review gate per step
-(a: architecture, b: onboarding/security, c: QR/secret handling, d: final acceptance); nothing is
-committed before its review. Step a adds **no user-reachable behavior**: DEVICE mode can only be
+Committed `e7564da` and accepted. Plan approved with conditions (review of the M1.10e.4 plan,
+decisions 1–8): one review gate per step (a: architecture, b: onboarding/security, c: QR/secret
+handling, d: final acceptance); nothing is committed before its review. Step a adds **no user-reachable behavior**: DEVICE mode can only be
 entered with a confirmed enrollment, and enrollment arrives in step b. DEMO, the visual design, About,
 Check for Updates, the changelog and the licences are unchanged.
 
