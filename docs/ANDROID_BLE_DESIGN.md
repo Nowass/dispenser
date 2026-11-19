@@ -1,7 +1,8 @@
 # Dispenser V2 — Android BLE client integration (M1.10e)
 
-Status: **revision 7. M1.10e.1 (`6a73441`), M1.10e.2a (`a7bce87`) and M1.10e.2b (secure session +
-firmware-in-the-loop, retry decision option 1 — section 14.3) committed. Next: M1.10e.3.**
+Status: **revision 8. M1.10e.1 (`6a73441`), M1.10e.2a (`a7bce87`) and M1.10e.2b (`4b126b2`,
+`582ad3c`) committed. M1.10e.3 (device repository and operations, decisions D1–D8, section 15)
+implemented and tested, uncommitted, awaiting review.**
 M1.10d.2, M1.10c.2b and M1.10e.5 stay OPEN; nothing here is evidence for radio behavior.
 
 Baseline: `docs/BLE_PROTOCOL.md` v1.0 as amended by M1.10d.1 (sections 2, 3, 10.4a, 11.3),
@@ -400,9 +401,19 @@ Request fragment is one write-with-response; the next fragment only after `onCha
   10 s (device limit); request 5 s default (8 s for writes that touch flash); confirmation on
   device: the `seconds` from `EV_CONFIRM_ON_DEVICE` + 5 s. All expressed as constants in one
   `Timeouts` object, tuned in M1.10e.5.
-- **Cancellation:** cancelling the caller's coroutine cancels the operation; the session
-  survives unless the cancellation hits a handshake (then the connection is closed — a half-done
-  handshake is never resumed).
+- **Cancellation (D3, M1.10e.3):** the manager owns every submitted operation. A cancelled caller
+  stops waiting; the request still completes and its outcome and journal row are still processed
+  (`DeviceOperations` runs requests in the manager scope). A cancellation that hits a handshake
+  closes the connection (a half-done handshake is never resumed); if the manager scope itself is
+  cancelled after a request may have been sent, the session closes (fail closed, 14.3).
+- **Synchronous invalidation (D2, M1.10e.3):** when any `SecureSession.close()` returns (the first,
+  a concurrent or a later call; `end()` included), the manager no longer exposes that session:
+  `close()` runs the manager's close listener before returning, outside every session lock. The
+  listener only compare-and-sets — `current` from that session to none, `state` from that
+  session's own `Authenticated(generation)` value to `Idle` — so it is idempotent, never blocks,
+  and a late close of an older session can never clear a newer session or a newer `open()`'s
+  `Connecting`/`Handshaking` state. A session that closes during adoption is invalidated at once
+  (the listener runs on registration if the session is already closed).
 - **Backgrounding:** the session lives in the process-wide manager, not in a ViewModel. On
   `ON_STOP` a 30 s grace starts; when it expires the app disconnects (plain GATT close, the
   device's window continues until its idle limit). An explicit "Done" sends the encrypted
@@ -838,10 +849,15 @@ a new phone resynchronizes `seq` from the floor.
 Journal: table `pending_ops` in `device.db` (not exported), one row per unresolved operation;
 manual dose rows `{device_id, seq, volume_ul, created_at, state, last_result}`.
 
-1. **Before sending:** `seq = max(local_high + 1, manual_floor)` from the current session's Status;
-   the new local high and the journal row (`state = PREPARED`) are committed in **one**
-   transaction; only then is MANUAL_DOSE sent. A crash between commit and send is harmless
-   (PREPARED and SENT are treated alike: "may have reached the device").
+1. **Before sending (D4):** `seq = max(local_high + 1, manual_floor)` with `manual_floor` from a
+   Status read **live in the same session immediately before**. Fixed order of two durable writes
+   (the high-water mark lives with the credential, the journal in `device.db`, so they cannot share
+   one transaction): (a) the new local high, (b) the journal row (`state = PREPARED`); only after
+   both succeed is MANUAL_DOSE sent. Any persistence failure prevents transmission. A crash after (a)
+   only skips the number (seq need only increase); a crash after (b) is resolved by `GET_RESULT`
+   (PREPARED and SENT are treated alike: "may have reached the device"). An allocated number is
+   never reused; a NOT_DECIDED dose is re-sent only on the user's request and only with its
+   original `seq`.
 2. **Normal path:** the device sends `EV_SUSPENDING_FOR_DOSE` and closes the link (BLE suspended
    for the pump); the response normally never arrives. If it does arrive (DONE / PUMP_FAILED or an
    error), the row is resolved.
@@ -1104,6 +1120,120 @@ Nothing in the session layer retries across sessions; the typed operations, jour
 CDM discovery and onboarding UI (M1.10e.4); typed operations, journal and
 repository (M1.10e.3); manifest permissions (M1.10e.4). The firmware simulator is test code: it is
 not built by the firmware CTest and never enters a firmware image or the APK.
+
+---
+
+## 15. Implementation notes (M1.10e.3 — device repository and operations)
+
+Decisions D1–D8 (review of M1.10e.3): D1, D2, D3, D4, D5, D7 and D8 approved as recommended with
+the additional rules below; D6 modified.
+
+### 15.1 Implemented
+
+| Part | Implemented |
+|---|---|
+| `device/ops/DeviceRecords` | typed records for every v1 body (Status, Diagnostics, Config with field-mask bits, Schedule, list pages, phones, invite, manual-dose response, GET_RESULT state, SET_TIME decision) and the device error codes, converted from/to the existing `BleProtocol` field maps |
+| `device/ops/DeviceOperations` | `SessionPort` / `LiveSession` (the repository's view of the M1.10e.2b manager; production `ManagerSessionPort`); `OpResult` = `Ok`, `Rejected(DeviceError)`, `Refused(LocalRefusal)`, `NotSent`, `Uncertain(journalId)`; every request runs in the manager scope (D3) |
+| `data/device/DeviceRepository` + `DeviceDispenserRepository` (D1) | device-only contract with typed results for every v1 operation except WIFI_* (E14) and FACTORY_RESET (5.1): status, diagnostics, ACK_REJECTIONS, config get/set, schedules list/get/create/update/delete with read-back, manual dose + GET_RESULT, REFILL, readiness, SET_TIME, phones, phone removal, invites, recovery cancel; `connect()` = IK session, journal resolution before any new mutation, live status; not wired into the UI (DEMO and the screens unchanged; About / Check for Updates untouched) |
+| Freshness (D2) | `Fresh.Live(value, readAt, generation)` only while the authenticated session of that generation is the live one; `Cached(value, readAt)` otherwise (also after a process death); `Unknown`; connection state is a separate flow; cached values never authorize a manual dose or REFILL (both re-read the status live) |
+| Device validation (D2) | domain rules plus wire limits before sending: name ≤ 32 UTF-8 bytes without control characters, dates 2000–2099, µl ≤ u32, interval ≤ 2³¹−1, Europe/Prague only; records the domain model cannot represent are counted as unreadable, never guessed |
+| `data/device/local/DeviceDatabase` | Room `device.db` (schema exported): `pending_ops` journal and `device_cache` (the device's own response bodies with their read time); excluded from backup/transfer by the existing catch-all rules; no destructive migration |
+| Journal (11.4, table 5.1) | written before every journaled mutation (manual dose, REFILL, SET_CONFIG, schedule writes, SET_READINESS, PHONE_REMOVE); removed on a definitive answer; kept on `Uncertain` and on STORAGE; resolved by read-back at the next session: GET_RESULT (manual), Status (REFILL → `READ_BACK`, readiness), GET_CONFIG (masked fields), GET_SCHEDULE (`APPLIED` / `NOT_APPLIED` / `CHANGED_ELSEWHERE`), PHONES_LIST; duplicate intents and stacked doses refused while a row is unresolved |
+| Manual dose (D4, E12) | live floor → durable `seq` → durable PREPARED row → send; NOT_DECIDED → `AWAITING_USER` (re-send with the same `seq` or discard, user actions only); PENDING stays unresolved; DONE / FAILED / REFUSED / INTERRUPTED / result-unavailable resolved and kept until acknowledged |
+| REFILL (D5) | capacity from GET_STATUS in the same session immediately before; aborted (`SessionChanged`) if the session changed or closed; never re-sent automatically |
+| SET_TIME (D6) | behind `PhoneTimeSource` (UTC + uncertainty); no source or an uncertainty outside 0..2,000 ms → `Refused(TimeUntrusted)`, nothing sent; never retransmitted (a resend would carry a stale time) |
+
+### 15.2 Findings
+
+- **A refused manual dose also arrives as an unknown outcome.** The firmware suspends BLE *before*
+  it decides a fresh MANUAL_DOSE (10.4, Q8), so a LIMIT / REFUSED / NOT_COVERED decision on a new
+  request is visible only through GET_RESULT at the next session (verified against the firmware).
+  The app therefore reports every fresh dose as `Uncertain` and shows the decision after
+  reconnecting; this matches the approved flow (7, 11.4) and needs no change.
+- **Firmware simulator: a stale poller could take a later connection's events (test harness bug,
+  fixed).** `libdsp_fwsim` tagged queued events only with the BLE connection handle (cycled 1–8),
+  and a poller could drop another poller's disconnect event as stale, so the port of an ended
+  connection kept polling; once the handle came round again it took the new connection's
+  notifications (seen under CPU load as a HELLO or handshake timeout after a reconnect). The device
+  and the client behaved correctly (device-side and phone-side traces). Real controllers **reuse**
+  connection handles, so the fix does not depend on unique handles: every connection gets the same
+  handle by default (0x0001; `setConnectionHandle` picks another, still reused), and the harness
+  binds queued events, writes and phone-side disconnects to a separate, never-reused **link id**.
+  A poller takes only its own link's events and gets `GONE` at once when its link is over, so a
+  left-over poller always stops; unread events of an ended link are discarded, never handed to a
+  later link; late writes and disconnects of an ended link's client are no-ops. Events are tagged in
+  the same critical section as the connection check, and phone-side connect, writes and disconnects
+  are serialized like the NimBLE host task, so a link check and its delivery are one step. The firmware sees only the reused handle, so
+  its own stale-event guard (`test_ble_transport`, one reused handle) stays exercised: every FIL
+  test now runs with handle reuse. `FirmwareSimLinkTest` (7) covers repeated cycles on one handle,
+  undelivered events of the previous link, late GATT calls, and reconnection while the previous
+  poller is still polling (raw pollers and the real `FirmwareGattPort`) — nothing crosses links,
+  nothing is lost or duplicated. Not an Android or firmware issue: real GATT callbacks are bound to
+  their own `BluetoothGatt` object and `GattTransport` already filters by generation.
+- **The manager published `Idle` asynchronously after a close (fixed, D2).** The manager moved to
+  `Idle` and dropped the session in a coroutine dispatched after `SecureSession.closed` changed, so
+  for a short time after `close()`/`end()` returned (longer under CPU load) `state` still said
+  `Authenticated` and the repository could label a value of the closed session `Live`. Mutations
+  were never affected (`live()` and `request()` check `isOpen`). Found by the FIL stress run
+  (`all_four_handshakes_over_one_device_lifetime`, 3 of 15 runs under 12 CPU hogs). Now
+  synchronous (4.4).
+- **Firmware simulator: data race on the virtual clock (test harness, fixed).** ThreadSanitizer
+  (a scratch native driver linking `fwsim.c` directly with a minimal `JNIEnv`) reported the
+  transport's `now_ms` read on a phone-write thread racing the application task's clock update.
+  Host-task-role calls now read the clock copy the application task publishes under its lock;
+  on the device the clock is the thread-safe hardware timer (no firmware change).
+- **Submitted requests are not removed from the queue on caller cancellation** (11.6 said queued
+  requests are removed): with D3 the manager owns a request once it is submitted, so its outcome and
+  journal are always processed. Requests not yet submitted (still in the repository) are not sent.
+
+### 15.3 Tests
+
+- `DeviceRepositoryTest` (25, scripted device): freshness across disconnect, generations and process
+  death; cached values never authorize; D4 order (seq, then row, then send) and every crash boundary
+  (seq persistence failure → nothing sent; journal failure → nothing sent, seq burned and never
+  reused; crash after seq → number skipped; crash after the row → NOT_DECIDED → re-send with the
+  original seq, no new allocation; drop before decryption + process death → exactly one pump run);
+  dose answers (response, LIMIT, STORAGE); D3 cancellation (outcome and journal processed after the
+  caller gave up); D5 (live capacity, session change aborts, uncertain REFILL read back and never
+  re-sent, second REFILL refused while unresolved); schedule writes with read-back, device limits,
+  resolution APPLIED / NOT_APPLIED / CHANGED_ELSEWHERE; config, readiness, phones and their
+  resolution; D6; every operation without a session `NotSent`; result mapping.
+- `DeviceDatabaseTest` (3, Robolectric): journal and cache rows survive reopening `device.db`;
+  a missing-row update fails loudly; a dose resolved by a new repository over the reopened file.
+- `DeviceRepositoryFirmwareTest` (10, real firmware logic): every operation with read-back and device
+  refusals (CONFLICT, LIMIT, REFUSED detail 1 while READY, local refusal above the live capacity);
+  SET_TIME untrusted never sent; dose → Uncertain → DONE at the next session; dose dropped before
+  decryption → NOT_DECIDED → re-send with the same seq → exactly one pump run; process death
+  between dose and resolution; **power cut during the pump → INTERRUPTED** (fwsim `armPumpPowerCut`,
+  the harness cut point plus a simulated reboot); lost REFILL response → READ_BACK, never re-sent;
+  lost schedule-create response → APPLIED; dose above the per-dose limit → REFUSED at the next
+  session, no pump run. The harness pump oracle is asserted zero after every test.
+- `SecureSessionTest` D2 (6): the manager is `Idle` with no session the moment `end()` / `close()`
+  / a violation close returns (no scheduler step); 8 concurrent closers × 20 rounds each see the
+  session invalidated when their own `close()` returns; a late close of an older session leaves a
+  newer session `Authenticated` and usable; a listener on an already-closed session runs at once.
+  `DeviceRepositoryFirmwareTest.values_are_never_live_after_the_session_closes` (real manager):
+  after a session close, a manager disconnect and a repository disconnect, a new reader gets
+  `Cached` at once and an existing reader receives `Cached`. Mutations (no synchronous
+  invalidation, only the first close invalidates, unconditional invalidation, no run on
+  registration) are each caught.
+- Simulator lifecycle: `FirmwareSimLinkTest` (7, see 15.2); ThreadSanitizer driver over the
+  same races (one reused handle, left-over poller, late writer/disconnector, injector, malformed
+  writes into the firmware transport racing the phone disconnect): 3 × 200 rounds, 0 reports;
+  `test_ble_transport` and `test_platform` under TSan: 0 reports.
+- Mutation checks: 9 safety rules removed one at a time (journal failure ignored, seq not persisted,
+  re-send with a new seq, cached capacity for REFILL, no session-change check, Live without the
+  generation, caller-owned lifecycle, unbounded time uncertainty, REFILL re-sent at resolution) —
+  all caught (three needed the redundant guard removed too, which is defense in depth).
+
+### 15.4 Open items
+
+- **Production `PhoneTimeSource`** (D6, tracked separately): Android gives no accuracy guarantee for
+  network time or AUTO_TIME, so the app ships `UnavailablePhoneTimeSource` (SET_TIME is refused
+  locally) until a source with a defensible uncertainty estimate is designed and reviewed. The
+  device keeps its own time rules (NTP preferred, holds); dosing gates that need trusted time stay
+  in force.
+- UI adaptation to `DispenserRepository`, CDM address, onboarding: M1.10e.4.
 
 ---
 

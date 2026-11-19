@@ -67,6 +67,7 @@ class SecureSession private constructor(
     // a short replay: events between authentication and the manager's subscription are not lost
     private val eventFlow = MutableSharedFlow<DeviceEvent>(replay = 4, extraBufferCapacity = 32)
     private val closedState = MutableStateFlow<String?>(null)
+    @Volatile private var closeListener: ((SecureSession) -> Unit)? = null
 
     /** Encrypted events of this session (EV_SESSION_CLOSING, EV_SUSPENDING_FOR_DOSE, EV_CONFIRM_ON_DEVICE). */
     val events: SharedFlow<DeviceEvent> = eventFlow.asSharedFlow()
@@ -240,20 +241,43 @@ class SecureSession private constructor(
         close("ended")
     }
 
-    /** Idempotent: frees the Noise state, fails every waiter, closes the link. */
+    /**
+     * Idempotent: frees the Noise state, fails every waiter, closes the link. Every call — the first
+     * and any concurrent or later one — runs the close listener before it returns, so when any
+     * close() returns, the owner no longer exposes this session (D2).
+     */
     fun close(reason: String) {
-        synchronized(this) {
-            if (closedState.value != null) return
-            closedState.value = reason
+        val first = synchronized(this) {
+            if (closedState.value != null) {
+                false
+            } else {
+                closedState.value = reason
+                true
+            }
         }
-        authenticated = false
-        ciphers?.close()
-        ciphers = null
+        if (first) {
+            authenticated = false
+            ciphers?.close()
+            ciphers = null
+        }
+        // outside this session's lock; the listener is idempotent and never blocks
+        closeListener?.invoke(this)
+        if (!first) return
         val ex = SessionClosedException(reason)
         confirmEvent.completeExceptionally(ex)
         waiters.values.forEach { it.completeExceptionally(ex) }
         waiters.clear()
         link.close(CloseReason.Local)
+    }
+
+    /**
+     * The owner's synchronous invalidation hook (one owner): run by every [close] before it returns,
+     * outside any lock of this session; run at once if the session is already closed. Must be
+     * idempotent and non-blocking (it may run more than once, also concurrently).
+     */
+    internal fun setCloseListener(listener: (SecureSession) -> Unit) {
+        closeListener = listener
+        if (!isOpen) listener(this)
     }
 
     // ---- framing -----------------------------------------------------------------------------

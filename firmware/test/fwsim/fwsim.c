@@ -36,23 +36,34 @@
 
 #define FS_EVT_NOTIFY 1
 #define FS_EVT_DISCONNECTED 2
+#define FS_EVT_GONE 3 /* poll: the caller's link is over and has no queued event left (harness-only) */
+#define FS_HANDLE_DEFAULT 0x0001u
 #define FS_QCAP 1024
 
 typedef struct {
     uint8_t type;
-    uint8_t handle; /* the connection the event belongs to (stale events are recognizable) */
+    uint32_t link;   /* the harness link the event belongs to (never reused; see FS(connect)) */
+    uint16_t handle; /* the BLE connection handle (reused across connections, like a real controller) */
     uint16_t len;
     uint8_t b[DSP_BLE_TR_MTU_PREFERRED];
 } fs_evt_t;
 
 static pthread_mutex_t fs_tr = PTHREAD_MUTEX_INITIALIZER; /* the transport's radio lock */
+/* The phone-side host-task role: GAP connect, ATT writes and phone disconnects are processed one at
+ * a time, as the NimBLE host task does, so a link check and its delivery to the transport are one
+ * step (an ended link's late write can never reach a later connection on the same handle). Never
+ * taken while holding fs_m or the transport lock. */
+static pthread_mutex_t fs_host = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t fs_m = PTHREAD_MUTEX_INITIALIZER;  /* everything below */
 static pthread_cond_t fs_cv = PTHREAD_COND_INITIALIZER;
 static fs_evt_t fs_q[FS_QCAP];
 static int fs_qhead, fs_qcount, fs_qdropped;
 static bool fs_adv, fs_conn, fs_signal, fs_armed, fs_running, fs_installed, fs_rng;
 static uint64_t fs_arm_at, fs_advance_req, fs_mono_copy, fs_ms_frac;
-static uint16_t fs_handle = 1;
+static uint16_t fs_handle = FS_HANDLE_DEFAULT;      /* handle of the current (or last) connection */
+static uint16_t fs_next_handle = FS_HANDLE_DEFAULT; /* handle the next connection gets (reused) */
+static uint32_t fs_link;                            /* current (or last) link id; 0 = none yet */
+static int fs_stale;                                /* events of an ended link discarded unread */
 static pthread_t fs_thread;
 static bool fs_hold;
 
@@ -63,13 +74,15 @@ static uint64_t real_ms(void)
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-static void fs_push(uint8_t type, uint16_t handle, const uint8_t *b, size_t len)
+/* Queues an event of [link]. The caller holds fs_m and took [link] in the same critical section
+ * as its connection check, so an event can never be attributed to a later connection. */
+static void fs_push_locked(uint8_t type, uint32_t link, uint16_t handle, const uint8_t *b, size_t len)
 {
-    pthread_mutex_lock(&fs_m);
     if (fs_qcount < FS_QCAP && len <= sizeof fs_q[0].b) {
         fs_evt_t *e = &fs_q[(fs_qhead + fs_qcount) % FS_QCAP];
         e->type = type;
-        e->handle = (uint8_t)handle;
+        e->link = link;
+        e->handle = handle;
         e->len = (uint16_t)len;
         if (len > 0) {
             memcpy(e->b, b, len);
@@ -79,7 +92,6 @@ static void fs_push(uint8_t type, uint16_t handle, const uint8_t *b, size_t len)
         fs_qdropped++;
     }
     pthread_cond_broadcast(&fs_cv);
-    pthread_mutex_unlock(&fs_m);
 }
 
 /* ---- radio (dsp_ble_radio_t) ---------------------------------------------------------------- */
@@ -123,10 +135,10 @@ static void fr_terminate(void *ctx, uint16_t handle)
     bool mine = fs_conn && handle == fs_handle;
     if (mine) {
         fs_conn = false;
+        fs_push_locked(FS_EVT_DISCONNECTED, fs_link, handle, NULL, 0);
     }
     pthread_mutex_unlock(&fs_m);
     if (mine) {
-        fs_push(FS_EVT_DISCONNECTED, handle, NULL, 0);
         dsp_ble_tr_on_disconnect(&TR, handle); /* the controller reports the GAP disconnect */
     }
 }
@@ -134,13 +146,14 @@ static int fr_notify(void *ctx, uint16_t handle, const uint8_t *frag, size_t len
 {
     (void)ctx;
     pthread_mutex_lock(&fs_m);
+    /* like a controller, the radio knows only the handle: with handles reused, telling a late call
+     * meant for an earlier connection apart is the firmware transport's job (its stale-event guard) */
     bool ok = fs_conn && handle == fs_handle;
-    pthread_mutex_unlock(&fs_m);
-    if (!ok) {
-        return DSP_BLE_NOTIFY_ERR;
+    if (ok) {
+        fs_push_locked(FS_EVT_NOTIFY, fs_link, handle, frag, len);
     }
-    fs_push(FS_EVT_NOTIFY, handle, frag, len);
-    return DSP_BLE_NOTIFY_OK;
+    pthread_mutex_unlock(&fs_m);
+    return ok ? DSP_BLE_NOTIFY_OK : DSP_BLE_NOTIFY_ERR;
 }
 static void fr_retry_arm(void *ctx, uint32_t ms)
 {
@@ -194,10 +207,21 @@ static void fr_wait(void *ctx, uint32_t max_ms)
         dsp_ble_tr_on_retry(&TR);
     }
 }
+/* The application task owns the virtual clock. A host-task-role call (phone connect, write,
+ * disconnect: concurrent with the application task) reads the copy the application task publishes
+ * under fs_m at every wait — a reading taken slightly earlier, still monotonic — instead of racing
+ * on mono_ms. Every other caller reads the clock directly, as before. */
+static _Thread_local bool fs_host_role;
 static uint32_t fr_now(void *ctx)
 {
     (void)ctx;
-    return (uint32_t)mono_ms;
+    if (!fs_host_role) {
+        return (uint32_t)mono_ms;
+    }
+    pthread_mutex_lock(&fs_m);
+    uint64_t t = fs_mono_copy;
+    pthread_mutex_unlock(&fs_m);
+    return (uint32_t)t;
 }
 static void fr_lock(void *ctx)
 {
@@ -229,12 +253,36 @@ static const dsp_app_sync_t FS_SYNC = {NULL, fq_lock, fq_unlock};
 
 /* ---- application task -------------------------------------------------------------------------- */
 
+static void fs_transport_init(void);
+static bool fs_cut_armed, fs_cut_done;
+
 static void *fs_app_task(void *arg)
 {
     (void)arg;
     CFG.recovery_hold_ms = fs_hold ? DSP_OWNER_ARM_HOLD_MS : 0;
     clear_script();
-    (void)wake(DSP_CAUSE_BUTTON); /* returns when the service window ends (idle, maximum, owner's END) */
+    if (fs_cut_armed) {
+        armed = true; /* the harness's pump cut point: the power goes during the pump run */
+        pump_cut = true;
+        cut_at = 0;
+    }
+    /* returns when the service window ends (idle, maximum, owner's END), or false on a power cut */
+    if (!wake(DSP_CAUSE_BUTTON)) {
+        /* power lost (longjmp out of the wake): the radio is gone, then the power comes back */
+        pthread_mutex_lock(&fs_m);
+        if (fs_conn) {
+            fs_conn = false;
+            fs_push_locked(FS_EVT_DISCONNECTED, fs_link, fs_handle, NULL, 0);
+        }
+        pthread_mutex_unlock(&fs_m);
+        reboot_power_on();          /* RTC memory, clock and marker lost; storage kept */
+        fs_transport_init();        /* a fresh transport after the reboot */
+        /* no security session exists during a pump run (T12/T14): the layer is idle (checked by the tests) */
+        fs_cut_done = true;
+    }
+    fs_cut_armed = false;
+    armed = false;
+    pump_cut = false;
     CFG.recovery_hold_ms = 0;
     pthread_mutex_lock(&fs_m);
     fs_running = false;
@@ -277,6 +325,22 @@ JNIEXPORT jboolean JNICALL FS(reset)(JNIEnv *env, jclass cls, jbyteArray device_
     memcpy(DEV_ID, id, 6);
     fresh_unclaimed(); /* world, provisioning wake, blesec init, transport (re-initialized below) */
     memcpy(g_dev_setup, code, 16);
+    fs_transport_init();
+    manual_via_ble = true;
+    fs_cut_armed = fs_cut_done = false;
+    pthread_mutex_lock(&fs_m);
+    fs_qhead = fs_qcount = fs_qdropped = fs_stale = 0;
+    fs_next_handle = FS_HANDLE_DEFAULT; /* fs_link keeps counting: link ids are never reused */
+    fs_adv = fs_conn = fs_signal = fs_armed = false;
+    fs_advance_req = 0;
+    fs_mono_copy = mono_ms;
+    pthread_mutex_unlock(&fs_m);
+    fs_installed = true;
+    return JNI_TRUE;
+}
+
+static void fs_transport_init(void)
+{
     dsp_ble_tr_init(&TR, &FS_RADIO, &app, &TRP);
     BLE2 = TRP;
     BLE2.start = e2e_start;
@@ -285,15 +349,27 @@ JNIEXPORT jboolean JNICALL FS(reset)(JNIEnv *env, jclass cls, jbyteArray device_
     BLE2.stop = e2e_stop;
     CFG.ble = &BLE2;
     CFG.sync = &FS_SYNC;
-    manual_via_ble = true;
-    pthread_mutex_lock(&fs_m);
-    fs_qhead = fs_qcount = fs_qdropped = 0;
-    fs_adv = fs_conn = fs_signal = fs_armed = false;
-    fs_advance_req = 0;
-    fs_mono_copy = mono_ms;
-    pthread_mutex_unlock(&fs_m);
-    fs_installed = true;
+}
+
+/* The next wake loses its power during the first pump run (harness cut point; test-only). */
+JNIEXPORT jboolean JNICALL FS(armPumpPowerCut)(JNIEnv *env, jclass cls)
+{
+    (void)env;
+    (void)cls;
+    if (fs_running) {
+        return JNI_FALSE;
+    }
+    fs_cut_armed = true;
+    fs_cut_done = false;
     return JNI_TRUE;
+}
+
+/* Whether the last wake ended by a power cut (between wakes). */
+JNIEXPORT jboolean JNICALL FS(powerCutHappened)(JNIEnv *env, jclass cls)
+{
+    (void)env;
+    (void)cls;
+    return fs_cut_done ? JNI_TRUE : JNI_FALSE;
 }
 
 /* A button wake: the application task runs the service window until it ends. */
@@ -334,32 +410,81 @@ JNIEXPORT jboolean JNICALL FS(waitAdvertising)(JNIEnv *env, jclass cls, jint tim
     return adv ? JNI_TRUE : JNI_FALSE;
 }
 
-/* GAP connect + MTU exchange + CCCD subscribe from the phone (host task role). 0 = refused. */
-JNIEXPORT jint JNICALL FS(connect)(JNIEnv *env, jclass cls, jint mtu)
+/* GAP connect + MTU exchange + CCCD subscribe from the phone (host task role).
+ * Returns (link << 16) | handle, or 0 when refused. The handle is what the firmware sees and is
+ * reused across connections (FS_HANDLE_DEFAULT unless the test sets another), as a real controller
+ * does. The link id is harness-only and never reused: events, writes and disconnects are bound to
+ * it, so an earlier connection's poller or GATT client can never touch a later connection. */
+JNIEXPORT jlong JNICALL FS(connect)(JNIEnv *env, jclass cls, jint mtu)
 {
     (void)env;
     (void)cls;
+    pthread_mutex_lock(&fs_host);
+    fs_host_role = true;
     pthread_mutex_lock(&fs_m);
     bool ok = fs_adv && !fs_conn && fs_running;
     if (ok) {
         fs_conn = true;
         fs_adv = false; /* the stack stops advertising on a connection (dsp_ble_tr_on_connect relies on it);
                            the transport restarts it from the app task after the disconnect */
-        fs_handle = (uint16_t)(fs_handle % 8u + 1u);
+        fs_handle = fs_next_handle;
+        fs_link++;
     }
     uint16_t h = fs_handle;
+    uint32_t link = fs_link;
     pthread_mutex_unlock(&fs_m);
+    if (ok) {
+        dsp_ble_tr_on_connect(&TR, h, true);
+        dsp_ble_tr_on_mtu(&TR, h, (uint16_t)mtu);
+        dsp_ble_tr_on_subscribe(&TR, h, true);
+    }
+    fs_host_role = false;
+    pthread_mutex_unlock(&fs_host);
     if (!ok) {
         return 0;
     }
-    dsp_ble_tr_on_connect(&TR, h, true);
-    dsp_ble_tr_on_mtu(&TR, h, (uint16_t)mtu);
-    dsp_ble_tr_on_subscribe(&TR, h, true);
-    return h;
+    return (jlong)(((uint64_t)link << 16) | h);
 }
 
-/* One ATT write from the phone; returns the ATT result (0 = OK). */
-JNIEXPORT jint JNICALL FS(write)(JNIEnv *env, jclass cls, jbyteArray fragment)
+/* The handle the next connection gets (1..0x0EFF); only while not connected. */
+JNIEXPORT jboolean JNICALL FS(setConnectionHandle)(JNIEnv *env, jclass cls, jint handle)
+{
+    (void)env;
+    (void)cls;
+    if (handle < 1 || handle > 0x0EFF) {
+        return JNI_FALSE;
+    }
+    pthread_mutex_lock(&fs_m);
+    bool ok = !fs_conn;
+    if (ok) {
+        fs_next_handle = (uint16_t)handle;
+    }
+    pthread_mutex_unlock(&fs_m);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+/* Harness-only: queues a notification on the current link as if the radio had delivered it
+ * (lets the tests leave an undelivered event behind a link deterministically). */
+JNIEXPORT jboolean JNICALL FS(injectNotify)(JNIEnv *env, jclass cls, jbyteArray payload)
+{
+    (void)cls;
+    uint8_t buf[DSP_BLE_TR_MTU_PREFERRED];
+    jsize n = payload == NULL ? -1 : (*env)->GetArrayLength(env, payload);
+    if (n < 0 || (size_t)n > sizeof buf) {
+        return JNI_FALSE;
+    }
+    (*env)->GetByteArrayRegion(env, payload, 0, n, (jbyte *)buf);
+    pthread_mutex_lock(&fs_m);
+    bool ok = fs_conn;
+    if (ok) {
+        fs_push_locked(FS_EVT_NOTIFY, fs_link, fs_handle, buf, (size_t)n);
+    }
+    pthread_mutex_unlock(&fs_m);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+/* One ATT write from the phone on [link]; returns the ATT result (0 = OK), -2 when the link is not the live one. */
+JNIEXPORT jint JNICALL FS(write)(JNIEnv *env, jclass cls, jlong link, jbyteArray fragment)
 {
     (void)cls;
     uint8_t buf[DSP_BLE_TR_MTU_PREFERRED];
@@ -368,37 +493,42 @@ JNIEXPORT jint JNICALL FS(write)(JNIEnv *env, jclass cls, jbyteArray fragment)
         return -1;
     }
     (*env)->GetByteArrayRegion(env, fragment, 0, n, (jbyte *)buf);
+    pthread_mutex_lock(&fs_host);
+    fs_host_role = true;
     pthread_mutex_lock(&fs_m);
-    bool ok = fs_conn;
+    bool ok = fs_conn && (uint32_t)link == fs_link; /* an earlier link's client writes nowhere */
     uint16_t h = fs_handle;
     pthread_mutex_unlock(&fs_m);
-    if (!ok) {
-        return -2;
-    }
-    return dsp_ble_tr_on_write(&TR, h, buf, (size_t)n);
+    int rc = ok ? dsp_ble_tr_on_write(&TR, h, buf, (size_t)n) : -2;
+    fs_host_role = false;
+    pthread_mutex_unlock(&fs_host);
+    return rc;
 }
 
-/* Next event of connection [handle] for the phone: {type, handle, payload...}; null on timeout.
- * Events of an earlier connection are dropped (counted as stale); a poller of an earlier connection
- * never takes the current connection's events. */
-static int fs_stale;
-JNIEXPORT jbyteArray JNICALL FS(poll)(JNIEnv *env, jclass cls, jint handle, jint timeout_ms)
+/* Next event of [link] for the phone: {type, handle u16 LE, link u32 LE, payload...}; null on timeout.
+ * A poller only ever takes events of its own link. Unread events of an ended link that reach the
+ * queue head while a later link is polled are discarded (counted in diagnostics as stale), like a
+ * closed GATT client's. A poller whose link is over and has nothing queued gets FS_EVT_GONE at once,
+ * so a left-over poller always terminates and can never block, take or reorder a later link's events. */
+JNIEXPORT jbyteArray JNICALL FS(poll)(JNIEnv *env, jclass cls, jlong link, jint timeout_ms)
 {
     (void)cls;
+    const uint32_t l = (uint32_t)link;
     uint64_t end = real_ms() + (uint64_t)timeout_ms;
     fs_evt_t e;
-    bool got = false;
+    bool got = false, gone = false;
     pthread_mutex_lock(&fs_m);
     for (;;) {
-        while (fs_qcount > 0 && fs_q[fs_qhead].handle != (uint8_t)handle &&
-               fs_q[fs_qhead].handle != (uint8_t)fs_handle) {
-            fs_qhead = (fs_qhead + 1) % FS_QCAP; /* an earlier connection's event */
+        while (fs_qcount > 0 && fs_q[fs_qhead].link != l && fs_q[fs_qhead].link != fs_link) {
+            fs_qhead = (fs_qhead + 1) % FS_QCAP; /* an ended link's event, not the caller's */
             fs_qcount--;
             fs_stale++;
         }
-        bool mine = fs_qcount > 0 && fs_q[fs_qhead].handle == (uint8_t)handle;
-        bool others = fs_qcount > 0 && !mine;
-        if (mine || others || real_ms() >= end) {
+        bool mine = fs_qcount > 0 && fs_q[fs_qhead].link == l;
+        /* FIFO: an ended link's events all precede the next link's, so nothing of the caller's is
+         * left once the head is someone else's or the queue is empty and the link is down */
+        gone = !mine && (l != fs_link || !fs_conn);
+        if (mine || gone || real_ms() >= end) {
             break;
         }
         struct timespec ts;
@@ -410,40 +540,53 @@ JNIEXPORT jbyteArray JNICALL FS(poll)(JNIEnv *env, jclass cls, jint handle, jint
         }
         pthread_cond_timedwait(&fs_cv, &fs_m, &ts);
     }
-    if (fs_qcount > 0 && fs_q[fs_qhead].handle == (uint8_t)handle) {
+    if (fs_qcount > 0 && fs_q[fs_qhead].link == l) {
         e = fs_q[fs_qhead];
         fs_qhead = (fs_qhead + 1) % FS_QCAP;
         fs_qcount--;
+        got = true;
+    } else if (gone) {
+        e.type = FS_EVT_GONE;
+        e.link = l;
+        e.handle = 0;
+        e.len = 0;
         got = true;
     }
     pthread_mutex_unlock(&fs_m);
     if (!got) {
         return NULL;
     }
-    jbyteArray a = (*env)->NewByteArray(env, (jsize)(e.len + 2));
+    jbyteArray a = (*env)->NewByteArray(env, (jsize)(e.len + 7));
     if (a != NULL) {
-        const uint8_t hdr[2] = {e.type, e.handle};
-        (*env)->SetByteArrayRegion(env, a, 0, 2, (const jbyte *)hdr);
+        const uint8_t hdr[7] = {e.type, (uint8_t)e.handle, (uint8_t)(e.handle >> 8), (uint8_t)e.link,
+                                (uint8_t)(e.link >> 8), (uint8_t)(e.link >> 16), (uint8_t)(e.link >> 24)};
+        (*env)->SetByteArrayRegion(env, a, 0, 7, (const jbyte *)hdr);
         if (e.len > 0) {
-            (*env)->SetByteArrayRegion(env, a, 2, (jsize)e.len, (const jbyte *)e.b);
+            (*env)->SetByteArrayRegion(env, a, 7, (jsize)e.len, (const jbyte *)e.b);
         }
     }
     return a;
 }
 
-/* The phone drops the link (out of range / app closed the GATT client). */
-JNIEXPORT void JNICALL FS(disconnect)(JNIEnv *env, jclass cls)
+/* The phone drops [link] (out of range / app closed the GATT client); a no-op for an ended link. */
+JNIEXPORT void JNICALL FS(disconnect)(JNIEnv *env, jclass cls, jlong link)
 {
     (void)env;
     (void)cls;
+    pthread_mutex_lock(&fs_host);
+    fs_host_role = true;
     pthread_mutex_lock(&fs_m);
-    bool was = fs_conn;
-    fs_conn = false;
+    bool was = fs_conn && (uint32_t)link == fs_link;
+    if (was) {
+        fs_conn = false;
+    }
     uint16_t h = fs_handle;
     pthread_mutex_unlock(&fs_m);
     if (was) {
         dsp_ble_tr_on_disconnect(&TR, h);
     }
+    fs_host_role = false;
+    pthread_mutex_unlock(&fs_host);
 }
 
 /* Three short presses of the device button (recovery confirmation). */
@@ -532,22 +675,24 @@ JNIEXPORT jbyteArray JNICALL FS(inspect)(JNIEnv *env, jclass cls)
 /* Harness consistency: DSP_CHECK failures inside the firmware world, dropped radio events,
  * whether the security layer is idle with its state wiped (only between wakes), the last BLE end
  * reason, pump runs and the harness pump-oracle violations (a pump run without a durable decision,
- * or a DUPLICATE run of the same manual request: test_app_ops.c pump_run). */
+ * or a DUPLICATE run of the same manual request: test_app_ops.c pump_run), and the events of an ended
+ * link discarded unread (FS(poll)). */
 JNIEXPORT jintArray JNICALL FS(diagnostics)(JNIEnv *env, jclass cls)
 {
     (void)cls;
-    jint d[6];
+    jint d[7];
     d[0] = dsp_test_failures;
     pthread_mutex_lock(&fs_m);
     d[1] = fs_qdropped;
+    d[6] = fs_stale;
     pthread_mutex_unlock(&fs_m);
     d[2] = fs_running ? -1 : (SECS.state == DSP_BLESEC_IDLE ? 1 : 0);
     d[3] = (jint)app.rep.ble_end;
     d[4] = pump.calls;      /* read while the application task is between pump runs */
     d[5] = pump.violations;
-    jintArray r = (*env)->NewIntArray(env, 6);
+    jintArray r = (*env)->NewIntArray(env, 7);
     if (r != NULL) {
-        (*env)->SetIntArrayRegion(env, r, 0, 6, d);
+        (*env)->SetIntArrayRegion(env, r, 0, 7, d);
     }
     return r;
 }

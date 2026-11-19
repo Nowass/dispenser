@@ -137,6 +137,89 @@ class SecureSessionTest {
         assertTrue(s.request(0x70) is RequestResult.NotSent)
     }
 
+    // ---- D2: synchronous invalidation in the manager ------------------------------------------
+
+    /** No runCurrent(): the manager's state must already be Idle when end() returns. */
+    @Test
+    fun end_invalidates_the_manager_before_it_returns() = runTest {
+        val s = opened()
+        manager.end()
+        assertEquals(SessionState.Idle, manager.state.value)
+        assertEquals(null, manager.session)
+        assertFalse(s.isOpen)
+        assertTrue(manager.request(0x70) is RequestResult.NotSent)
+    }
+
+    @Test
+    fun close_invalidates_the_manager_before_it_returns() = runTest {
+        val s = opened()
+        s.close("test")
+        assertEquals(SessionState.Idle, manager.state.value)
+        assertEquals(null, manager.session)
+        s.close("again") // idempotent
+        assertEquals("test", s.closed.value)
+        assertEquals(SessionState.Idle, manager.state.value)
+    }
+
+    /** A close by the link itself (a protocol violation) invalidates the manager at once too. */
+    @Test
+    fun session_closed_by_a_violation_invalidates_the_manager_immediately() = runTest {
+        val s = opened()
+        mode = Mode.TAMPER
+        assertTrue(s.request(0x70) is RequestResult.Uncertain)
+        assertFalse(s.isOpen)
+        assertEquals(SessionState.Idle, manager.state.value)
+    }
+
+    /** Concurrent closes on real threads: every caller sees the session invalidated when its close() returns. */
+    @Test
+    fun concurrent_closes_each_return_invalidated() = runTest {
+        repeat(20) { round ->
+            val s = opened()
+            val n = 8
+            val barrier = java.util.concurrent.CyclicBarrier(n)
+            val seen = java.util.concurrent.ConcurrentLinkedQueue<Pair<SessionState, SecureSession?>>()
+            val threads = (0 until n).map { i ->
+                Thread {
+                    barrier.await()
+                    s.close("close $i")
+                    seen += manager.state.value to manager.session
+                }.apply { start() }
+            }
+            threads.forEach { it.join(5_000) }
+            assertEquals("round $round", n, seen.size)
+            assertTrue("round $round: $seen", seen.all { it.first == SessionState.Idle && it.second == null })
+            assertTrue(s.closed.value!!.startsWith("close "))
+        }
+    }
+
+    /** A late close (or a delayed invalidation) of an older session never clears a newer one. */
+    @Test
+    fun late_close_of_an_old_session_never_clears_a_newer_one() = runTest {
+        val old = opened()
+        old.close("ended")
+        val r = manager.open("A0:B1:C2:D3:E4:F5", OpenRequest.Session(id))
+        val new = (r as OpenResult.Opened).session
+        val newState = manager.state.value as SessionState.Authenticated
+        assertEquals(new.generation, newState.generation)
+        old.close("late") // runs the old session's invalidation again, after the newer one was adopted
+        assertEquals(newState, manager.state.value)
+        assertTrue(manager.session === new)
+        assertTrue(manager.request(0x70) is RequestResult.Ok)
+        new.close("ended")
+        assertEquals(SessionState.Idle, manager.state.value)
+    }
+
+    /** A listener registered on an already-closed session runs at once (a close during adoption is not lost). */
+    @Test
+    fun listener_on_a_closed_session_runs_at_once() = runTest {
+        val s = opened()
+        s.close("closed during adoption")
+        var calls = 0
+        s.setCloseListener { calls++ }
+        assertEquals(1, calls)
+    }
+
     @Test
     fun plaintext_after_authentication_closes() = runTest {
         val s = opened()

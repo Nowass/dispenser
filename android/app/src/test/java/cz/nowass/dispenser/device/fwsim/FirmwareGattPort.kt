@@ -44,36 +44,53 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
     inner class Port(private val sink: (GattCallback) -> Unit) : GattPort {
         @Volatile private var running = false
         private var dropping = false
-        private var handle = 0
-        /** Events of other (earlier) connections seen and ignored. */
-        @Volatile var staleEvents = 0
+        /** This port's harness link (never reused); the BLE handle itself may be reused. 0 = none. */
+        @Volatile var link = 0L
+            private set
+        @Volatile var handle = 0
+            private set
+        /** The poller thread has returned (a stopped port leaves nothing running behind). */
+        @Volatile var pollerDone = true
+            private set
+        private val disconnectReported = java.util.concurrent.atomic.AtomicBoolean(false)
 
         override fun connect() {
             val adv = FirmwareSim.waitAdvertising(3_000)
-            handle = if (adv) FirmwareSim.connect(mtuCap) else 0
-            if (handle == 0) {
+            val token = if (adv) FirmwareSim.connect(mtuCap) else 0L
+            if (token == 0L) {
                 System.err.println("fwsim: connect refused: adv=$adv wake=${FirmwareSim.wakeRunning()} diag=${FirmwareSim.diagnostics().toList()}")
                 sink(GattCallback.ConnectionState(false, 133))
                 return
             }
+            link = FirmwareSim.linkOf(token)
+            handle = FirmwareSim.handleOf(token)
             running = true
-            thread(name = "fwsim-poll", isDaemon = true) { poll() }
+            pollerDone = false
+            val l = link
+            thread(name = "fwsim-poll-$l", isDaemon = true) {
+                try {
+                    poll(l)
+                } finally {
+                    pollerDone = true
+                }
+            }
             sink(GattCallback.ConnectionState(true, DispenserGatt.GATT_SUCCESS))
         }
 
-        private fun poll() {
+        /** Reports the end of this port's link at most once. */
+        private fun reportDisconnect(status: Int) {
+            running = false
+            if (disconnectReported.compareAndSet(false, true)) sink(GattCallback.ConnectionState(false, status))
+        }
+
+        private fun poll(l: Long) {
             while (running) {
-                val e = FirmwareSim.poll(handle, 20) ?: continue
-                if ((e[1].toInt() and 0xFF) != handle) {
-                    staleEvents++ // an earlier connection's event: never delivered to this one
-                    continue
-                }
+                val e = FirmwareSim.poll(l, 20) ?: continue
+                check(FirmwareSim.eventLink(e) == l) { "fwsim: link $l got an event of link ${FirmwareSim.eventLink(e)}" }
                 when (e[0].toInt()) {
-                    FirmwareSim.EVT_NOTIFY -> deliver(e.copyOfRange(2, e.size))
-                    FirmwareSim.EVT_DISCONNECTED -> {
-                        running = false
-                        sink(GattCallback.ConnectionState(false, 19)) // remote user terminated
-                    }
+                    FirmwareSim.EVT_NOTIFY -> if (running) deliver(e.copyOfRange(FirmwareSim.EVT_HEADER, e.size))
+                    FirmwareSim.EVT_DISCONNECTED -> reportDisconnect(19) // remote user terminated
+                    FirmwareSim.EVT_GONE -> if (running) reportDisconnect(8) // the link is over (supervision timeout)
                 }
             }
         }
@@ -107,9 +124,9 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
                     dropped++
                     if (disconnectAfterDrop) {
                         disconnectAfterDrop = false
-                        FirmwareSim.disconnect() // the phone drops the link (out of range)
                         running = false
-                        sink(GattCallback.ConnectionState(false, 8))
+                        FirmwareSim.disconnect(link) // the phone drops the link (out of range)
+                        reportDisconnect(8)
                     }
                 }
                 return
@@ -155,7 +172,7 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
                 sink(GattCallback.RequestWritten(DispenserGatt.GATT_SUCCESS)) // acknowledged, never delivered
                 return true
             }
-            val rc = FirmwareSim.write(fragment)
+            val rc = FirmwareSim.write(link, fragment)
             if (rc == -2) return false // not connected
             if (failingAck && last) {
                 failingAck = false
@@ -167,10 +184,8 @@ class FirmwareGattPortFactory(private val mtuCap: Int = 247) : GattPortFactory {
         }
 
         override fun disconnect() {
-            if (running) {
-                running = false
-                FirmwareSim.disconnect()
-            }
+            running = false
+            if (link != 0L) FirmwareSim.disconnect(link) // bound to this port's link: never a later one
         }
 
         override fun close() {

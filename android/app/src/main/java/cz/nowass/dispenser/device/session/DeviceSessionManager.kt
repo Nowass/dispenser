@@ -5,6 +5,7 @@ import cz.nowass.dispenser.crypto.credentials.CredentialStore
 import cz.nowass.dispenser.device.link.FrameLink
 import cz.nowass.dispenser.device.transport.ConnectResult
 import cz.nowass.dispenser.device.transport.GattTransportFactory
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -14,7 +15,6 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -39,7 +39,8 @@ class DeviceSessionManager(
     private val nowUtc: () -> Long = { System.currentTimeMillis() / 1000 },
 ) {
     private val openLock = Mutex()
-    @Volatile private var current: SecureSession? = null
+    /** The adopted session; cleared only by compare-and-set, so a late close of an older session never clears a newer one. */
+    private val current = AtomicReference<SecureSession?>(null)
     private val stateFlow = MutableStateFlow<SessionState>(SessionState.Idle)
     private val eventFlow = MutableSharedFlow<DeviceEvent>(extraBufferCapacity = 32)
 
@@ -47,11 +48,11 @@ class DeviceSessionManager(
     /** Events of the live session only. */
     val events: SharedFlow<DeviceEvent> = eventFlow.asSharedFlow()
     /** The live session, if any (for diagnostics and tests). */
-    val session: SecureSession? get() = current?.takeIf { it.isOpen }
+    val session: SecureSession? get() = current.get()?.takeIf { it.isOpen }
 
     /** Connects to [address] (a locator, never an identity) and opens [request]. */
     suspend fun open(address: String, request: OpenRequest): OpenResult = openLock.withLock {
-        if (current?.isOpen == true) return@withLock OpenResult.Failed(SessionFailure.AlreadyActive)
+        if (current.get()?.isOpen == true) return@withLock OpenResult.Failed(SessionFailure.AlreadyActive)
         stateFlow.value = SessionState.Connecting(request.deviceIdHex)
         try {
             val transport = when (val c = transports.connect(address)) {
@@ -81,19 +82,26 @@ class DeviceSessionManager(
     }
 
     private fun adopt(s: SecureSession, deviceIdHex: String, slot: Int?) {
-        current = s
-        stateFlow.value = SessionState.Authenticated(deviceIdHex, s.generation, slot)
+        val authenticated = SessionState.Authenticated(deviceIdHex, s.generation, slot)
+        current.set(s)
+        stateFlow.value = authenticated
         // subscribed before returning (undispatched): no event of the new session can be missed
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            s.events.collect { if (current === s) eventFlow.emit(it) }
+            s.events.collect { if (current.get() === s) eventFlow.emit(it) }
         }
-        scope.launch(start = CoroutineStart.UNDISPATCHED) {
-            s.closed.first { it != null }
-            if (current === s) {
-                current = null
-                stateFlow.value = SessionState.Idle
-            }
-        }
+        // synchronous invalidation (D2): when any close() of s returns, s is no longer exposed;
+        // registered last, so a session that closed during adoption is invalidated at once
+        s.setCloseListener { closed -> invalidate(closed, authenticated) }
+    }
+
+    /**
+     * Drops [s] and its Authenticated state, each only if it is still the current one: lock-free
+     * compare-and-set, idempotent, no callback and no blocking — a newer session (or a newer open's
+     * Connecting/Handshaking state) is never cleared by an older session's late close.
+     */
+    private fun invalidate(s: SecureSession, authenticated: SessionState.Authenticated) {
+        current.compareAndSet(s, null)
+        stateFlow.compareAndSet(authenticated, SessionState.Idle)
     }
 
     /**
@@ -106,7 +114,7 @@ class DeviceSessionManager(
 
     /** Ends the live session: graceful = encrypted END_SESSION (ends the device's window), else just disconnect. */
     suspend fun end(graceful: Boolean = true) {
-        val s = current ?: return
+        val s = current.get() ?: return
         if (graceful) s.end() else s.close("disconnected by the app")
     }
 }

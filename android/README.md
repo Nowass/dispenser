@@ -77,6 +77,16 @@ logic compiled for the host (`../firmware/test/fwsim`, built by `./gradlew build
 with a new `seq` or repeat REFILL automatically — `docs/BLE_PROTOCOL.md` 10.4a,
 `docs/ANDROID_BLE_DESIGN.md` 14.3).
 
+## Device repository (M1.10e.3)
+
+`cz.nowass.dispenser.data.device`: `DeviceRepository` / `DeviceDispenserRepository` with typed
+results (`device.ops.OpResult`), freshness-tagged device values (`Fresh.Live` / `Cached` /
+`Unknown`), the pending-operations journal and device cache in Room `device.db`, and the durable
+manual-dose flow (seq, then journal row, then send; resolution by `GET_RESULT` with the original
+seq). Tested on the JVM and against the real firmware logic. Not wired into the UI (DEMO mode
+unchanged); SET_TIME is refused until a production time source with a defensible uncertainty exists
+(`docs/ANDROID_BLE_DESIGN.md` 15).
+
 ## Build, test, run
 
 From this `android/` directory:
