@@ -28,6 +28,7 @@ class MainActivity : ComponentActivity() {
         container.startStorageRecovery()
         // Restore the persisted mode (DEVICE only with a confirmed enrollment, also while disconnected).
         container.startModeResolution()
+        val deviceFeatures = DeviceFeatures.enabled(this)
         setContent {
             DispenserTheme {
                 val storage by container.backup.state.collectAsStateWithLifecycle()
@@ -53,7 +54,8 @@ class MainActivity : ComponentActivity() {
                             assets = container.assets,
                             sourceCodeUrl = container.sourceCodeUrl,
                             backupViewModelFactory = BackupViewModel.factory(container.backup, container.documents, container.clock),
-                            deviceAdmin = remember(resolved) { container.deviceAdmin(resolved) },
+                            // Release builds offer no BLE device feature (DeviceFeatures): the "coming later" placeholder.
+                            deviceAdmin = remember(resolved) { if (deviceFeatures) container.deviceAdmin(resolved) else null },
                         )
                     }
                 }

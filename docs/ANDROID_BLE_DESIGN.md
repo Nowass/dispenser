@@ -10,7 +10,8 @@ Status: **revision 10 (current implementation status).**
 | M1.10e.3 device repository and operations (section 15) | committed `f7b8c22`, accepted; review fixes `4d7e3b2`, `2a9d20a` (15.5), accepted |
 | M1.10e.4a app mode and data plumbing (section 16) | committed `e7564da`, accepted |
 | M1.10e.4b onboarding / CDM (section 17) | committed `75c08a3`, `a811732`, `78f5b97`, `9e51c0b`, accepted |
-| M1.10e.4c scanner and invitations (section 18) | implemented and tested, uncommitted, awaiting the architecture/security review |
+| M1.10e.4c scanner and invitations (section 18) | committed `b118348`, accepted |
+| Release builds (v0.5.0-beta.2, decision A1) | BLE device features hidden in release builds, enabled in debug (`device_features_enabled`, docs/RELEASING.md) until M1.10e.4d and M1.10e.5 |
 | M1.10e.4d device operations | not started; stops for final M1.10e.4 acceptance |
 | M1.10e.5 real-device interop and acceptance | OPEN (hardware) |
 

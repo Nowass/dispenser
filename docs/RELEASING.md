@@ -13,9 +13,15 @@ embedded in the app.
 | Launcher label | Dispenser | Dispenser DEBUG |
 | versionName | `0.5.0-beta.1` | `0.5.0-beta.1+debug` |
 | Signing | local release key (optional, see below) or unsigned | Android debug key |
+| BLE device features | hidden: Settings shows the disabled "coming later" placeholder | enabled (pairing, invitations, phones) |
 
 The two variants are separate apps and can be installed side by side. `+debug` is SemVer build
 metadata: the update checker ignores it, so a debug build compares equal to its base version.
+
+The BLE device features are switched per build type (`device_features_enabled` in
+`android/app/build.gradle.kts`): off in release builds until hardware acceptance, on in debug builds.
+`testReleaseUnitTest` runs only the build-type checks (`src/testRelease`) and fails if a release
+build would offer them.
 
 ## Versioning
 

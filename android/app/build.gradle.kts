@@ -28,6 +28,12 @@ val bundleChangelog = tasks.register<BundleChangelogTask>("bundleChangelog") {
 }
 
 androidComponents {
+    // Release host (JVM) tests exist only for the build-type checks in src/testRelease (the device-feature
+    // flag); the full suite runs once, on debug (testReleaseUnitTest is filtered below).
+    beforeVariants(selector().withBuildType("release")) { variant ->
+        (variant as com.android.build.api.variant.HasHostTestsBuilder)
+            .hostTests[com.android.build.api.variant.HostTestBuilder.UNIT_TEST_TYPE]?.enable = true
+    }
     onVariants { variant ->
         variant.sources.assets?.addGeneratedSourceDirectory(bundleChangelog, BundleChangelogTask::outputDir)
     }
@@ -124,8 +130,12 @@ android {
             applicationIdSuffix = ".debug"
             // SemVer build metadata: ignored by the update checker's version comparison.
             versionNameSuffix = "+debug"
+            // BLE device features (pairing, invitations, phones): debug only until hardware acceptance
+            // (v0.5.0-beta.2 decision A1). Off: Settings keeps the disabled "coming later" placeholder.
+            resValue("bool", "device_features_enabled", "true")
         }
         release {
+            resValue("bool", "device_features_enabled", "false")
             if (releaseSigning != null) signingConfig = signingConfigs.getByName("release")
             optimization {
                 enable = true
@@ -163,6 +173,11 @@ android {
 // this Gradle project; declare them as test inputs so that a changed vector reruns the tests.
 tasks.withType<Test>().configureEach {
     inputs.dir(rootProject.file("../test-vectors")).withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
+// Release host tests: only the build-type checks (src/testRelease); everything else runs on debug.
+tasks.withType<Test>().matching { it.name == "testReleaseUnitTest" }.configureEach {
+    filter.includeTestsMatching("cz.nowass.dispenser.buildtype.*")
 }
 
 // Robolectric's Android framework jar is resolved by Gradle (pinned in the version catalog;
