@@ -2,8 +2,10 @@
 
 What M1.7/M1.8 could **not** verify without the board. Run it once a Seeed Studio XIAO
 ESP32-C3 is available, record the results (date, firmware commit, board, measured values) in
-the "Result" column, and keep the safety rules below. Only checks 1.1–1.3 have been run so far
-(2026-11-19); everything else is still OPEN.
+the "Result" column, and keep the safety rules below. Run so far (2026-11-19): checks 1.1–1.3 and
+the RNG-gate items R1, R2, R3, R5, R6 of section 8a (R5 statistically NOT ACCEPTED; bench-only
+deviation, see 8a.2) and a first bench BLE advertising/GATT bring-up (parts of 8b H1 and H2, see
+8b.1). Everything else is still OPEN.
 
 ## Verification levels
 
@@ -198,12 +200,12 @@ option together with the production endpoint.
 
 | # | Check | Pass criterion | Result |
 |---|---|---|---|
-| R1 | RNG registration order | `dsp_esp_rng_name()` = `dsp_esp32c3_hw` after the first ready call; `dsp_esp_rng_registered_before_init()` true; no libsodium use before `dsp_esp_rng_register()` | |
-| R2 | RNG routing | with the BT controller enabled, a handshake raises `dsp_esp_rng_calls()`; libsodium's internal source never used | |
-| R3 | Refusal without RF | controller disabled: `dsp_esp_rng_ready()` false, HELLO session ID 0, HS message 0 answered HANDSHAKE_FAILED; the `abort()` path not reached | |
+| R1 | RNG registration order | `dsp_esp_rng_name()` = `dsp_esp32c3_hw` after the first ready call; `dsp_esp_rng_registered_before_init()` true; no libsodium use before `dsp_esp_rng_register()` | **PASS** 2026-11-19 (RNG-gate image, two runs; 8a.2) |
+| R2 | RNG routing | with the BT controller enabled, a handshake raises `dsp_esp_rng_calls()`; libsodium's internal source never used | **PASS** for the RNG-gate part 2026-11-19 (libsodium requests raise the adapter counter: 1 → 6 for 5 requests; one adapter call per 4 KiB `randombytes_buf` block); the handshake part is checked in stage 2 |
+| R3 | Refusal without RF | controller disabled: `dsp_esp_rng_ready()` false, HELLO session ID 0, HS message 0 answered HANDSHAKE_FAILED; the `abort()` path not reached | **PASS** for the RNG-gate part 2026-11-19 (ready=0, bytes=0 before the controller starts and after it stops; no abort); the HELLO / HANDSHAKE_FAILED part needs the security service (stage 2) |
 | R4 | Live handshakes over BLE | CLAIM (XXpsk3), SESSION (IK), ADD and RECOVERY with a phone (or a host peer over BLE) succeed; two runs give different ephemeral keys and session IDs | |
-| R5 | RNG quality sample | ≥ 1 MiB from `esp_fill_random` with RF on, analyzed off-device (`ent`, dieharder or a NIST STS subset); recorded | |
-| R6 | PSK on target | the `test-vectors/ble_session_v1.txt` PSK vectors reproduce on the device through `dsp_psk_derive` (mbedTLS/TF-PSA-Crypto on the ESP32-C3) | |
+| R5 | RNG quality sample | ≥ 1 MiB from `esp_fill_random` with RF on, analyzed off-device (`ent`, dieharder or a NIST STS subset); recorded | Capture integrity **PASS** (both runs). Statistical classification **NOT ACCEPTED** under the pre-registered protocol v2 (8a.2). **R5 DEVIATION ACCEPTED FOR BENCH MVP ONLY** (8a.2) |
+| R6 | PSK on target | the `test-vectors/ble_session_v1.txt` PSK vectors reproduce on the device through `dsp_psk_derive` (mbedTLS/TF-PSA-Crypto on the ESP32-C3) | **PASS** 2026-11-19 (psk 24/24, psk_not 12/12, both runs) |
 | R7 | Target resources | 8.1–8.3 with the real stack: peak heap per handshake, task stack high-water mark during a handshake and during dispatch, handshake and per-frame timing; the static estimates in the design's resource table replaced | |
 | R8 | Lifecycle on the device | pump suspension closes the security session (EV_SUSPENDING_FOR_DOSE best effort), reconnect needs a new IK handshake; EV_SESSION_CLOSING before the 15-minute maximum; a plain END_SESSION closes only its connection | |
 
@@ -289,6 +291,61 @@ not part of this image; they are checked with the security+BLE bring-up image (b
   host BLE peer; record which peer was used. Security-enabled firmware is accepted for normal use
   only after R4 passes.
 
+#### 8a.2 RNG-gate results and the bench-only R5 deviation (2026-11-19)
+
+Board: XIAO ESP32-C3 rev v0.4, 4 MB, external antenna, USB power only (no pump, MOSFET or
+battery). Firmware: commit `db7e593`, `sdkconfig.defaults` + `sdkconfig.rnggate.defaults`, written
+with an explicit build directory (no erase, no credentials, no eFuse change). Evidence is kept by
+the owner outside the repository (`~/dispenser-hw-evidence/`), sealed with SHA-256 lists.
+
+**Run 1** (1 MiB per source, `rnggate-20261119/`): capture exit 0, 0 framing/CRC errors, both
+files 1,048,576 bytes; device log `RNGGATE SUMMARY R1=PASS R2=PASS R3pre=PASS R3post=PASS
+R5=STREAMED R6=PASS`. Offline sanity statistics (own SP 800-22-style implementation, validated
+against the SP 800-22 Rev. 1a worked examples) all passed. Post hoc observation: the long-range
+bit distribution of both streams looked "too balanced" (not significant after accounting for post
+hoc selection).
+
+**Run 2 — confirmatory** (8 MiB per source, `rnggate-confirm-8m/`, image
+`rnggate8m-db7e593` with `CONFIG_DSP_RNG_GATE_SAMPLE_BYTES=8388608`), evaluated by protocol v2,
+sealed before the capture (`protocol-v2/PROTOCOL.sha256`
+`bef89ccc2a61d68215020dd134b95e5d5fcb0765c0b30ada65aafefc415eaeba`; v1 kept as `protocol/`):
+- Integrity: VALID. Capture 32 min 48 s, `rng_capture.py` exit 0, 0 framing/CRC errors, both
+  files 8,388,608 bytes (SHA-256 `12a9ce8d…a294` `esp_fill_random`, `e08af1b2…83a8`
+  `randombytes_buf`), independent reconstruction from the console log byte-identical; same
+  boot: `RNGGATE SUMMARY R1=PASS R2=PASS R3pre=PASS R3post=PASS R5=STREAMED R6=PASS
+  stack_free_min=6456`.
+- Primary confirmatory tests (lower tail, Bonferroni α' = 0.01/6): the "too balanced"
+  observation is **not confirmed** (all p ≥ 0.0419): `esp_fill_random` C1 0.783, C2 0.0419,
+  C3 0.0484; `randombytes_buf` C1 0.998, C2 0.702, C3 0.534.
+- Sanity battery 5a: **FAIL**. `randombytes_buf` frequency p = 0.0016, cumulative sums
+  forward p = 0.0021 and backward p = 0.0024 (3 of 14 p-values < 0.01, the rule allows 1; none
+  < 0.001). The three reflect one effect: a slight excess of ones over the whole 67 Mbit stream
+  (S = +25,840, Z = +3.15, ones fraction 0.500193). All other 5a tests and the deterministic checks
+  (entropy, serial correlation, repeated chunks) passed; `esp_fill_random` passed every 5a test.
+- NIST STS 2.1.2 (64 × 1 Mbit per source): no flagged row in the independently validated tests
+  (Frequency, BlockFrequency, CumulativeSums, Runs, LongestRun, ApproximateEntropy) and none in
+  the other core tests; `esp_fill_random` 0 of 188 rows flagged; `randombytes_buf` 2 of the 174
+  template/excursion rows flagged (NonOverlappingTemplate #3 proportion 59/64, #7 uniformity
+  p = 0.00006), within the allowed 2, no investigation trigger.
+- Classification (protocol v2, section 6): **R5 NOT ACCEPTED** — investigate the failing test, no
+  repeat capture for statistical reasons.
+- Investigation so far: a read-only review of `randombytes_buf` (libsodium 1.0.20) → `dsp_esp_rng`
+  adapter → `esp_fill_random` (ESP-IDF v6.1) found **no defect**: no transformation, offset or
+  length change on the path, one adapter call per 4 KiB block, identical framing code for both
+  sources. The finding (excess of ones in the `randombytes_buf` stream only) is **unresolved**;
+  whether it is chance or has a cause is not established.
+
+**Project decision (2026-11-19): R5 DEVIATION ACCEPTED FOR BENCH MVP ONLY.** This is a limited
+exception to the gate sequence above (which requires R1–R3 and R5 to pass before stage 2). R5 is
+not a security PASS and remains NOT ACCEPTED.
+- Allowed: bench-only BLE advertising and GATT testing; controlled handshakes with synthetic
+  credentials (development setup code and test identities only); development and debugging of
+  the Android ↔ ESP32 path.
+- Not allowed: production credentials; normal deployment; real pump operation; declaring the
+  security acceptance (8a) complete.
+- Full R5 acceptance remains required before any production use. R4, R7, R8 and the stage-2 parts
+  of R2 and R3 remain OPEN.
+
 ### 8b. M1.10d.2 — hardware acceptance of the NimBLE transport (OPEN)
 
 M1.10d.1 (transport, NimBLE adapter, build option) is verified on the host (unit, fault, fuzz,
@@ -303,8 +360,8 @@ power cycle open the service window (never in a production build).
 
 | # | Check | Pass criterion | Result |
 |---|---|---|---|
-| H1 | Advertising | visible only during a service window; advertising data = Flags + service UUID; scan response = `DSP2` + Service Data (7.1 payload, updated after ownership changes); 100 ms for 30 s after window start/disconnect, then 500 ms; discovery latency recorded | |
-| H2 | GATT and MTU | service and three characteristics as `BLE_PROTOCOL.md` section 2; CCCD; MTU 247 with Android and a 23-byte client both work; a long/prepared write refused | |
+| H1 | Advertising | visible only during a service window; advertising data = Flags + service UUID; scan response = `DSP2` + Service Data (7.1 payload, updated after ownership changes); 100 ms for 30 s after window start/disconnect, then 500 ms; discovery latency recorded | **PARTIAL** 2026-11-19/20: `DSP2` advertised and discovered by a Samsung S23 (8b.1); the rest OPEN |
+| H2 | GATT and MTU | service and three characteristics as `BLE_PROTOCOL.md` section 2; CCCD; MTU 247 with Android and a 23-byte client both work; a long/prepared write refused | **PARTIAL** 2026-11-20: service, three characteristics, Info read, notifications on Response, MTU 247 with Android (8b.1); the rest OPEN |
 | H3 | Handshakes over BLE | CLAIM, SESSION, ADD, RECOVERY with a phone (together with 8a R4) | |
 | H4 | Lifecycle | disconnect/reconnect (new generation, new IK handshake), out of range and supervision timeout, pump suspension (link closed, EV_SUSPENDING_FOR_DOSE best effort, controller stays enabled, no RF activity) and resume; a reply sent before a close (END_SESSION, encrypted MALFORMED) is best effort (T13): record how often it arrives with the 100 ms grace (not a delivery pass condition); the link is terminated ≤ 1.1 s after the close request; suspension completes ≤ 1.5 s and the pump never starts before it returns | |
 | H5 | Notifications | throughput with Android; buffer-pool refusals (`tx_busy`) recorded; no frame abandoned (`tx_failures` 0) with a well-behaved client | |
@@ -313,6 +370,53 @@ power cycle open the service window (never in a production build).
 | H8 | Power and teardown | current while advertising / connected / suspended; controller disabled (`is_off`) before Wi-Fi and before deep sleep | |
 | H9 | Contention | a second phone repeatedly connecting during the owner's window: per-window counters (`dsp_esp_ble_stats`: connections, refused, fragment errors) recorded; owner still served | |
 | H10 | Stack thread-safety | GAP/GATT calls from the application task (advertising, notify, terminate) under load without assertion or deadlock | |
+
+#### 8b.1 First bench BLE advertising and GATT bring-up (2026-11-19/20)
+
+Scope: advertising, discovery, GATT connection and service discovery only, under the bench-only R5
+deviation (8a.2). No handshake, no write to Request, no credentials (`nvs_sec` empty), no
+provisioning. Board: XIAO ESP32-C3 rev v0.4, 4 MB, external antenna, USB power only (no pump,
+MOSFET or battery). Firmware: commit `db7e593`, `sdkconfig.defaults` + `sdkconfig.ble.defaults` +
+`CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW=y` (runtime with simulated pump, simulated hardware maximum
+run time 0, no GPIO output; BLE security and NimBLE transport; connectivity off; production
+endpoint refused), written with an explicit build directory (bootloader, table, otadata, app; no
+erase, no eFuse change). Phone: Samsung S23 with nRF Connect for Mobile (a generic scanner; the
+Dispenser app was not used). Evidence: owner's folder `ble-bringup-20261119/`.
+
+Completed observations:
+- Boot (serial log): 4 MB flash, the approved partition table, app loaded from 0x30000, the
+  bring-up warning, BT controller started (`BLE_INIT: Bluetooth MAC: e0:72:a1:1e:1f:36`); no panic,
+  watchdog, NVS or NimBLE error.
+- Advertising and discovery: `DSP2` advertised and discovered by the S23 at `E0:72:A1:1E:1F:36`.
+- GATT: connection established; service `36b60001-3457-4e8e-9cba-8126de3f52e4` with all three
+  characteristics discovered (Info `36b60002-…` read, Request `36b60003-…` write, Response
+  `36b60004-…` notify); Info READ successful; notifications on Response enabled; ATT MTU 247
+  negotiated.
+- Disconnect: phone log 00:13:49.245 connected, 00:13:49.805 services discovered, 00:14:04.372
+  MTU 247, 00:14:19.327 "Connection terminated by peer" (the device), HCI reason 0x13
+  (status 19), 30.082 s after the connection. This is the intended unauthenticated-connection limit (`BLE_PROTOCOL.md`: an
+  unauthenticated connection is closed after 30 s; `DSP_LINK_UNAUTH_MS` = 30,000 ms in the
+  security layer, closed with `BLE_ERR_REM_USER_CONN_TERM` = 0x13). The service window itself
+  continues. No unexpected BLE defect was established.
+
+Remaining for H1: advertising only inside the service window, the exact advertising and scan
+response contents (Flags, UUID list, Service Data values), 100 ms / 500 ms intervals, Service
+Data update after ownership changes, discovery latency. Remaining for H2: CCCD behaviour in
+detail, a 23-byte-MTU client, refusal of a long/prepared write. H3–H10 and 8a R4 remain OPEN.
+
+Test-environment observations:
+- An OpenOCD process (`openocd -f board/esp32c3-builtin.cfg`, started by VS Code at 20:41 on
+  2026-11-19, the time of the stale-build "Flash Device (JTAG)" incident in section 1) stayed
+  attached to the chip's built-in JTAG interface during the restore, both RNG-gate runs and this
+  BLE flash. All esptool writes were hash-verified and the readbacks and captures were consistent;
+  no effect on flash or data was found. It was no longer running at 00:18 on 2026-11-20 (exit
+  time unknown; not terminated by this work).
+- During the 23:37–23:57 serial capture the board rebooted four times (`rst:0x15
+  USB_UART_CHIP_RESET`) instead of staying in deep sleep, and no `deep sleep for … s` line was
+  logged. Hypothesis, **not confirmed**: the attached OpenOCD reset the chip when USB dropped at
+  sleep entry. After OpenOCD had gone, the board left USB as expected for deep sleep. The serial
+  capture did not cover the phone test (00:13–00:14), and this build logs neither connections nor
+  disconnects.
 
 ## 9. Configuration limits and storage (M1.10b.1)
 
