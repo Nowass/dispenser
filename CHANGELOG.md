@@ -7,6 +7,27 @@ Formát vychází z [Keep a Changelog](https://keepachangelog.com/cs/1.1.0/) a v
 
 ## [Nevydáno]
 
+## [0.5.0-beta.2] – 2026-11-19
+
+Druhá beta verze aplikace pro Android. Aplikace dál pracuje v režimu DEMO a vaše data z verze
+0.5.0-beta.1 zůstávají zachována. Bluetooth připojení je ve vývoji a bude zpřístupněno po ověření
+na skutečném zařízení.
+
+### Změněno
+- Aktualizace z verze 0.5.0-beta.1 instalací přes stávající aplikaci: název akvária, rozvrhy, simulace a historie zůstávají beze změny.
+- Režim DEMO funguje stejně jako dosud.
+- Příprava na připojení k dávkovači přes Bluetooth (zabezpečené spojení, uložení přístupových klíčů v telefonu, párování a pozvánky dalších telefonů). Ve vydané verzi je vypnutá; v Nastavení zůstává informace „Připojení přes Bluetooth bude dostupné později.“
+- Obrazovky jsou připravené na zobrazení skutečných údajů ze zařízení; v režimu DEMO se nic nemění.
+
+### Zabezpečení a soukromí
+- Aplikace nově uvádí oprávnění Bluetooth (na Androidu 12 a novějším „Zařízení v okolí“, na starších verzích Bluetooth) a fotoaparát (pro pozdější načítání QR kódů). Tato verze o ně nikdy nežádá a režim DEMO je nepoužívá.
+- Licence nových knihoven (CameraX, ZXing, Noise-C, libsodium) jsou v obrazovce O aplikaci.
+
+### Známá omezení
+- Režim DEMO: zařízení zatím nelze připojit; zásobník, baterie a historie jsou simulované.
+- Bluetooth připojení zatím nebylo ověřeno na skutečném zařízení.
+- Verze pro 32bitové procesory x86 se už nevydává (týká se jen starých emulátorů); podporované jsou procesory ARM (32 i 64 bitů) a x86_64.
+
 ## [0.5.0-beta.1] – 2026-11-15
 
 První beta verze aplikace pro Android. Aplikace zatím pracuje v režimu DEMO: připojení

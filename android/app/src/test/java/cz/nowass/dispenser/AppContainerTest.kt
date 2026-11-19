@@ -86,7 +86,7 @@ class AppContainerTest {
         assertTrue(container.appSettings.displayName.first() == "Obývák")
         assertTrue(repo.observeSchedules().first() == schedules)
         assertTrue(repo.observeHistory().first() == history)
-        assertTrue(container.appVersion.name.substringBefore('+') == "0.5.0-beta.1" && container.appVersion.code == 5L)
+        assertTrue(container.appVersion.name.substringBefore('+') == "0.5.0-beta.2" && container.appVersion.code == 6L)
         container.appSettings.setDisplayName(null)
     }
 
@@ -94,8 +94,8 @@ class AppContainerTest {
     fun aboutConfiguration_sourceLinkDisabledWhilePrivate_versionFromPackage() {
         val container = AppContainer(context)
         assertTrue(container.sourceCodeUrl == null) // dispenser.github.sourceLinkEnabled=false
-        assertTrue(container.appVersion.name.substringBefore('+') == "0.5.0-beta.1")
-        assertTrue(container.assets.read("CHANGELOG.md")?.contains("## [0.5.0-beta.1]") == true)
+        assertTrue(container.appVersion.name.substringBefore('+') == "0.5.0-beta.2")
+        assertTrue(container.assets.read("CHANGELOG.md")?.contains("## [0.5.0-beta.2]") == true)
         assertTrue(container.assets.read("licenses/third_party_licenses.json") != null)
     }
 }

@@ -1,9 +1,8 @@
 # Releasing the Dispenser Android app (GitHub Releases)
 
-Status: release engineering is in place and `0.5.0-beta.1` is being prepared. Until the
-repository `Nowass/dispenser` is public, the in-app update check reports that release
-information is unavailable (unauthenticated GitHub API returns 404). No credentials are ever
-embedded in the app.
+Status: `0.5.0-beta.1` is published as a GitHub pre-release; `0.5.0-beta.2` is being prepared.
+The in-app update check reads the public release metadata of `Nowass/dispenser`
+(unauthenticated GitHub API). No credentials are ever embedded in the app.
 
 ## Build variants
 
@@ -11,7 +10,7 @@ embedded in the app.
 |---|---|---|
 | applicationId | `cz.nowass.dispenser` | `cz.nowass.dispenser.debug` |
 | Launcher label | Dispenser | Dispenser DEBUG |
-| versionName | `0.5.0-beta.1` | `0.5.0-beta.1+debug` |
+| versionName | `0.5.0-beta.2` | `0.5.0-beta.2+debug` |
 | Signing | local release key (optional, see below) or unsigned | Android debug key |
 | BLE device features | hidden: Settings shows the disabled "coming later" placeholder | enabled (pairing, invitations, phones) |
 
@@ -30,8 +29,9 @@ build would offer them.
 - `versionCode`: **strictly increasing integer for every published APK**, including
   pre-releases; assigned manually in `android/app/build.gradle.kts`, never reused, never derived
   from the version number. Sequence: `0.5.0-beta.1` → 5, `0.5.0-beta.2` → 6, `0.5.0` → 7.
-- Current: `0.5.0-beta.1` / 5 (first release, prepared 2026-11-15). The previous development
-  builds were `0.4.0` / 4 (debug-signed, never published).
+- Current: `0.5.0-beta.2` / 6 (prepared 2026-11-19). Published: `0.5.0-beta.1` / 5 (first
+  release, 2026-11-15). The previous development builds were `0.4.0` / 4 (debug-signed, never
+  published).
 
 ## Update channels (installed build decides; never switched automatically)
 

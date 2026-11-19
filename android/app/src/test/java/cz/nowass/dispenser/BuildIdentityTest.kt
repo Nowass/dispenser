@@ -29,8 +29,8 @@ class BuildIdentityTest {
         val isDebug = versionName.endsWith("+debug")
         assertEquals(if (isDebug) "cz.nowass.dispenser.debug" else "cz.nowass.dispenser", context.packageName)
         assertEquals(if (isDebug) "Dispenser DEBUG" else "Dispenser", context.getString(R.string.app_name))
-        assertEquals("0.5.0-beta.1", versionName.substringBefore('+'))
-        assertEquals(5L, container.appVersion.code)
+        assertEquals("0.5.0-beta.2", versionName.substringBefore('+'))
+        assertEquals(6L, container.appVersion.code)
     }
 
     @Test
