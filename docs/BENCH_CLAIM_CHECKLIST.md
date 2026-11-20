@@ -26,7 +26,7 @@ be shared.
 | `nvs` (0x11000, 80 KiB) | runtime storage written by the BLE image (provisioned on first boot: ownership record UNCLAIMED, PHY calibration) |
 | `nvs_sec` (0x28000, 24 KiB = 0x6000) | no credentials; erased on 2026-11-19, probably initialized as an empty NVS by the BLE image at boot (`nvs_flash_init_partition`) |
 | Device ID (for the label) | **`e072a11e1f34`** = the eFuse **base MAC**. It is **not** the Bluetooth address `E0:72:A1:1E:1F:36` (base + 2), which the app uses only to connect |
-| Debug APK | `android/app/build/outputs/apk/debug/app-debug.apk` from branch `dev/ble-claim-prep` (contains the association fix `b3aa9ea`; without it every real CLAIM stops at "other device"), SHA-256 `54b8e7bc239022506ce1ca82722a8e653173b2d31799e7853d4695b66843ebc5` |
+| Debug APK | `android/app/build/outputs/apk/debug/app-debug.apk` from branch `dev/ble-claim-prep` built at `9295acf` (contains the association fix `b3aa9ea`, without which every real CLAIM stops at "other device", and the staged-key wipe `9295acf`), SHA-256 `ef619c69ff08ea08c72f565fabb88a56d8d7dea99efe4758188b07ff3c8ec842`. Any other hash: rebuild with `./gradlew :app:assembleDebug` at this commit, never install an older build |
 | PC | `. ~/.espressif/tools/activate_idf_v6.1.sh`; no VS Code serial monitor, debug session or "Flash Device" (`pgrep -a openocd` and `fuser /dev/ttyACM0` print nothing) |
 
 The board sleeps after each service window (USB disappears). **RESET** starts a new boot and a new
