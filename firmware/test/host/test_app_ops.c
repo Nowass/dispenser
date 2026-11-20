@@ -113,6 +113,7 @@ static fake_kv_t kv;
 static dsp_kv_t proxy;
 static char fail_set_key[16]; /* sets of this key fail (write error), "" = none */
 static char fail_set_prefix[8]; /* Phase C: sets of keys with this prefix fail, "" = none */
+static bool fail_set_prefix_no_space; /* ... with NO_SPACE (partition full) instead of a write error */
 
 static dsp_kv_status_t px_get(void *ctx, const char *key, uint8_t *buf, size_t cap, size_t *len)
 {
@@ -124,7 +125,7 @@ static dsp_kv_status_t px_set(void *ctx, const char *key, const uint8_t *data, s
     (void)ctx;
     if ((fail_set_key[0] != '\0' && strcmp(key, fail_set_key) == 0) ||
         (fail_set_prefix[0] != '\0' && strncmp(key, fail_set_prefix, strlen(fail_set_prefix)) == 0)) {
-        return DSP_KV_ERR_WRITE;
+        return fail_set_prefix_no_space && fail_set_prefix[0] != '\0' ? DSP_KV_ERR_NO_SPACE : DSP_KV_ERR_WRITE;
     }
     if (in_wake && armed) {
         op_writes++;
@@ -794,6 +795,7 @@ static void world(void)
     op_writes = cut_at = 0;
     fail_set_key[0] = '\0';
     fail_set_prefix[0] = '\0';
+    fail_set_prefix_no_space = false;
     g_true = T0 - HOUR; /* 07:00 local */
     g_offset = 5 - g_true; /* power-on: the raw clock counts from ~0 (untrusted) */
     g_marker = 0;

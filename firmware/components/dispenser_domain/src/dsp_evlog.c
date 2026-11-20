@@ -200,11 +200,25 @@ bool dsp_evlog_open(dsp_evlog_t *log, const dsp_kv_t *kv)
     }
     /* No ordering window is needed: a slot only ever holds the latest seq written to it
      * (slot = seq % SLOTS, seqs strictly increase), so an older seq in a slot is simply an
-     * older event (e.g. after a skipped ring) and sorts correctly. */
-    log->head = max;
-    if (bad) {
-        /* An unreadable slot may hold a seq up to max + SLOTS - 1: never reuse one. */
-        log->head = max <= UINT32_MAX - DSP_EVLOG_SLOTS ? max + DSP_EVLOG_SLOTS : UINT32_MAX;
+     * older event (e.g. after a gap) and sorts correctly. */
+    uint32_t hw = 0;
+    size_t len = 0;
+    dsp_kv_status_t ks = kv->get(kv->ctx, DSP_EVLOG_HW_KEY, log->buf, sizeof log->buf, &len);
+    bool hw_ok = ks == DSP_KV_OK && len == DSP_EVLOG_HW_BYTES && log->buf[0] == 1u;
+    if (hw_ok) {
+        hw = get_u32(log->buf + 1);
+    }
+    if (hw_ok && hw >= max) {
+        log->head = hw; /* covers every seq ever used, readable or not */
+        log->reserved = hw;
+    } else if (ks == DSP_KV_NOT_FOUND && max == 0 && !bad) {
+        log->head = 0; /* a log that was never written */
+    } else {
+        /* The bound is missing, unreadable, malformed or behind a readable event: every seq it can
+         * have covered is below max + SLOTS + RESERVE. The next append reserves afresh. */
+        fault(log);
+        uint64_t h = (uint64_t)max + DSP_EVLOG_SLOTS + DSP_EVLOG_RESERVE;
+        log->head = h > UINT32_MAX ? UINT32_MAX : (uint32_t)h;
     }
     log->open = true;
     return true;
@@ -227,6 +241,24 @@ dsp_evlog_status_t dsp_evlog_append(dsp_evlog_t *log, const dsp_event_t *ev, uin
     }
     dsp_event_t e = *ev;
     e.seq = log->head + 1;
+    if (e.seq > log->reserved) {
+        /* Durable reservation BEFORE the event: a seq is used only below a confirmed bound. */
+        uint64_t b = (uint64_t)e.seq + DSP_EVLOG_RESERVE - 1u;
+        uint32_t bound = b > UINT32_MAX ? UINT32_MAX : (uint32_t)b;
+        uint8_t hb[DSP_EVLOG_HW_BYTES] = {1u};
+        put_u32(hb + 1, bound);
+        size_t rl = 0;
+        if (log->kv->set(log->kv->ctx, DSP_EVLOG_HW_KEY, hb, sizeof hb) != DSP_KV_OK ||
+            log->kv->commit(log->kv->ctx) != DSP_KV_OK ||
+            log->kv->get(log->kv->ctx, DSP_EVLOG_HW_KEY, log->rb, sizeof log->rb, &rl) != DSP_KV_OK ||
+            rl != sizeof hb || memcmp(hb, log->rb, sizeof hb) != 0) {
+            /* old or new bound durable (unknown): the head is unchanged and no event is written,
+             * so no seq above the old bound is ever used without a confirmed reservation */
+            fault(log);
+            return DSP_EVLOG_ERR_WRITE;
+        }
+        log->reserved = bound;
+    }
     size_t slot = e.seq % DSP_EVLOG_SLOTS;
     size_t len = dsp_event_encode(&e, log->buf, sizeof log->buf);
     if (len == 0) {

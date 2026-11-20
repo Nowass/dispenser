@@ -76,9 +76,14 @@ static void hook_history(int i)
     const op_t *o = &sc.op[i];
     int k = o->a;
     const dsp_app_auth_t *auth = o->b == 1 ? &NOBODY : o->b == 2 ? &BAD_SLOT : issue_for(&OWNER);
-    uint32_t before = k > 0 && hist_res[k - 1].status == DSP_OP_OK && hist_pages[k - 1].n > 0
-                          ? hist_pages[k - 1].items[hist_pages[k - 1].n - 1].seq
-                          : 0;
+    static uint32_t cursor;
+    if (k == 0) {
+        cursor = 0;
+    } else if (hist_res[k - 1].status == DSP_OP_OK) {
+        cursor = hist_pages[k - 1].n > 0 ? hist_pages[k - 1].items[hist_pages[k - 1].n - 1].seq
+                                         : (cursor != 0 ? cursor : 1u); /* past the end: stay there */
+    }
+    uint32_t before = cursor;
     uint8_t max = o->b == 3 ? 0 : o->b == 4 ? 5 : 4;
     hist_res[k] = dsp_app_get_history(&app, auth, before, max, &hist_pages[k]);
 }
@@ -340,6 +345,107 @@ static void test_history_failure_never_affects_dosing(void)
     invariants();
 }
 
+/* Durable safety state that the history must never damage: storage opens, ownership is still
+ * claimed, the schedule set and the reservoir are as expected. */
+static void check_safety_state(size_t schedules, uint32_t remaining)
+{
+    DSP_CHECK(side_open());
+    dsp_auth_t a;
+    memset(&a, 0, sizeof a);
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_auth(&side, &a));
+    DSP_CHECK_EQ_INT(DSP_AUTH_CLAIMED, a.claim_state);
+    memset(&a, 0, sizeof a);
+    DSP_CHECK_EQ_INT((int)schedules, (int)durable_set().count);
+    DSP_CHECK_EQ_INT(remaining, durable_cfg().reservoir_remaining_ul);
+}
+
+/* A full partition for the history keys only (NO_SPACE) and plain write errors: doses, refill and a
+ * configuration change all happen and persist; ownership, schedules and reservoir stay intact. */
+static void test_full_or_failing_history_storage_is_isolated(void)
+{
+    for (int variant = 0; variant < 2; variant++) {
+        provision(true);
+        snprintf(fail_set_prefix, sizeof fail_set_prefix, "ev");
+        fail_set_prefix_no_space = variant == 1;
+        clear_script();
+        step(g_true, op_create(once_at("n1", T0, 8, 0, 1000)));
+        DSP_CHECK(session());
+        run_until(T0 + 10 * MINUTE);
+        DSP_CHECK_EQ_INT(1, pump.calls);
+        advance(g_true + 2 * MINUTE);
+        clear_script();
+        step(g_true, op_now());
+        int md = step(g_true, op_manual(1, 500));
+        int rf = step(g_true + 1, op_refill(CAP - 100));
+        DSP_CHECK(session());
+        DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[md].r.status);
+        DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[rf].r.status);
+        DSP_CHECK_EQ_INT(2, pump.calls);
+        DSP_CHECK(!rep.degraded);
+        check_safety_state(1, CAP - 100);
+        /* the anti-replay record of the dose is intact: never repeated */
+        run_until(T0 + 2 * HOUR);
+        DSP_CHECK_EQ_INT(2, pump.calls);
+        dsp_event_t ev[DSP_EVLOG_SLOTS];
+        size_t n = durable_history(ev, DSP_EVLOG_SLOTS);
+        DSP_CHECK_EQ_INT(2, n); /* only the provisioning events written before the failure */
+        invariants();
+    }
+}
+
+/* Power cut at every write of a manual dose and of a refill: at most one event, never an OK event
+ * for a dose that did not run, never a reservoir event whose change is not durable. */
+static void test_power_cuts_in_manual_dose_and_refill(void)
+{
+    int cases = 0;
+    for (int kind = 0; kind < 2; kind++) {
+        for (int variant = 0; variant < 2; variant++) {
+            for (long k = 1; k <= 30; k++) {
+                provision(true);
+                advance(g_true + 2 * MINUTE);
+                clear_script();
+                step(g_true, op_now());
+                step_armed(g_true, kind == 0 ? op_manual(9, 1000) : op_refill(CAP / 2));
+                cut_at = k;
+                cut_after = variant == 1;
+                bool finished = session();
+                cut_at = 0;
+                if (finished) {
+                    break;
+                }
+                cases++;
+                int pumps = pump.calls;
+                reboot_and_trust();
+                reboot_and_trust();
+                dsp_event_t ev[DSP_EVLOG_SLOTS];
+                size_t n = durable_history(ev, DSP_EVLOG_SLOTS);
+                int manual = 0, refills = 0;
+                for (size_t i = 0; i < n; i++) {
+                    if (i > 0) {
+                        DSP_CHECK(ev[i].seq < ev[i - 1].seq);
+                    }
+                    manual += ev[i].type == DSP_EV_DOSE_MANUAL;
+                    if (ev[i].type == DSP_EV_DOSE_MANUAL && ev[i].result == DSP_EVR_OK) {
+                        DSP_CHECK_EQ_INT(1, pumps);
+                    }
+                    if (i < n - 2 && (ev[i].type == DSP_EV_RESERVOIR_REFILL || ev[i].type == DSP_EV_RESERVOIR_ADJUST)) {
+                        refills++;
+                        if (!(ev[i].flags & DSP_EVF_RESERVOIR_UNKNOWN)) {
+                            DSP_CHECK_EQ_INT(ev[i].after_ul, durable_cfg().reservoir_remaining_ul);
+                        }
+                    }
+                }
+                DSP_CHECK(manual <= 1);
+                DSP_CHECK(refills <= 1);
+                DSP_CHECK(pump.calls <= 1);
+                invariants();
+            }
+        }
+    }
+    printf("  history: %d power cuts in manual doses and refills, no duplicate or false event\n", cases);
+    DSP_CHECK(cases >= 8);
+}
+
 static void test_get_history_paging_and_authorization(void)
 {
     provision(true);
@@ -363,21 +469,23 @@ static void test_get_history_paging_and_authorization(void)
     step(g_true, op_history(6, 3)); /* max 0 */
     step(g_true, op_history(7, 4)); /* max 5 */
     DSP_CHECK(session());
-    uint32_t expect = hist_pages[0].newest_seq;
-    DSP_CHECK_EQ_INT(14, expect);
+    /* Identity and order are what count (seqs may have gaps after failures). */
+    uint32_t newest = hist_pages[0].newest_seq;
+    DSP_CHECK_EQ_INT(newest, hist_pages[0].items[0].seq);
+    uint32_t prev = UINT32_MAX;
     size_t total = 0;
     for (int k = 0; k < 4; k++) {
         DSP_CHECK_EQ_INT(DSP_OP_OK, hist_res[k].status);
-        DSP_CHECK_EQ_INT(14, hist_pages[k].newest_seq);
-        DSP_CHECK_EQ_INT(1, hist_pages[k].oldest_seq);
+        DSP_CHECK_EQ_INT(newest, hist_pages[k].newest_seq);
         DSP_CHECK(!hist_pages[k].faults);
         for (uint8_t j = 0; j < hist_pages[k].n; j++) {
-            DSP_CHECK_EQ_INT(expect, hist_pages[k].items[j].seq);
-            expect--;
+            DSP_CHECK(hist_pages[k].items[j].seq < prev); /* strictly decreasing across pages */
+            prev = hist_pages[k].items[j].seq;
         }
         total += hist_pages[k].n;
     }
     DSP_CHECK_EQ_INT(14, total);
+    DSP_CHECK_EQ_INT(prev, hist_pages[0].oldest_seq); /* the last page ends at the oldest */
     DSP_CHECK_EQ_INT(DSP_OP_OK, hist_res[4].status);
     DSP_CHECK_EQ_INT(0, hist_pages[4].n);
     DSP_CHECK_EQ_INT(DSP_OP_FORBIDDEN, hist_res[5].status);
@@ -393,6 +501,8 @@ int main(void)
     DSP_RUN(test_interrupted_doses_are_logged_once);
     DSP_RUN(test_power_cuts_never_duplicate_events);
     DSP_RUN(test_history_failure_never_affects_dosing);
+    DSP_RUN(test_full_or_failing_history_storage_is_isolated);
+    DSP_RUN(test_power_cuts_in_manual_dose_and_refill);
     DSP_RUN(test_get_history_paging_and_authorization);
     return dsp_test_finish();
 }

@@ -19,20 +19,28 @@
  *  - events carry an optional deduplication key (non-zero): an append whose key is already in
  *    the log is a no-op (defense in depth against repeated recovery or retries).
  *
- * Layout: DSP_EVLOG_SLOTS keys "ev00".."ev63" in the same NVS namespace, OUTSIDE the storage
- * layout's explicit-presence rule: a missing key is an empty slot (never provisioned, never
- * required), so adding the log needs no layout migration and older firmware ignores the keys.
- * Event `seq` (u32, from 1, strictly increasing, gaps allowed) lives in slot seq % SLOTS; one
- * append = one key write (single-key atomic in NVS: old or new event, never a mix), commit,
- * read-back compare. No separate head key: the head is the highest valid seq found at open.
- * Wraparound overwrites the oldest event. A slot that cannot be read or decoded, or whose seq
- * does not belong to it, is ignored and counted in `faults`; after any such fault at open the
- * next seq skips one full ring (head + SLOTS) so a seq possibly still held by an unreadable slot
- * is never reused (the skipped range is a gap; ordering is by seq only). (A newest record that NVS dropped as corrupt before the first wraparound is
- * indistinguishable from an empty slot; its seq can then be reused once: documented limit.)
+ * Layout: DSP_EVLOG_SLOTS keys "ev00".."ev63" plus the sequence reservation "evhw", in the same NVS
+ * namespace, OUTSIDE the storage layout's explicit-presence rule: a missing key is an empty slot
+ * (never provisioned, never required), so adding the log needs no layout migration and older
+ * firmware ignores the keys. Event `seq` (u32, from 1, strictly increasing, gaps allowed) lives in
+ * slot seq % SLOTS; one append = one key write (single-key atomic in NVS: old or new event, never a
+ * mix), commit, read-back compare. Wraparound overwrites the oldest event.
  *
- * Capacity: an event is 41 + id bytes (<= 105 B) -> at most 6 NVS entries; 64 slots <= 384 of the
- * partition's ~1,950 free entries (firmware/README.md "Event history (Phase C)").
+ * Sequence identity (Phase C review): seq is the event identity, the client's de-duplication key
+ * and the paging cursor, so a seq is NEVER handed out twice. "evhw" holds a durable upper bound of
+ * every seq ever used: before an append whose seq is above it, the bound is raised to that seq
+ * (DSP_EVLOG_RESERVE = 1; written, committed, read back); only then is the event written. At open the
+ * head is that bound (unused reserved seqs become a gap). An event slot that NVS drops or that
+ * cannot be read can therefore never lower the head. If "evhw" itself is missing, unreadable or
+ * below a readable event while events exist, the head is the highest readable seq plus
+ * SLOTS + RESERVE, which bounds every seq the lost bound can have covered (all live seqs lie within
+ * one ring of the newest, and the bound exceeds the newest written seq by at most RESERVE).
+ * Residual: when every event key AND "evhw" are gone (an erased namespace) the log restarts at 1;
+ * the device has then lost its whole storage (layout, ownership), so no client can still hold
+ * events of the previous log in a session of this device. A failed reservation drops the event.
+ *
+ * Capacity: an event is 41 + id bytes (<= 105 B) -> at most 6 NVS entries; 64 slots <= 384 entries
+ * plus 3 for "evhw" (firmware/README.md "Event history (Phase C)").
  */
 
 #include <stdbool.h>
@@ -51,6 +59,13 @@ extern "C" {
 #define DSP_EVLOG_FORMAT 1
 #define DSP_EVLOG_HEADER_BYTES 41
 #define DSP_EVLOG_RECORD_MAX (DSP_EVLOG_HEADER_BYTES + DSP_SCHEDULE_ID_MAX_LEN)
+/* Seqs reserved per "evhw" write. 1 on purpose: slot = seq % SLOTS, so every unused reserved seq
+ * would leave an older event in its slot and a block of R per wake would shrink the retention to
+ * SLOTS / R events when wakes log one event each (the common case, where a block saves no write
+ * anyway: the first append after a boot always reserves). With 1, gaps arise only from failures. */
+#define DSP_EVLOG_RESERVE 1u
+#define DSP_EVLOG_HW_KEY "evhw"
+#define DSP_EVLOG_HW_BYTES 5    /* format u8 = 1 | bound u32 */
 
 /* Event types (u8 on flash and on the wire). */
 enum {
@@ -107,6 +122,7 @@ typedef struct {
     const dsp_kv_t *kv;
     bool open;
     uint32_t head;                    /* highest seq that may exist (0 = none) */
+    uint32_t reserved;                /* durable "evhw" bound confirmed in this boot (0 = none) */
     uint32_t seq[DSP_EVLOG_SLOTS];    /* index: seq held by each slot, 0 = empty / unreadable */
     uint64_t key[DSP_EVLOG_SLOTS];
     uint16_t faults;                  /* unreadable slots at open + failed appends/reads since this
@@ -130,7 +146,8 @@ bool dsp_event_decode(const uint8_t *buf, size_t len, dsp_event_t *out);
  * are counted and ignored); false only for invalid arguments. */
 bool dsp_evlog_open(dsp_evlog_t *log, const dsp_kv_t *kv);
 
-/* Appends ev (seq assigned, written to *seq_out if non-NULL). */
+/* Appends ev (seq assigned, written to *seq_out if non-NULL). Raises the durable reservation first
+ * when needed; if that fails nothing is appended (DSP_EVLOG_ERR_WRITE, the seq is not used). */
 dsp_evlog_status_t dsp_evlog_append(dsp_evlog_t *log, const dsp_event_t *ev, uint32_t *seq_out);
 
 /* Newest-first page: up to max events with seq < before_seq (before_seq 0 = from the newest).

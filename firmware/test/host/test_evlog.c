@@ -212,7 +212,7 @@ static void test_wraparound_and_restart(void)
     }
     DSP_CHECK_EQ_INT(200, dsp_evlog_newest(&lg));
     DSP_CHECK_EQ_INT(200 - DSP_EVLOG_SLOTS + 1, dsp_evlog_oldest(&lg));
-    DSP_CHECK_EQ_INT(DSP_EVLOG_SLOTS, fake_kv_count(&kv)); /* bounded: one key per slot */
+    DSP_CHECK_EQ_INT(DSP_EVLOG_SLOTS + 1, fake_kv_count(&kv)); /* bounded: one key per slot + "evhw" */
     reboot();
     DSP_CHECK_EQ_INT(0, lg.faults);
     DSP_CHECK_EQ_INT(200, dsp_evlog_newest(&lg));
@@ -234,7 +234,7 @@ static void test_wraparound_and_restart(void)
         before = out[n - 1].seq;
     }
     DSP_CHECK_EQ_INT(DSP_EVLOG_SLOTS, total);
-    /* The next seq continues after the restart. */
+    /* The next seq continues above every seq ever reserved (here the bound is exactly 200). */
     dsp_event_t e = dose("wrap", 201, 0);
     uint32_t seq = 0;
     DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, &seq));
@@ -256,9 +256,11 @@ static void test_duplicates_are_suppressed(void)
     DSP_CHECK_EQ_INT(DSP_EVLOG_DUPLICATE, dsp_evlog_append(&lg, &a, NULL));
     /* Key 0 never deduplicates. */
     dsp_event_t r = refill(1, 2);
-    DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &r, NULL));
-    DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &r, NULL));
-    DSP_CHECK_EQ_INT(3, dsp_evlog_newest(&lg));
+    uint32_t r1 = 0, r2 = 0;
+    DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &r, &r1));
+    DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &r, &r2));
+    DSP_CHECK(r1 > s1 && r2 == r1 + 1); /* after the restart: above the reservation, then consecutive */
+    DSP_CHECK_EQ_INT(r2, dsp_evlog_newest(&lg));
     /* Once its event has been overwritten by wraparound, a key can be logged again (the log
      * dedups within its retention only; callers log after durable transitions). */
     for (int i = 0; i < DSP_EVLOG_SLOTS; i++) {
@@ -273,29 +275,37 @@ static void test_failed_and_interrupted_writes(void)
     fresh();
     dsp_event_t e = dose("f", 1, 0);
     DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, NULL)); /* seq 1 */
-    /* set fails: the event is lost, its seq consumed, the log stays usable. */
+    /* Failures at the reservation (set, partition full, commit, read-back): no event, no seq used. */
     kv.fail_sets = true;
-    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL)); /* seq 2 lost */
+    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL));
     kv.fail_sets = false;
     kv.no_space = true;
-    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL)); /* seq 3: partition full */
+    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL));
     kv.no_space = false;
     kv.fail_commits = true;
-    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL)); /* seq 4: commit */
+    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL));
     kv.fail_commits = false;
     kv.corrupt_next_readback = true;
-    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL)); /* seq 5: read-back */
+    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL));
     DSP_CHECK_EQ_INT(4, lg.faults);
+    DSP_CHECK(fake_kv_find(&kv, "ev02") == NULL);
+    /* The event write fails after a confirmed reservation (its read-back): seq 2 is consumed. */
+    snprintf(kv.fail_get_key, sizeof kv.fail_get_key, "ev02");
+    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL));
+    kv.fail_get_key[0] = '\0';
     uint32_t seq = 0;
     DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, &seq));
-    DSP_CHECK_EQ_INT(6, seq); /* never reused */
+    DSP_CHECK_EQ_INT(3, seq); /* never reused */
     dsp_event_t out[8];
     size_t n = dsp_evlog_read(&lg, 0, out, 8);
-    /* seq 6 and 1 for sure; 4 and 5 landed durably (commit failure / bad read-back are
-     * "unknown"), so after a restart they may reappear: they are real events with their own seq. */
-    DSP_CHECK(n >= 2);
-    DSP_CHECK_EQ_INT(6, out[0].seq);
-    DSP_CHECK_EQ_INT(1, out[n - 1].seq);
+    DSP_CHECK_EQ_INT(2, n); /* seq 2 is not served in this boot (its write is unconfirmed) */
+    DSP_CHECK_EQ_INT(3, out[0].seq);
+    DSP_CHECK_EQ_INT(1, out[1].seq);
+    /* after a restart the landed seq-2 event is a real event with its own identity */
+    reboot();
+    n = dsp_evlog_read(&lg, 0, out, 8);
+    DSP_CHECK_EQ_INT(3, n);
+    DSP_CHECK_EQ_INT(2, out[1].seq);
 
     /* Power cut during an append (durable_on_set = false: the set is staged, lost at the cut). */
     fake_kv_init(&kv, false);
@@ -307,7 +317,21 @@ static void test_failed_and_interrupted_writes(void)
     DSP_CHECK_EQ_INT(1, dsp_evlog_newest(&lg)); /* old content intact, no partial event */
     DSP_CHECK_EQ_INT(0, lg.faults);
     DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, &seq));
-    DSP_CHECK_EQ_INT(2, seq);
+    DSP_CHECK_EQ_INT(DSP_EVLOG_RESERVE + 1, seq); /* the cut seq 2 is never reused: a gap */
+
+    /* A failed reservation writes no event and uses no seq. */
+    fake_kv_init(&kv, true);
+    DSP_CHECK(dsp_evlog_open(&lg, &kv.iface));
+    kv.fail_sets = true;
+    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL));
+    DSP_CHECK_EQ_INT(0, fake_kv_count(&kv));
+    DSP_CHECK_EQ_INT(0, (int)lg.head);
+    kv.fail_sets = false;
+    kv.corrupt_next_readback = true; /* the bound's read-back differs: still no event */
+    DSP_CHECK_EQ_INT(DSP_EVLOG_ERR_WRITE, dsp_evlog_append(&lg, &e, NULL));
+    DSP_CHECK(fake_kv_find(&kv, "ev01") == NULL);
+    DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, &seq));
+    DSP_CHECK_EQ_INT(1, seq);
 }
 
 static void test_corruption_is_contained(void)
@@ -334,12 +358,11 @@ static void test_corruption_is_contained(void)
     DSP_CHECK_EQ_INT(7, n); /* 10 - 3 faulty slots; the rest in order */
     DSP_CHECK_EQ_INT(10, out[0].seq);
     DSP_CHECK_EQ_INT(8, out[1].seq);
-    /* After a fault the next seq skips a full ring: a seq an unreadable slot may hold is never
-     * reused. */
+    /* Unreadable slots never lower the head: the durable reservation bounds every seq used. */
     dsp_event_t e = dose("c", 11, 0);
     uint32_t seq = 0;
     DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, &seq));
-    DSP_CHECK_EQ_INT(10 + DSP_EVLOG_SLOTS + 1, seq);
+    DSP_CHECK_EQ_INT(11, seq); /* above the durable bound (10), never a seq of a damaged slot */
     kv.fail_get_key[0] = '\0';
     /* Order is by seq across the gap, also after the next restart (no cascade of skips while
      * the faulty slots stay as they are; each still counts as a fault). */
@@ -356,6 +379,121 @@ static void test_corruption_is_contained(void)
     DSP_CHECK_EQ_INT(8, out[2].seq);
     DSP_CHECK_EQ_INT(f0 + 1, lg.faults);
     kv.fail_get_key[0] = '\0';
+}
+
+/* Phase C review (2026-11-20): seq is the event identity, the Android de-duplication key and the
+ * paging cursor, so a seq once handed out must never name a different event. Failure sequences of
+ * revision 0f843ec, where the head came from the readable event slots only:
+ *  (a) before the first wraparound NVS drops the newest event (CRC failure -> NOT_FOUND): the next
+ *      boot reads head = newest - 1 and gives the next event the dropped event's seq;
+ *  (b) the same after a wraparound (a missing slot is "empty", no skip);
+ *  (c) every slot lost: the log restarts at seq 1. */
+static void append_n(int n, uint32_t vol0)
+{
+    for (int i = 0; i < n; i++) {
+        dsp_event_t e = dose("r", vol0 + (uint32_t)i, 0);
+        DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, NULL));
+    }
+}
+
+static void test_seq_never_reused_after_lost_slots(void)
+{
+    /* (a) */
+    fresh();
+    append_n(5, 1);
+    fake_kv_remove(&kv, "ev05"); /* the newest event, dropped by NVS */
+    reboot();
+    dsp_event_t e = dose("r", 99, 0);
+    uint32_t seq = 0;
+    DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, &seq));
+    DSP_CHECK(seq > 5);
+    /* (b) */
+    fresh();
+    append_n(100, 1);
+    char k[8];
+    dsp_evlog_key(100 % DSP_EVLOG_SLOTS, k, sizeof k);
+    fake_kv_remove(&kv, k);
+    reboot();
+    DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, &seq));
+    DSP_CHECK(seq > 100);
+    /* the replacement never collides with an event a client may still hold */
+    dsp_event_t out[DSP_EVLOG_SLOTS];
+    size_t n = dsp_evlog_read(&lg, 0, out, DSP_EVLOG_SLOTS);
+    for (size_t i = 1; i < n; i++) {
+        DSP_CHECK(out[i].seq < out[i - 1].seq);
+    }
+    /* (c) */
+    fresh();
+    append_n(70, 1);
+    for (size_t i = 0; i < DSP_EVLOG_SLOTS; i++) {
+        dsp_evlog_key(i, k, sizeof k);
+        fake_kv_remove(&kv, k);
+    }
+    reboot();
+    DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, &seq));
+    DSP_CHECK(seq > 70);
+}
+
+/* The reservation itself lost, damaged or behind the events: the head skips a ring + a block. */
+static void test_reservation_damage(void)
+{
+    const uint8_t junk[2] = {9, 9};
+    uint8_t low[DSP_EVLOG_HW_BYTES] = {1, 3, 0, 0, 0}; /* bound 3 < newest event */
+    const uint8_t *vals[3] = {NULL, junk, low};
+    size_t lens[3] = {0, sizeof junk, sizeof low};
+    for (int v = 0; v < 3; v++) {
+        fresh();
+        append_n(20, 1);
+        if (v == 0) {
+            fake_kv_remove(&kv, DSP_EVLOG_HW_KEY);
+        } else {
+            fake_kv_put_raw(&kv, DSP_EVLOG_HW_KEY, vals[v], lens[v]);
+        }
+        fake_kv_remove(&kv, "ev20"); /* and the newest event as well */
+        reboot();
+        DSP_CHECK_EQ_INT(1, lg.faults);
+        dsp_event_t e = dose("r", 1, 0);
+        uint32_t seq = 0;
+        DSP_CHECK_EQ_INT(DSP_EVLOG_OK, dsp_evlog_append(&lg, &e, &seq));
+        DSP_CHECK_EQ_INT(19 + DSP_EVLOG_SLOTS + DSP_EVLOG_RESERVE + 1, seq);
+        /* a fresh, valid bound was written before that event */
+        const fake_kv_entry_t *hw = fake_kv_find(&kv, DSP_EVLOG_HW_KEY);
+        DSP_CHECK(hw != NULL && hw->len == DSP_EVLOG_HW_BYTES);
+        reboot();
+        DSP_CHECK_EQ_INT(0, lg.faults);
+        DSP_CHECK(lg.head >= seq);
+    }
+    /* A fresh log needs no bound and starts at 1; reading never writes. */
+    fresh();
+    int sets = kv.sets;
+    dsp_event_t out[4];
+    DSP_CHECK_EQ_INT(0, dsp_evlog_read(&lg, 0, out, 4));
+    DSP_CHECK_EQ_INT(sets, kv.sets);
+}
+
+/* Endurance model: many wraparounds keep the key set bounded, the order intact and the retention at
+ * 64 events also when every wake logs one event; the bound is written once per append. */
+static void test_repeated_wraparound(void)
+{
+    fresh();
+    int sets0 = kv.sets;
+    append_n(10 * DSP_EVLOG_SLOTS, 1);
+    int sets = kv.sets - sets0;
+    DSP_CHECK_EQ_INT(2 * 10 * DSP_EVLOG_SLOTS, sets); /* event + reservation per append */
+    DSP_CHECK_EQ_INT(DSP_EVLOG_SLOTS + 1, fake_kv_count(&kv));
+    for (int boot = 0; boot < 50; boot++) { /* one event per wake, as a dose wake */
+        reboot();
+        append_n(1, 1000 + (uint32_t)boot);
+    }
+    dsp_event_t out[DSP_EVLOG_SLOTS];
+    size_t n = dsp_evlog_read(&lg, 0, out, DSP_EVLOG_SLOTS);
+    DSP_CHECK_EQ_INT(DSP_EVLOG_SLOTS, n);
+    for (size_t i = 1; i < n; i++) {
+        DSP_CHECK(out[i].seq < out[i - 1].seq);
+    }
+    DSP_CHECK_EQ_INT(1049, out[0].volume_ul);
+    DSP_CHECK_EQ_INT(out[0].seq - (DSP_EVLOG_SLOTS - 1), out[n - 1].seq); /* 64 consecutive: no slot lost */
+    DSP_CHECK_EQ_INT(DSP_EVLOG_SLOTS + 1, fake_kv_count(&kv));
 }
 
 static void test_arguments(void)
@@ -392,6 +530,9 @@ int main(void)
     DSP_RUN(test_duplicates_are_suppressed);
     DSP_RUN(test_failed_and_interrupted_writes);
     DSP_RUN(test_corruption_is_contained);
+    DSP_RUN(test_seq_never_reused_after_lost_slots);
+    DSP_RUN(test_reservation_damage);
+    DSP_RUN(test_repeated_wraparound);
     DSP_RUN(test_arguments);
     return dsp_test_finish();
 }
