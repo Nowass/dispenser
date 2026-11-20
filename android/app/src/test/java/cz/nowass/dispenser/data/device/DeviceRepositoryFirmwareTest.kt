@@ -405,6 +405,45 @@ class DeviceRepositoryFirmwareTest {
         assertEquals(1, h2.count { it.result == cz.nowass.dispenser.device.ops.HistoryResult.INTERRUPTED })
     }
 
+    /** Phase C review: a page read, then a new event and a reconnect, then the next page below the cursor. */
+    @Test
+    fun history_paging_across_a_new_event_and_a_reconnect() = runBlocking {
+        val p = Phone()
+        wake()
+        p.claim()
+        p.connected()
+        p.repo.prepareForDosing()
+        repeat(3) {
+            assertTrue(p.repo.manualDose(500) is OpResult.Uncertain)
+            p.idle()
+            FirmwareSim.advance(120_000) // past the minimum interval
+            p.connected()
+        }
+        val before = p.repo.allHistory()
+        assertTrue("events: ${before.size}", before.size >= 5)
+        val first = (p.repo.history(0, max = 2) as OpResult.Ok).value
+        assertEquals(before.take(2), first.events)
+        // repeated requests return the same identities
+        assertEquals(first, (p.repo.history(0, max = 2) as OpResult.Ok).value)
+        // a new event (dose -> BLE suspended -> reconnect) between two pages
+        assertTrue(p.repo.manualDose(500) is OpResult.Uncertain)
+        p.idle()
+        p.connected()
+        val rest = mutableListOf<cz.nowass.dispenser.device.ops.HistoryEventRecord>()
+        var cursor = first.events.last().seq
+        while (true) {
+            val page = (p.repo.history(cursor) as OpResult.Ok).value
+            if (page.events.isEmpty()) break
+            rest += page.events
+            cursor = page.events.last().seq
+        }
+        assertEquals("below the cursor: exactly the old events, no duplicate, no new one", before.drop(2), rest)
+        val after = p.repo.allHistory()
+        assertEquals(before.size + 1, after.size)
+        assertTrue(after.first().seq > before.first().seq)
+        assertEquals(before, after.drop(1))
+    }
+
     @Test
     fun history_needs_the_authenticated_session_and_validates_its_arguments() = runBlocking {
         val p = Phone()

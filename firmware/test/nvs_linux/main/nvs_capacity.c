@@ -575,12 +575,12 @@ static int sections_1_to_5(void)
     add_cotenants();
     nvs_stats_t s1 = stats();
     printf("1. max records: schedule set %zu B; dispenser namespace %zu entries (layout %zu + "
-           "full event history %zu); partition total %zu, used %zu, free %zu, available %zu "
+           "full event history incl. reservation %zu); partition total %zu, used %zu, free %zu, available %zu "
            "(empty: available %zu)\n",
            sched_len(), ours, ours_layout, ours - ours_layout, s1.total_entries, s1.used_entries,
            s1.free_entries, s1.available_entries, s0.available_entries);
     CHECK(ours_layout <= 325); /* documented budget: 309 (M1.10b.2) + 15 for "auth" (layout v5) */
-    CHECK(ours - ours_layout <= DSP_EVLOG_SLOTS * 6); /* Phase C: <= 6 entries per event */
+    CHECK(ours - ours_layout <= DSP_EVLOG_SLOTS * 6 + 3); /* Phase C: <= 6 per event + "evhw" */
     CHECK(s1.available_entries > 4 * 101); /* room for several full-set rewrites */
     power_cycle();
     CHECK(open_storage() == DSP_STORAGE_OK);
@@ -620,6 +620,51 @@ static int sections_1_to_5(void)
            "checks\n",
            N, N / 10, total_erase, (double)total_erase / N, min_erase, max_erase, used_ref, used_max);
     CHECK(max_erase <= 2 * (total_erase / (part->size / 4096)) + 2); /* wear is spread */
+
+    /* ---- 2b. Phase C: repeated wraparound of the full event history ---------------------- */
+    {
+        esp_partition_clear_stats();
+        size_t used0 = stats().used_entries, used_hi = used0;
+        const int NE = 20000;
+        CHECK(dsp_evlog_open(&evlog, &kv));
+        uint32_t last = dsp_evlog_newest(&evlog);
+        for (int i = 0; i < NE; i++) {
+            dsp_event_t e;
+            memset(&e, 0, sizeof e);
+            e.type = DSP_EV_DOSE_SCHEDULED;
+            e.flags = DSP_EVF_CLOCK_TRUSTED;
+            e.at = 1795158000 + (dsp_utc_t)i;
+            e.volume_ul = 5000;
+            e.capacity_ul = 100000;
+            memset(e.schedule_id, 'k', DSP_SCHEDULE_ID_MAX_LEN);
+            uint32_t seq = 0;
+            CHECK(dsp_evlog_append(&evlog, &e, &seq) == DSP_EVLOG_OK);
+            CHECK(seq > last); /* never reused, across the power cycles below */
+            last = seq;
+            if ((i + 1) % 2000 == 0) {
+                power_cycle();
+                CHECK(open_storage() == DSP_STORAGE_OK); /* the safety layout is untouched */
+                CHECK(dsp_evlog_open(&evlog, &kv));
+                CHECK(evlog.faults == 0);
+                CHECK(dsp_evlog_newest(&evlog) == last);
+                size_t used = stats().used_entries;
+                used_hi = used > used_hi ? used : used_hi;
+                CHECK(used <= used0 + 8); /* bounded: overwrites only */
+            }
+        }
+        size_t first = part->address / 4096, mx = 0, mn = SIZE_MAX, tot = 0;
+        for (size_t sec = first; sec < first + part->size / 4096; sec++) {
+            size_t e = esp_partition_get_sector_erase_count(sec);
+            mx = e > mx ? e : mx;
+            mn = e < mn ? e : mn;
+            tot += e;
+        }
+        printf("2b. %d maximum-size event appends (each: reservation + event, %d wraparounds): %zu "
+               "page erases (%.3f per append), per page min %zu max %zu; used entries %zu at "
+               "start, at most %zu\n",
+               NE, NE / DSP_EVLOG_SLOTS, tot, (double)tot / NE, mn, mx, used0, used_hi);
+        CHECK(mx <= 2 * (tot / (part->size / 4096)) + 2); /* wear is spread */
+    }
 
     /* ---- 3. Format 1 -> 2 upgrade, cut at every cycle ------------------------------------ */
     {
