@@ -27,6 +27,7 @@ import cz.nowass.dispenser.device.session.SessionFailure
 import cz.nowass.dispenser.device.session.SessionState
 import cz.nowass.dispenser.domain.ScheduleDraft
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -125,7 +126,14 @@ class DeviceDispenserRepository(
     override suspend fun connect(): ConnectOutcome {
         val s = session() ?: run {
             val addr = address() ?: return ConnectOutcome.NoAddress
-            port.open(addr, OpenRequest.Session(deviceId))?.let { return ConnectOutcome.Failed(it) }
+            // the open belongs to the manager scope (D3), not to the calling screen: a screen left
+            // while connecting does not abort it, and the resulting session serves every screen
+            val failure = scope.async { port.open(addr, OpenRequest.Session(deviceId)) }.await()
+            // concurrent connect() calls coalesce: the manager opens one session (its open lock), a
+            // later caller gets AlreadyActive and uses the session the first one opened for this device
+            if (failure != null && !(failure == SessionFailure.AlreadyActive && session() != null)) {
+                return ConnectOutcome.Failed(failure)
+            }
             session() ?: return ConnectOutcome.Failed(SessionFailure.ProtocolError("session closed right after opening"))
         }
         // once per session (also one opened elsewhere, e.g. right after an enrollment): resolution

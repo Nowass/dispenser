@@ -24,10 +24,12 @@ data class PhonesUiState(
     val busy: Boolean = false,
 )
 
-/** The device's phone list (M1.10e.4c). [runAfterClose] drops the link (no END_SESSION) after the screen is gone. */
+/**
+ * The device's phone list (M1.10e.4c). The authenticated session belongs to the application
+ * (DeviceSessionManager): this ViewModel only loads and observes; clearing it never disconnects.
+ */
 class PhonesViewModel(
     private val controller: PhonesController,
-    private val runAfterClose: (suspend () -> Unit) -> Unit,
 ) : ViewModel() {
     private val _state = MutableStateFlow(PhonesUiState())
     val state: StateFlow<PhonesUiState> = _state.asStateFlow()
@@ -54,13 +56,9 @@ class PhonesViewModel(
         }
     }
 
-    override fun onCleared() {
-        runAfterClose { controller.finish() }
-    }
-
     companion object {
-        fun factory(controller: () -> PhonesController, runAfterClose: (suspend () -> Unit) -> Unit): ViewModelProvider.Factory = viewModelFactory {
-            initializer { PhonesViewModel(controller(), runAfterClose) }
+        fun factory(controller: () -> PhonesController): ViewModelProvider.Factory = viewModelFactory {
+            initializer { PhonesViewModel(controller()) }
         }
     }
 }

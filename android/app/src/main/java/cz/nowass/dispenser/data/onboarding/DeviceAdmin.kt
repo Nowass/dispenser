@@ -147,9 +147,10 @@ enum class RemoveOutcome {
 /**
  * The device's phone list and PHONE_REMOVE (journaled, resolved by read-back; M1.10e.3). The owner
  * removes OTHER phones; this phone's own slot is not removed from here (it would revoke itself while
- * connected). Leaving the screen ([finish]) only drops the link: no END_SESSION, so the device's
- * service window continues, the device advertises again and the next [load] opens a new IK SESSION
- * without a button press (an encrypted END_SESSION would end the whole window, decision C10).
+ * connected). The session belongs to the application (DeviceSessionManager), not to this screen:
+ * leaving the screen neither disconnects nor sends END_SESSION, so the authenticated session stays
+ * available to every screen and [load] reuses it (decision C10: an encrypted END_SESSION would end the
+ * device's whole service window). The background grace (BackgroundGrace) ends it with a plain disconnect.
  */
 class PhonesController(private val repo: DeviceRepository) {
     suspend fun load(): PhonesOutcome {
@@ -179,11 +180,6 @@ class PhonesController(private val repo: DeviceRepository) {
                 else -> RemoveOutcome.NOT_SENT
             }
         }
-    }
-
-    /** Leaving the screen is not an explicit "Done": plain disconnect, the device's window stays open. */
-    suspend fun finish() {
-        runCatching { repo.disconnect(graceful = false) }
     }
 }
 

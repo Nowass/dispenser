@@ -146,7 +146,6 @@ class InviteAndPhonesTest {
         assertEquals(RemoveOutcome.AWAITING_VERIFICATION, c.remove(other))
         fake.removeOutcome = OpResult.Refused(LocalRefusal.InProgress)
         assertEquals(RemoveOutcome.AWAITING_VERIFICATION, c.remove(other))
-        c.finish()
-        assertEquals(1, fake.disconnects)
+        assertEquals("the phone list never disconnects: the session belongs to the application", 0, fake.disconnects)
     }
 }

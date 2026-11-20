@@ -38,7 +38,9 @@ import cz.nowass.dispenser.crypto.NativeNoiseProvider
 import cz.nowass.dispenser.crypto.credentials.AndroidKeystoreKeyWrapper
 import cz.nowass.dispenser.crypto.credentials.CredentialStore
 import cz.nowass.dispenser.device.ops.ManagerSessionPort
+import cz.nowass.dispenser.device.session.BackgroundGrace
 import cz.nowass.dispenser.device.session.DeviceSessionManager
+import cz.nowass.dispenser.device.session.SessionState
 import cz.nowass.dispenser.device.transport.AndroidBluetoothPrerequisites
 import cz.nowass.dispenser.device.transport.AndroidGattPortFactory
 import cz.nowass.dispenser.device.transport.GattTransportFactory
@@ -193,13 +195,29 @@ class AppContainer(private val context: Context) {
     private val deviceDatabase: DeviceDatabase by lazy { DeviceDatabase.build(context) }
 
     /** The process-wide owner of the single live session (docs/ANDROID_BLE_DESIGN.md 4.4, E9). */
-    val sessionManager: DeviceSessionManager by lazy {
+    private val sessionManagerLazy = lazy {
         DeviceSessionManager(
             GattTransportFactory(AndroidGattPortFactory(context.applicationContext), prerequisites, appScope),
             noise,
             credentials,
             appScope,
-        )
+        ).also { m ->
+            // a session adopted after the grace already expired (an open still running when the app
+            // went to the background) is closed too: the background never holds the device's connection
+            appScope.launch {
+                m.state.collect { if (it is SessionState.Authenticated && backgroundGrace.expired) m.end(graceful = false) }
+            }
+        }
+    }
+    val sessionManager: DeviceSessionManager by sessionManagerLazy
+
+    /**
+     * Background grace (4.4): the session survives navigation and short app switches; 30 s after the
+     * last activity stopped it is closed with a plain disconnect (never END_SESSION, so the device's
+     * service window continues under its own timers). Registered by [DispenserApplication].
+     */
+    val backgroundGrace: BackgroundGrace = BackgroundGrace(appScope) {
+        if (sessionManagerLazy.isInitialized()) sessionManager.end(graceful = false)
     }
 
     /**
@@ -303,7 +321,7 @@ class AppContainer(private val context: Context) {
             { InviteViewModel.factory { InviteController(deviceUi(id).device, credentials) } }
         },
         phonesFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->
-            { PhonesViewModel.factory({ PhonesController(deviceUi(id).device) }, runAfterClose = { block -> appScope.launch { block() } }) }
+            { PhonesViewModel.factory { PhonesController(deviceUi(id).device) } }
         },
     )
 
@@ -346,4 +364,9 @@ fun credentialDirectory(context: Context): File = File(context.noBackupFilesDir,
 
 class DispenserApplication : Application() {
     val container: AppContainer by lazy { AppContainer(this) }
+
+    override fun onCreate() {
+        super.onCreate()
+        registerActivityLifecycleCallbacks(container.backgroundGrace.callbacks)
+    }
 }
