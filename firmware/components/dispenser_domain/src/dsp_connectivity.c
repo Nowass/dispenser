@@ -12,7 +12,7 @@ static bool valid(const dsp_connectivity_t *c)
     return c != NULL && c->time != NULL && c->time->tk != NULL && c->time->tk->initialized &&
            c->time->wifi != NULL && c->time->wifi->initialized && c->time->clock != NULL &&
            c->time->clock->now != NULL && c->notify != NULL && c->notify->loaded &&
-           c->https != NULL && c->https->initialized && c->retained != NULL;
+           (c->https == NULL || c->https->initialized) && c->retained != NULL; /* NULL: time only */
 }
 
 int64_t dsp_connectivity_worst_case_s(const dsp_connectivity_t *c)
@@ -22,7 +22,9 @@ int64_t dsp_connectivity_worst_case_s(const dsp_connectivity_t *c)
     }
     uint64_t ms = (uint64_t)c->time->wifi->cfg.max_attempts * c->time->wifi->cfg.connect_timeout_ms;
     ms += c->time->sntp_timeout_ms != 0 ? c->time->sntp_timeout_ms : DSP_SNTP_TIMEOUT_DEFAULT_MS;
-    ms += budget_ms(c);
+    if (c->https != NULL) {
+        ms += budget_ms(c); /* time-only sessions never open HTTPS */
+    }
     return (int64_t)((ms + 999) / 1000);
 }
 
@@ -65,7 +67,8 @@ dsp_connectivity_report_t dsp_connectivity_run(dsp_connectivity_t *c,
         /* A backward clock step (now < last) allows one attempt and restarts the interval. */
         bool interval_ok = last == 0 || now < last || now - last >= DSP_CONN_NOTIFY_MIN_INTERVAL_S;
         bool backoff = tk->retained.consecutive_failures > 0; /* retry not yet due */
-        if (critical && interval_ok && !backoff) {
+        /* time-only (no HTTPS): notifications never start a session */
+        if (critical && interval_ok && !backoff && c->https != NULL) {
             r.reason = DSP_CONN_REASON_CRITICAL;
         }
     }
@@ -97,9 +100,10 @@ dsp_connectivity_report_t dsp_connectivity_run(dsp_connectivity_t *c,
         return r;
     }
 
-    /* 5. Notifications (all pending ones travel, CRITICAL first, within the budget). */
+    /* 5. Notifications (all pending ones travel, CRITICAL first, within the budget).
+     *    Time-only: none (no HTTP client); the queue stays untouched. */
     r.outcome = DSP_CONN_DONE;
-    if (dsp_notify_pending_count(c->notify) > 0) {
+    if (c->https != NULL && dsp_notify_pending_count(c->notify) > 0) {
         if (!dsp_https_ready(c->https)) {
             r.outcome = DSP_CONN_NO_TOKEN;
         } else if (!dsp_https_begin(c->https, budget_ms(c))) {

@@ -840,6 +840,81 @@ static void test_missing_token_or_port(void)
     DSP_CHECK_EQ_INT(DSP_CONN_ERR_ARG, dsp_connectivity_run(&conn, NULL).outcome);
 }
 
+/* ---- Time-only sessions (CONFIG_DSP_APP_WIFI_TIME: https == NULL) ------------------------- */
+
+static void test_time_only_syncs_and_never_delivers(void)
+{
+    world();
+    conn.https = NULL;
+    DSP_CHECK_EQ_INT(55, dsp_connectivity_worst_case_s(&conn)); /* 3 x 15 + 10 s, no HTTPS budget */
+    add_dosing_errors(1); /* CRITICAL pending */
+    dsp_connectivity_report_t r = dsp_connectivity_run(&conn, &IDLE);
+    DSP_CHECK_EQ_INT(DSP_CONN_DONE, r.outcome);
+    DSP_CHECK_EQ_INT(DSP_CONN_REASON_SYNC, r.reason);
+    DSP_CHECK(!r.delivery_ran);
+    DSP_CHECK_EQ_INT(0, port.posts);
+    DSP_CHECK(tk.trust != DSP_TRUST_UNKNOWN);   /* trusted through the unchanged M1.4 logic */
+    DSP_CHECK_EQ_INT(1, dsp_notify_pending_count(&n)); /* the queue is untouched */
+    check_wifi_off();
+    /* a pending CRITICAL never starts a time-only session; no sync due: nothing at all */
+    int starts = wf.starts;
+    for (int i = 0; i < 6; i++) {
+        advance(H);
+        DSP_CHECK_EQ_INT(DSP_CONN_SKIPPED_NOT_DUE, dsp_connectivity_run(&conn, &IDLE).outcome);
+    }
+    DSP_CHECK_EQ_INT(starts, wf.starts);
+    DSP_CHECK_EQ_INT(0, retained.last_notify_attempt);
+    DSP_CHECK_EQ_INT(0, port.posts);
+}
+
+static void test_time_only_failures_never_trust_and_back_off(void)
+{
+    world();
+    conn.https = NULL;
+    /* Wi-Fi unavailable: bounded attempts, Wi-Fi off, no SNTP, still UNKNOWN */
+    wf.connect_result = DSP_NET_ERR_NO_AP;
+    dsp_connectivity_report_t r = dsp_connectivity_run(&conn, &IDLE);
+    DSP_CHECK_EQ_INT(DSP_CONN_WIFI_FAILED, r.outcome);
+    DSP_CHECK(wf.connects >= 1 && wf.connects <= (int)DSP_WIFI_ATTEMPTS_DEFAULT);
+    DSP_CHECK_EQ_INT(0, ntp_calls);
+    DSP_CHECK_EQ_INT(DSP_TRUST_UNKNOWN, tk.trust);
+    check_wifi_off();
+    /* backoff: far fewer sessions than hourly wakes over a day, each bounded */
+    int sessions = 1;
+    for (int i = 0; i < 24; i++) {
+        advance(H);
+        int before = wf.starts;
+        r = dsp_connectivity_run(&conn, &IDLE);
+        if (wf.starts != before) {
+            sessions++;
+            DSP_CHECK_EQ_INT(DSP_CONN_WIFI_FAILED, r.outcome);
+        } else {
+            DSP_CHECK_EQ_INT(DSP_CONN_SKIPPED_NOT_DUE, r.outcome);
+        }
+        check_wifi_off();
+    }
+    DSP_CHECK(sessions >= 2 && sessions <= 8);
+    DSP_CHECK(wf.connects <= sessions * (int)DSP_WIFI_ATTEMPTS_DEFAULT);
+    DSP_CHECK_EQ_INT(DSP_TRUST_UNKNOWN, tk.trust);
+    /* Wi-Fi works, SNTP does not answer: no false trust */
+    world();
+    conn.https = NULL;
+    ntp_result = DSP_SYNC_ERR_TIMEOUT;
+    r = dsp_connectivity_run(&conn, &IDLE);
+    DSP_CHECK_EQ_INT(DSP_CONN_TIME_UNTRUSTED, r.outcome);
+    DSP_CHECK_EQ_INT(DSP_TRUST_UNKNOWN, tk.trust);
+    DSP_CHECK_EQ_INT(0, port.posts);
+    check_wifi_off();
+    /* the next due attempt with a working SNTP server establishes trust */
+    ntp_result = DSP_SYNC_OK;
+    for (int i = 0; i < 48 && tk.trust == DSP_TRUST_UNKNOWN; i++) {
+        advance(H);
+        (void)dsp_connectivity_run(&conn, &IDLE);
+        check_wifi_off();
+    }
+    DSP_CHECK(tk.trust != DSP_TRUST_UNKNOWN);
+}
+
 int main(void)
 {
     DSP_RUN(test_ack_body_and_token_handling);
@@ -857,5 +932,7 @@ int main(void)
     DSP_RUN(test_critical_respects_wifi_backoff);
     DSP_RUN(test_untrusted_time_sends_nothing);
     DSP_RUN(test_missing_token_or_port);
+    DSP_RUN(test_time_only_syncs_and_never_delivers);
+    DSP_RUN(test_time_only_failures_never_trust_and_back_off);
     return dsp_test_finish();
 }

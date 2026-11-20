@@ -21,6 +21,11 @@
  *    otherwise nothing is sent and the queue is untouched (the CLOCK condition is reported
  *    by the notification engine; it cannot itself be e-mailed without trusted time).
  *  - Wi-Fi is always shut down before returning.
+ *
+ * Time-only mode (bench MVP, CONFIG_DSP_APP_WIFI_TIME): https == NULL. The session runs only
+ * for a due regular time sync (a), never for notifications (b): no HTTP client exists, the
+ * notification queue is never delivered from and stays untouched; the dose guard's worst case
+ * contains no HTTPS budget. Time synchronization, trust and backoff are unchanged.
  */
 
 #include <stdbool.h>
@@ -82,13 +87,13 @@ typedef struct {
 typedef struct {
     dsp_time_service_t *time;               /* M1.4 (timekeeper, Wi-Fi, SNTP, clock, storage) */
     dsp_notify_t *notify;                   /* M1.5 engine (loaded) */
-    dsp_https_transport_t *https;           /* M1.7 transport (initialized) */
+    dsp_https_transport_t *https;           /* M1.7 transport (initialized); NULL = time only */
     dsp_connectivity_retained_t *retained;  /* RTC-retained */
     uint32_t https_budget_ms;               /* 0 = DSP_CONN_HTTPS_BUDGET_MS_DEFAULT */
 } dsp_connectivity_t;
 
 /* Worst-case duration of one session in seconds (Wi-Fi attempts x timeout + SNTP timeout
- * + HTTPS budget, rounded up), used for the dose guard. -1 on invalid input. */
+ * + HTTPS budget unless time-only, rounded up), used for the dose guard. -1 on invalid input. */
 int64_t dsp_connectivity_worst_case_s(const dsp_connectivity_t *c);
 
 /* Runs at most one session (see policy above). */

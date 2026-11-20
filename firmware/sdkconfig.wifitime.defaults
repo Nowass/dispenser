@@ -1,0 +1,5 @@
+# Bench MVP fragment (BUILD-ONLY): Wi-Fi/SNTP time synchronization in the application cycle,
+# without HTTPS, notification delivery, an endpoint or an API token (CONFIG_DSP_APP_WIFI_TIME).
+# Use together with sdkconfig.defaults and sdkconfig.ble.defaults (after them). Wi-Fi credentials
+# come only from the developer-provisioned "nvs_sec" partition, never from this file.
+CONFIG_DSP_APP_WIFI_TIME=y

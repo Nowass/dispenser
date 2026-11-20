@@ -3,10 +3,15 @@
 #include <string.h>
 
 #include "esp_event.h"
+#include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+
+/* Outcome and timing only: never the SSID, passphrase or any address. */
+static const char *TAG = "dsp_wifi";
 
 #define BIT_CONNECTED BIT0
 #define BIT_FAILED BIT1
@@ -95,17 +100,22 @@ static dsp_net_status_t wifi_connect(void *ctx, const dsp_wifi_credentials_t *cr
     }
     xEventGroupClearBits(s_wifi.events, BIT_CONNECTED | BIT_FAILED);
     s_wifi.last_reason = 0;
+    int64_t t0 = esp_timer_get_time();
     if (esp_wifi_connect() != ESP_OK) {
         return DSP_NET_ERR_CONNECT;
     }
     EventBits_t bits = xEventGroupWaitBits(s_wifi.events, BIT_CONNECTED | BIT_FAILED, pdTRUE,
                                            pdFALSE, pdMS_TO_TICKS(timeout_ms));
+    unsigned ms = (unsigned)((esp_timer_get_time() - t0) / 1000);
     if (bits & BIT_CONNECTED) {
+        ESP_LOGI(TAG, "connected (IP) in %u ms", ms);
         return DSP_NET_OK;
     }
     if (!(bits & BIT_FAILED)) {
+        ESP_LOGW(TAG, "connect timeout after %u ms", ms);
         return DSP_NET_ERR_TIMEOUT;
     }
+    ESP_LOGW(TAG, "connect failed after %u ms (reason %d)", ms, (int)s_wifi.last_reason);
     switch (s_wifi.last_reason) {
     case WIFI_REASON_AUTH_FAIL:
     case WIFI_REASON_AUTH_EXPIRE:
@@ -150,6 +160,7 @@ static void wifi_stop(void *ctx)
         s_wifi.netif = NULL;
     }
     s_wifi.started = false;
+    ESP_LOGI(TAG, "stopped (radio off)");
 }
 
 static const dsp_wifi_driver_t s_driver = {NULL, wifi_start, wifi_connect, wifi_disconnect, wifi_stop};

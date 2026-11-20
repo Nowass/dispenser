@@ -220,6 +220,7 @@ firmware/
 ├── version.txt                 firmware version, single source for both builds
 ├── sdkconfig.defaults          committed Kconfig defaults (target, flash size, partition table, TLS bundle)
 ├── sdkconfig.ble.defaults      BUILD-ONLY fragment: runtime + security + NimBLE transport (M1.10d.1)
+├── sdkconfig.wifitime.defaults BUILD-ONLY fragment: Wi-Fi/SNTP time sync without HTTPS (bench MVP)
 ├── partitions.csv              4 MB partition table (M1.7)
 ├── tools/provision_dev_secrets.py  developer-only nvs_sec image builder (+ its test, M1.7)
 ├── HARDWARE_ACCEPTANCE.md      on-device acceptance checklist (M1.8; not run yet)
@@ -1988,6 +1989,40 @@ dosing/connectivity application service is a later milestone.
    stay untouched (no attempt counted, no freeze) for the next session. The budget does
    not guarantee that all 16 queued entries go in one session.
 6. **Wi-Fi is always shut down** before returning.
+
+### Wi-Fi time synchronization only (`CONFIG_DSP_APP_WIFI_TIME`, bench MVP)
+
+A second, mutually exclusive opt-in beside `CONFIG_DSP_APP_CONNECTIVITY` (fragment
+`sdkconfig.wifitime.defaults`, build-only): the application cycle synchronizes the clock over
+Wi-Fi/SNTP **without** HTTPS. `main.c` wires the Wi-Fi manager and the SNTP source only
+(`https = NULL`); no endpoint, API token or HTTP client is used, and the ESP-IDF HTTP client and
+TLS are not linked into the image. `dsp_connectivity_run()` with `https == NULL`:
+- runs only for a **due regular time sync** (M1.4 interval and backoff, unchanged); a pending
+  CRITICAL notification never starts a session, and nothing is delivered (the queue is untouched);
+- worst case without the HTTPS budget: 3 × 15 s Wi-Fi + 10 s SNTP = **55 s**, also used by the dose
+  guard;
+- trust, plausibility and persistence come from the unchanged timekeeper (`time` record saved in
+  SYNC); a failed Wi-Fi connect or SNTP request never produces trust; Wi-Fi is shut down before
+  returning, and SHUTDOWN verifies it is off before deep sleep.
+
+Order in a wake: LOAD → CLOCK → DOSE → **CONNECT (Wi-Fi + SNTP, Wi-Fi off)** → DOSE (re-evaluated
+with the new clock) → BLE service window (NimBLE starts only here) → SYNC (time metadata) → PLAN →
+SHUTDOWN → SLEEP. On a presence wake with a due sync and an unreachable network, the BLE window
+therefore opens up to ~55 s later. BLE `SET_TIME` stays available as a fallback. Log lines (no
+SSID, passphrase or token): `dsp_wifi: connected (IP) in N ms` / `connect failed after N ms (reason R)`
+/ `stopped (radio off)`, `dsp_sntp: time sample received in N ms`, `dsp_clock: clock stepped by N s`,
+`dsp_esp_ble: radio up`.
+
+```sh
+# BUILD-ONLY bench variant (BLE bring-up + Wi-Fi time sync)
+idf.py -B build-wifitime -D SDKCONFIG=build-wifitime/sdkconfig \
+       -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble.defaults;<bring-up fragment>;sdkconfig.wifitime.defaults" build
+```
+
+Limitation: `nvs` and `nvs_sec` are **not encrypted** (no flash encryption, no NVS encryption
+keys); the Wi-Fi passphrase, setup code and ownership state can be read from the flash by anyone
+with physical access. Acceptable only on the bench with synthetic credentials and a dedicated
+bench Wi-Fi network.
 
 ### Request and response handling (approved D8, R1)
 

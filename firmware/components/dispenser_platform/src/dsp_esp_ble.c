@@ -199,6 +199,7 @@ static bool r_init(void *ctx)
         r_deinit(NULL); /* never leave the controller enabled behind a failed start */
         return false;
     }
+    ESP_LOGI(TAG, "radio up (service window, advertising follows)");
     return true;
 }
 

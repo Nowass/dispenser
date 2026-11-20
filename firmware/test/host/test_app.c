@@ -545,6 +545,8 @@ static struct {
  * capacity_ul); every one gets the next request ID of owner slot 0, and its result is recorded
  * as a response of kind TEST_MANUAL (status mapped to the former queue response codes). */
 #define TEST_MANUAL 200
+/* CREATE_SCHEDULE through dsp_app_create_schedule with an issued authorization (time-only tests). */
+#define TEST_SCHED 201
 static const dsp_app_auth_t OWNER = {DSP_APP_ROLE_OWNER, 0, 0, 0};
 static uint64_t manual_seq;
 static void ble_respond(void *ctx, const tresp_t *r);
@@ -707,12 +709,32 @@ static void run_manual(const tcmd_t *c)
     ble_respond(NULL, &r);
 }
 
+static dsp_schedule_t sched(const char *id, int hour, int minute, uint32_t amount);
+static uint32_t sched_rejection; /* detail of the last refused TEST_SCHED (DSP_OP_R_*) */
+static void run_sched(const tcmd_t *c)
+{
+    char id[16];
+    snprintf(id, sizeof id, "w%u", (unsigned)c->id);
+    dsp_schedule_t s = sched(id, 9, 0, 1000);
+    uint32_t rev = 0;
+    dsp_app_op_result_t res = dsp_app_create_schedule(&app, issue_for(&OWNER), &s, &rev);
+    tresp_t r;
+    memset(&r, 0, sizeof r);
+    r.id = c->id;
+    r.kind = TEST_SCHED;
+    r.status = from_op(res.status);
+    sched_rejection = res.status == DSP_OP_REFUSED ? res.detail : 0;
+    ble_respond(NULL, &r);
+}
+
 static void ble_post_due(void)
 {
     while (ble.next < ble.len && ble.at[ble.next] <= g_true) {
         tcmd_t c = ble.cmd[ble.next++];
         if (c.kind == TEST_MANUAL) {
             run_manual(&c);
+        } else if (c.kind == TEST_SCHED) {
+            run_sched(&c);
         } else if (c.kind == T_STATUS || c.kind == T_REFILL || c.kind == T_READINESS) {
             run_op(&c);
         } else if (c.kind == T_END) {
@@ -2313,6 +2335,71 @@ static void test_long_run_chaotic(void)
     }
 }
 
+/* CONFIG_DSP_APP_WIFI_TIME (https == NULL): Wi-Fi/SNTP is the time source, no HTTP at all. Schedule
+ * creation stays refused until the clock is trusted and works after a valid sync; Wi-Fi is never on
+ * during BLE or sleep; a sync that is not due is skipped; the result survives the wake cycle. */
+static int schedules_stored(void)
+{
+    side_open();
+    dsp_schedule_repo_t repo;
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_schedule_repo_load(&repo, &side));
+    return (int)dsp_schedule_repo_set(&repo)->count;
+}
+
+static void test_wifi_time_only_cycle(void)
+{
+    world();
+    CFG.https = NULL;
+    /* 1. Wi-Fi unavailable on the first boot: bounded failure, untrusted, radio off */
+    wifi_result = DSP_NET_ERR_NO_AP;
+    DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
+    DSP_CHECK_EQ_INT(DSP_CONN_WIFI_FAILED, rep.conn[0]);
+    DSP_CHECK(wifi_connects >= 1 && wifi_connects <= (int)DSP_WIFI_ATTEMPTS_DEFAULT);
+    DSP_CHECK_EQ_INT(0, g_marker); /* never marked synced */
+    DSP_CHECK(!wifi_on && rep.slept);
+    claim_record();
+    configure(CAP, 60);
+    /* 2. schedule creation refused on the untrusted clock (BLE session on a button wake) */
+    ble.len = ble.next = 0;
+    ble_script(g_true + 5, cmd_of(TEST_SCHED, 0, 0));
+    ble_script(g_true + 10, cmd_of(T_END, 0, 0));
+    DSP_CHECK(wake(DSP_CAUSE_BUTTON));
+    const tresp_t *r = resp_of(TEST_SCHED);
+    DSP_CHECK(r != NULL && r->status == DSP_RESP_REFUSED);
+    DSP_CHECK_EQ_INT(DSP_OP_R_CLOCK, sched_rejection);
+    DSP_CHECK_EQ_INT(0, schedules_stored());
+    /* 3. Wi-Fi back: the next due sync (after the backoff) establishes trust */
+    wifi_result = DSP_NET_OK;
+    for (int i = 0; i < 20 && g_marker == 0; i++) {
+        DSP_CHECK(sleep_and_wake(0));
+    }
+    DSP_CHECK(g_marker != 0);
+    DSP_CHECK_EQ_INT(0, http_posts); /* time-only: nothing is ever posted */
+    /* 4. the same authorized creation now succeeds */
+    ble.len = ble.next = 0;
+    ble.nresp = 0;
+    ble_script(g_true + 5, cmd_of(TEST_SCHED, 0, 0));
+    ble_script(g_true + 10, cmd_of(T_END, 0, 0));
+    DSP_CHECK(wake(DSP_CAUSE_BUTTON));
+    r = resp_of(TEST_SCHED);
+    DSP_CHECK(r != NULL && r->status == DSP_RESP_OK);
+    DSP_CHECK_EQ_INT(1, schedules_stored());
+    /* 5. not due: the following wakes start no Wi-Fi session and no SNTP request */
+    int calls = ntp_calls, connects = wifi_connects;
+    DSP_CHECK(sleep_and_wake(0));
+    DSP_CHECK(rep.conn_runs == 0 || rep.conn[0] == DSP_CONN_SKIPPED_NOT_DUE ||
+              rep.conn[0] == DSP_CONN_SKIPPED_DOSE_SOON);
+    DSP_CHECK_EQ_INT(calls, ntp_calls);
+    DSP_CHECK_EQ_INT(connects, wifi_connects);
+    /* 6. a CPU reset keeps the trusted clock and the schedule (RTC block + storage) */
+    reboot_state(false);
+    DSP_CHECK(wake(DSP_CAUSE_WATCHDOG));
+    DSP_CHECK_EQ_INT(1, schedules_stored());
+    DSP_CHECK(!wifi_on && rep.slept);
+    DSP_CHECK_EQ_INT(0, http_posts);
+    common_invariants(); /* incl. Wi-Fi never together with BLE or the pump, nothing on in sleep */
+}
+
 int main(void)
 {
     DSP_RUN(test_retained_block);
@@ -2324,6 +2411,7 @@ int main(void)
     DSP_RUN(test_manual_dose_service_mode);
     DSP_RUN(test_refill_readiness_blocked);
     DSP_RUN(test_wifi_unavailable);
+    DSP_RUN(test_wifi_time_only_cycle);
     DSP_RUN(test_critical_notification_existing_wake);
     DSP_RUN(test_ble_interrupted_by_due_dose);
     DSP_RUN(test_ble_session_lifetime);

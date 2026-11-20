@@ -2,8 +2,10 @@
 
 #include <sys/time.h>
 
+#include "esp_log.h"
 #include "esp_netif_sntp.h"
 #include "esp_sntp.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "sdkconfig.h"
@@ -11,6 +13,9 @@
 #ifndef CONFIG_DSP_SNTP_SERVER
 #define CONFIG_DSP_SNTP_SERVER "pool.ntp.org"
 #endif
+
+/* Outcome and timing only (the domain decides whether the sample is accepted). */
+static const char *TAG = "dsp_sntp";
 
 /* One SNTP client per device: platform-level singleton. */
 static SemaphoreHandle_t s_sem;
@@ -60,11 +65,15 @@ static dsp_sync_status_t sntp_sync(void *ctx, uint32_t timeout_ms, dsp_time_samp
     if (esp_netif_sntp_init(&cfg) != ESP_OK) {
         return DSP_SYNC_ERR_SOURCE;
     }
+    int64_t t0 = esp_timer_get_time();
     bool got = xSemaphoreTake(s_sem, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
     esp_netif_sntp_deinit(); /* no further network activity */
+    unsigned ms = (unsigned)((esp_timer_get_time() - t0) / 1000);
     if (!got) {
+        ESP_LOGW(TAG, "no time sample within %u ms", ms);
         return DSP_SYNC_ERR_TIMEOUT;
     }
+    ESP_LOGI(TAG, "time sample received in %u ms", ms);
     portENTER_CRITICAL(&s_lock);
     bool have = s_have_sample;
     dsp_time_sample_t sample = s_sample;

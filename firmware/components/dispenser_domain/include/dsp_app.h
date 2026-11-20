@@ -199,7 +199,7 @@ typedef struct {
     dsp_wifi_manager_t *wifi;      /* initialized by the platform; NULL = no connectivity */
     const dsp_time_source_t *ntp;
     uint32_t sntp_timeout_ms;
-    dsp_https_transport_t *https;  /* initialized by the platform; NULL = no connectivity */
+    dsp_https_transport_t *https;  /* initialized by the platform; NULL = no notifications (time-only with wifi+ntp) */
     uint32_t https_budget_ms;
     const dsp_ble_port_t *ble;     /* NULL = no service mode */
     const dsp_monotonic_t *mono;   /* required with ble: session lifetime */

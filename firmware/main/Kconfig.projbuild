@@ -64,6 +64,19 @@ config DSP_APP_CONNECTIVITY
         credentials the radio is never started. Automated tests never run
         firmware. Off by default.
 
+config DSP_APP_WIFI_TIME
+    bool "Wi-Fi time synchronization only (no HTTPS, no notifications; bench)"
+    default n
+    depends on DSP_APP_RUNTIME && !DSP_APP_CONNECTIVITY
+    help
+        The application cycle synchronizes the clock over Wi-Fi/SNTP (bounded attempts,
+        bounded SNTP timeout, the M1.4 interval and backoff, Wi-Fi off before BLE and deep
+        sleep) using the developer-provisioned "nvs_sec" Wi-Fi credentials. No HTTP client,
+        no notification delivery, no endpoint and no API token use: the notification queue
+        is never delivered from. Mutually exclusive with DSP_APP_CONNECTIVITY (which adds
+        HTTPS notifications and needs DSP_APP_NOTIFY_URL). Without valid credentials the
+        radio is never started. Off by default.
+
 config DSP_APP_NOTIFY_URL
     string "Application runtime notification endpoint (required, https://)"
     default ""

@@ -5,6 +5,7 @@
 #include <sys/time.h>
 
 #include "esp_attr.h"
+#include "esp_log.h"
 #include "esp_rom_crc.h"
 #include "esp_system.h"
 
@@ -52,8 +53,13 @@ static dsp_utc_t clock_now(void *ctx)
 static bool clock_set(void *ctx, dsp_utc_t utc)
 {
     (void)ctx;
+    struct timeval before;
+    gettimeofday(&before, NULL);
     struct timeval tv = {.tv_sec = (time_t)utc, .tv_usec = 0};
-    return settimeofday(&tv, NULL) == 0; /* immediate step (no adjtime slewing) */
+    bool ok = settimeofday(&tv, NULL) == 0; /* immediate step (no adjtime slewing) */
+    ESP_LOGI("dsp_clock", "clock %s by %lld s (accepted by the timekeeper)", ok ? "stepped" : "step FAILED",
+             (long long)((int64_t)utc - (int64_t)before.tv_sec));
+    return ok;
 }
 
 static void clock_mark_synced(void *ctx, dsp_utc_t last_sync)

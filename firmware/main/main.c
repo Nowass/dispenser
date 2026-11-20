@@ -234,8 +234,10 @@ static dsp_clock_port_t s_clock;
 static dsp_time_port_t s_time;
 static dsp_monotonic_t s_mono;
 static dsp_app_sync_t s_sync;
-#if CONFIG_DSP_APP_CONNECTIVITY
+#if CONFIG_DSP_APP_CONNECTIVITY || CONFIG_DSP_APP_WIFI_TIME
 static dsp_wifi_manager_t s_wifi;
+#endif
+#if CONFIG_DSP_APP_CONNECTIVITY
 static dsp_https_transport_t s_https;
 #endif
 #if CONFIG_DSP_BLE_SECURITY
@@ -302,7 +304,7 @@ static void app_runtime(void)
     dsp_esp_time_port(&s_time);
     dsp_esp_monotonic(&s_mono);
     dsp_esp_app_sync(&s_sync);
-#if CONFIG_DSP_APP_CONNECTIVITY
+#if CONFIG_DSP_APP_CONNECTIVITY || CONFIG_DSP_APP_WIFI_TIME
     dsp_esp_power_port(&s_power, pump, dsp_esp_wifi_driver()); /* fail-safe also stops Wi-Fi */
 #else
     dsp_esp_power_port(&s_power, pump, NULL); /* no radio is ever started */
@@ -373,6 +375,23 @@ static void app_runtime(void)
         s_cfg.https = &s_https;
     } else {
         ESP_LOGW(TAG, "app: connectivity unavailable (credentials=%d)", (int)secrets);
+    }
+#endif
+#if CONFIG_DSP_APP_WIFI_TIME
+    /* Bench MVP: Wi-Fi/SNTP time synchronization only (no HTTP client, no notification delivery,
+     * no endpoint, no API token). dsp_connectivity runs time-only sessions when https is NULL. */
+    bool wifi_secrets = dsp_esp_secrets_init();
+    dsp_wifi_config_t wifi_cfg = {DSP_WIFI_TIMEOUT_DEFAULT_MS, DSP_WIFI_ATTEMPTS_DEFAULT};
+    const dsp_wifi_credentials_provider_t *wifi_creds =
+        wifi_secrets ? dsp_esp_wifi_credentials() : &DSP_WIFI_NO_CREDENTIALS;
+    if (dsp_wifi_init(&s_wifi, dsp_esp_wifi_driver(), wifi_creds, &wifi_cfg) == DSP_NET_OK) {
+        s_cfg.wifi = &s_wifi;
+        s_cfg.ntp = dsp_esp_sntp_source();
+        s_cfg.https = NULL;
+        ESP_LOGI(TAG, "app: Wi-Fi time sync only (credentials=%d, attempts %d x %u ms, no HTTPS)",
+                 (int)wifi_secrets, (int)wifi_cfg.max_attempts, (unsigned)wifi_cfg.connect_timeout_ms);
+    } else {
+        ESP_LOGW(TAG, "app: Wi-Fi time sync unavailable (credentials=%d)", (int)wifi_secrets);
     }
 #endif
 }

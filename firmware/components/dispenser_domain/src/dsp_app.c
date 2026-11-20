@@ -178,8 +178,8 @@ static void stage_dose(dsp_app_t *app)
 static void stage_connect(dsp_app_t *app)
 {
     trace(app, DSP_STAGE_CONNECT);
-    if (app->cfg->wifi == NULL || app->cfg->https == NULL || app->cfg->ntp == NULL ||
-        app->rep.conn_runs >= 2) {
+    /* https may be NULL: time-only sessions (CONFIG_DSP_APP_WIFI_TIME, dsp_connectivity.h) */
+    if (app->cfg->wifi == NULL || app->cfg->ntp == NULL || app->rep.conn_runs >= 2) {
         return;
     }
     dsp_connectivity_guard_t guard;
