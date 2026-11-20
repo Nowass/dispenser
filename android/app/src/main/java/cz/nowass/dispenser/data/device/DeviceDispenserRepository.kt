@@ -7,6 +7,7 @@ import cz.nowass.dispenser.device.ops.DeviceErrorCode
 import cz.nowass.dispenser.device.ops.DeviceOperations
 import cz.nowass.dispenser.device.ops.DeviceValidation
 import cz.nowass.dispenser.device.ops.DiagnosticsRecord
+import cz.nowass.dispenser.device.ops.HistoryPageRecord
 import cz.nowass.dispenser.device.ops.InviteRecord
 import cz.nowass.dispenser.device.ops.LiveSession
 import cz.nowass.dispenser.device.ops.LocalRefusal
@@ -183,6 +184,14 @@ class DeviceDispenserRepository(
     private suspend fun readConfig(s: LiveSession) = read(s, M.GET_CONFIG, decode = Records::config) { v, b, ss -> keep(configS, KEY_CONFIG, v, b, ss) }
 
     override suspend fun refreshPhones(): OpResult<List<PhoneRecord>> = live { readPhones(it) }
+
+    override suspend fun history(beforeSeq: Long, max: Int): OpResult<HistoryPageRecord> {
+        if (beforeSeq !in 0..0xFFFF_FFFFL || max !in 1..DeviceRepository.HISTORY_PAGE_MAX) {
+            return OpResult.Refused(LocalRefusal.Invalid(emptySet()))
+        }
+        // read-only: retried like the other reads; nothing is journaled or cached
+        return live { ops.call(it, M.GET_HISTORY, mapOf("before_seq" to beforeSeq, "max" to max.toLong()), decode = Records::historyPage) }
+    }
 
     private suspend fun readPhones(s: LiveSession) = read(s, M.PHONES_LIST, decode = Records::phones) { v, b, ss -> keep(phonesS, KEY_PHONES, v, b, ss) }
 

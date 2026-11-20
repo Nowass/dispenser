@@ -113,6 +113,11 @@ sealed interface ScheduleEditorUiState {
         val needsConnection: Boolean = false,
         /** DEVICE-mode outcome of the last write that kept the editor open (nothing changed). */
         val notice: ScheduleWriteNotice? = null,
+        /**
+         * DEVICE mode, existing schedule: the device doses a schedule at most once per local date
+         * (anti-replay), so a time changed on a day it already dosed takes effect from the next date.
+         */
+        val showOncePerDayRule: Boolean = false,
     ) : ScheduleEditorUiState
 }
 
@@ -321,6 +326,7 @@ class ScheduleEditorViewModel(
             deletedMeanwhile = m.deletedMeanwhile,
             needsConnection = needsConnection(device),
             notice = m.notice,
+            showOncePerDayRule = repository.writesRequireConnection && scheduleId != null,
         )
     }
 

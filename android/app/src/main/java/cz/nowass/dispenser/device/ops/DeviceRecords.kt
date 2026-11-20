@@ -142,6 +142,71 @@ enum class ManualResultState(val wire: Int) {
 
 data class ManualResultRecord(val state: ManualResultState, val detail: Long)
 
+/** GET_HISTORY event `type` (7.6, Phase C). */
+enum class HistoryEventKind(val wire: Int) {
+    DOSE_SCHEDULED(1), DOSE_MANUAL(2), RESERVOIR_INIT(3), RESERVOIR_REFILL(4), RESERVOIR_ADJUST(5);
+
+    val isDose: Boolean get() = this == DOSE_SCHEDULED || this == DOSE_MANUAL
+
+    companion object {
+        fun of(wire: Int): HistoryEventKind = entries.first { it.wire == wire }
+    }
+}
+
+/** GET_HISTORY event `result` (7.6). Reservoir events are always [OK]. */
+enum class HistoryResult(val wire: Int) {
+    /** Dose: the pump control ran the calculated time (no flow sensing; never a measured delivery). */
+    OK(0),
+    PUMP_FAILED(1),
+    START_FAILED(2),
+    /** Reset or power loss after the claim: the outcome is unknown. */
+    INTERRUPTED(3),
+    /** A storage failure after the claim: the pump never ran. */
+    ABORTED(4);
+
+    companion object {
+        fun of(wire: Int): HistoryResult = entries.first { it.wire == wire }
+    }
+}
+
+/**
+ * One device history event (7.6). [seq] orders events (strictly increasing, gaps possible). Volumes
+ * are nominal (requested) microlitres; reservoir values are the device's estimate, null when unknown.
+ */
+data class HistoryEventRecord(
+    val seq: Long,
+    val kind: HistoryEventKind,
+    val result: HistoryResult,
+    /** Epoch seconds; null = the device did not know the time. */
+    val atEpochS: Long?,
+    val clockTrusted: Boolean,
+    val volumeUl: Long,
+    val reservoirBeforeUl: Long?,
+    val reservoirAfterUl: Long?,
+    val capacityUl: Long,
+    val scheduleId: String?,
+    /** The device's pump was simulated: nothing was actuated. */
+    val pumpSimulated: Boolean,
+    /** Bench GPIO control signal only: no liquid delivery was verified. */
+    val pumpBenchGpio: Boolean,
+) {
+    companion object {
+        const val F_CLOCK_TRUSTED = 0x01
+        const val F_RESERVOIR_UNKNOWN = 0x02
+        const val F_PUMP_SIMULATED = 0x04
+        const val F_PUMP_BENCH_GPIO = 0x08
+    }
+}
+
+/** One GET_HISTORY page: newest first; [newestSeq]/[oldestSeq] = range held (0 = empty). */
+data class HistoryPageRecord(
+    val newestSeq: Long,
+    val oldestSeq: Long,
+    /** The device saw unreadable history slots or lost appends since its last boot. */
+    val faults: Boolean,
+    val events: List<HistoryEventRecord>,
+)
+
 /** SET_TIME `decision` (10.5). */
 data class TimeDecisionRecord(val decision: Int, val offsetS: Long) {
     val accepted: Boolean get() = decision == 0
@@ -246,6 +311,24 @@ object Records {
     fun manualResult(body: Map<String, Any>) = ManualResultRecord(checkNotNull(ManualResultState.of(body.int("state"))), body.long("detail"))
 
     fun timeDecision(body: Map<String, Any>) = TimeDecisionRecord(body.int("decision"), body.long("offset_s"))
+
+    @Suppress("UNCHECKED_CAST")
+    fun historyPage(body: Map<String, Any>) = HistoryPageRecord(
+        body.long("newest_seq"), body.long("oldest_seq"), body.int("flags") and 0x01 != 0,
+        (body["items"] as List<Map<String, Any>>).map { m ->
+            val flags = m.int("flags")
+            val known = flags and HistoryEventRecord.F_RESERVOIR_UNKNOWN == 0
+            HistoryEventRecord(
+                seq = m.long("seq"), kind = HistoryEventKind.of(m.int("type")), result = HistoryResult.of(m.int("result")),
+                atEpochS = m.long("at").takeIf { it != 0L }, clockTrusted = flags and HistoryEventRecord.F_CLOCK_TRUSTED != 0,
+                volumeUl = m.long("volume_ul"), reservoirBeforeUl = m.long("before_ul").takeIf { known },
+                reservoirAfterUl = m.long("after_ul").takeIf { known }, capacityUl = m.long("capacity_ul"),
+                scheduleId = m.str("schedule_id").takeIf { it.isNotEmpty() },
+                pumpSimulated = flags and HistoryEventRecord.F_PUMP_SIMULATED != 0,
+                pumpBenchGpio = flags and HistoryEventRecord.F_PUMP_BENCH_GPIO != 0,
+            )
+        },
+    )
 
     fun setRevision(body: Map<String, Any>): Long = body.long("set_revision")
     fun revision(body: Map<String, Any>): Long = body.long("revision")

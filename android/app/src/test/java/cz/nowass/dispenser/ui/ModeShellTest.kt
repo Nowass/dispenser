@@ -24,7 +24,7 @@ import cz.nowass.dispenser.domain.ScheduleDraft
 import cz.nowass.dispenser.domain.update.UpdateCheckResult
 import cz.nowass.dispenser.ui.components.CONNECTION_CHIP_TEST_TAG
 import cz.nowass.dispenser.ui.components.DEMO_BADGE_TEST_TAG
-import cz.nowass.dispenser.ui.history.HISTORY_UNAVAILABLE_TEST_TAG
+import cz.nowass.dispenser.ui.history.HISTORY_DEVICE_LIST_TEST_TAG
 import cz.nowass.dispenser.ui.theme.DispenserTheme
 import org.junit.Rule
 import org.junit.Test
@@ -92,7 +92,11 @@ class ModeShellTest {
         compose.onNodeWithText("Změny rozvrhů vyžadují připojené zařízení.").performScrollTo().assertIsDisplayed()
 
         compose.onNodeWithTag(TopLevelDestination.HISTORY.testTag).performClick()
-        compose.onNodeWithTag(HISTORY_UNAVAILABLE_TEST_TAG).assertIsDisplayed()
+        // Phase C: the device's own log; disconnected, nothing is read by itself or invented
+        compose.onNodeWithTag(HISTORY_DEVICE_LIST_TEST_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Zařízení není připojeno. Historii lze načíst jen ze zařízení.").assertIsDisplayed()
+        compose.onNodeWithText("Načíst ze zařízení").assertIsDisplayed()
+        compose.onNodeWithText("Simulované události – nejde o činnost skutečného čerpadla.").assertDoesNotExist()
 
         compose.onNodeWithTag(TopLevelDestination.SETTINGS.testTag).performClick()
         compose.onNodeWithText("SIMULACE").assertDoesNotExist()

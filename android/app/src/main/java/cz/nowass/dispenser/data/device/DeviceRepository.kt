@@ -2,6 +2,7 @@ package cz.nowass.dispenser.data.device
 
 import cz.nowass.dispenser.device.ops.ConfigRecord
 import cz.nowass.dispenser.device.ops.DiagnosticsRecord
+import cz.nowass.dispenser.device.ops.HistoryPageRecord
 import cz.nowass.dispenser.device.ops.InviteRecord
 import cz.nowass.dispenser.device.ops.ManualDoseRecord
 import cz.nowass.dispenser.device.ops.OpResult
@@ -138,4 +139,15 @@ interface DeviceRepository {
     suspend fun createInvite(nameHint: String): OpResult<InviteRecord>
     suspend fun cancelInvite(): OpResult<Unit>
     suspend fun cancelRecovery(): OpResult<Unit>
+
+    /**
+     * GET_HISTORY (7.6, Phase C): up to [max] (1..4) events with seq < [beforeSeq] (0 = from the
+     * newest), newest first. Read-only and not cached; firmware without the operation answers
+     * UNKNOWN_TYPE or UNAVAILABLE (Rejected).
+     */
+    suspend fun history(beforeSeq: Long, max: Int = HISTORY_PAGE_MAX): OpResult<HistoryPageRecord>
+
+    companion object {
+        const val HISTORY_PAGE_MAX = 4
+    }
 }

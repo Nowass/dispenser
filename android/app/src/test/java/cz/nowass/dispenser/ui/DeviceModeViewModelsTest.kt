@@ -106,8 +106,12 @@ class DeviceModeViewModelsTest {
     }
 
     @Test
-    fun history_is_unavailable_in_device_mode() = runTest {
-        assertEquals(HistoryUiState.Unavailable, HistoryViewModel(repo).uiState.value)
+    fun history_in_device_mode_reads_the_device_log_never_local_events() = runTest {
+        // Phase C: no local (simulated) events in DEVICE mode; the device's own log instead
+        val s = ready<HistoryUiState.Device>(HistoryViewModel(repo).uiState)
+        assertFalse(s.ui.loaded)
+        assertTrue(s.ui.days.isEmpty())
+        assertTrue(fake.calls.none { it.startsWith("history") }) // disconnected: nothing read by itself
     }
 
     @Test
@@ -164,6 +168,16 @@ class DeviceModeViewModelsTest {
         assertFalse(s.conflict)
         assertFalse(s.deletedMeanwhile)
         assertEquals(listOf("update id-1 3 enabled=true"), fake.calls.distinct())
+    }
+
+    @Test
+    fun editor_explains_the_once_per_day_rule_for_existing_device_schedules_only() = runTest {
+        connected()
+        val edit = ready<ScheduleEditorUiState.Editing>(
+            ScheduleEditorViewModel(repo, SavedStateHandle(mapOf(ScheduleEditorViewModel.ARG_SCHEDULE_ID to "id-1"))).uiState)
+        assertTrue(edit.showOncePerDayRule)
+        val create = ready<ScheduleEditorUiState.Editing>(ScheduleEditorViewModel(repo, SavedStateHandle()).uiState)
+        assertFalse(create.showOncePerDayRule)
     }
 
     @Test

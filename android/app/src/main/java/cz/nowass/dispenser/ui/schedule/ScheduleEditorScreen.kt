@@ -373,6 +373,14 @@ private fun EditorBody(
         verticalArrangement = Arrangement.spacedBy(Spacing.m),
     ) {
         StatusLine(state)
+        if (state.showOncePerDayRule) {
+            Text(
+                stringResource(R.string.editor_once_per_day_rule),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(EDITOR_ONCE_PER_DAY_TEST_TAG),
+            )
+        }
 
         if (state.conflict) {
             Banner(stringResource(R.string.editor_conflict), actionLabel = stringResource(R.string.editor_conflict_reload), onAction = actions.onReload)
@@ -563,6 +571,8 @@ private fun EditorBody(
         )
     }
 }
+
+const val EDITOR_ONCE_PER_DAY_TEST_TAG = "editor_once_per_day"
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable

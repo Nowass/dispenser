@@ -96,6 +96,19 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
     override suspend fun cancelInvite(): OpResult<Unit> { calls += "cancel"; return cancelOutcome }
     override suspend fun cancelRecovery(): OpResult<Unit> = no()
 
+    /** Phase C: the device's history; paged like the firmware (seq < before, newest first). */
+    var historyLog: List<cz.nowass.dispenser.device.ops.HistoryEventRecord> = emptyList()
+    var historyFaults = false
+    /** Non-null: returned instead of paging [historyLog] (refusals, lost answers …). */
+    var historyOutcome: OpResult<cz.nowass.dispenser.device.ops.HistoryPageRecord>? = null
+    override suspend fun history(beforeSeq: Long, max: Int): OpResult<cz.nowass.dispenser.device.ops.HistoryPageRecord> {
+        calls += "history $beforeSeq $max"
+        historyOutcome?.let { return it }
+        val all = historyLog.sortedByDescending { it.seq }
+        val page = all.filter { beforeSeq == 0L || it.seq < beforeSeq }.take(max)
+        return OpResult.Ok(cz.nowass.dispenser.device.ops.HistoryPageRecord(all.firstOrNull()?.seq ?: 0, all.lastOrNull()?.seq ?: 0, historyFaults, page))
+    }
+
     fun authenticated(generation: Long = 7) {
         connection.value = SessionState.Authenticated(deviceId, generation, slot = 0)
     }

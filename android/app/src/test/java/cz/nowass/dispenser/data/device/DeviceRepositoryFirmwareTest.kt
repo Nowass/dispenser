@@ -33,6 +33,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -322,6 +323,102 @@ class DeviceRepositoryFirmwareTest {
         val row = rows().single()
         assertEquals(Resolution.INTERRUPTED, row.resolution) // "the dose may be partial": never retried automatically
         assertEquals(PendingState.RESOLVED, row.state)
+    }
+
+    /** The whole device history, newest first, through GET_HISTORY paging. */
+    private suspend fun DeviceDispenserRepository.allHistory(): List<cz.nowass.dispenser.device.ops.HistoryEventRecord> {
+        val out = mutableListOf<cz.nowass.dispenser.device.ops.HistoryEventRecord>()
+        var before = 0L
+        while (true) {
+            val page = (history(before) as OpResult.Ok).value
+            if (page.events.isEmpty()) break
+            out += page.events
+            before = page.events.last().seq
+        }
+        return out
+    }
+
+    /** Phase C, firmware in the loop: dose -> history -> reconnect / reboot / new process -> same history. */
+    @Test
+    fun history_survives_reconnect_reboot_and_process_restart() = runBlocking {
+        val p = Phone()
+        wake()
+        p.claim()
+        p.connected()
+        p.repo.prepareForDosing()
+        assertTrue(p.repo.manualDose(1_000) is OpResult.Uncertain) // BLE suspended for the pump
+        p.idle()
+        p.connected()
+        val h = p.repo.allHistory()
+        val kinds = h.map { it.kind }
+        assertEquals(cz.nowass.dispenser.device.ops.HistoryEventKind.DOSE_MANUAL, kinds.first())
+        assertTrue("reservoir events: $kinds", cz.nowass.dispenser.device.ops.HistoryEventKind.RESERVOIR_REFILL in kinds)
+        val dose = h.first()
+        assertEquals(cz.nowass.dispenser.device.ops.HistoryResult.OK, dose.result)
+        assertEquals(1_000L, dose.volumeUl)
+        assertTrue("the GPIO bench build marks its doses", dose.pumpBenchGpio)
+        assertTrue(dose.clockTrusted)
+        assertEquals(dose.reservoirBeforeUl!! - 1_000, dose.reservoirAfterUl)
+        assertEquals(h.map { it.seq }.sortedDescending(), h.map { it.seq })
+        assertEquals(h.size, h.map { it.seq }.toSet().size)
+        // reconnect in the same wake
+        p.repo.disconnect(graceful = false)
+        p.idle()
+        p.connected()
+        assertEquals(h, p.repo.allHistory())
+        // a new wake (reboot of the firmware world) and a new phone process
+        p.repo.disconnect(graceful = true)
+        assertTrue(FirmwareSim.joinWake(20_000))
+        wake()
+        val p2 = Phone()
+        p2.connected()
+        assertEquals(h, p2.repo.allHistory())
+    }
+
+    @Test
+    fun power_cut_during_the_pump_is_logged_once_as_interrupted() = runBlocking {
+        val p = Phone()
+        wake()
+        p.claim()
+        p.connected()
+        p.repo.prepareForDosing()
+        p.repo.disconnect(graceful = true)
+        assertTrue(FirmwareSim.joinWake(20_000))
+        assertTrue(FirmwareSim.armPumpPowerCut())
+        wake()
+        p.connected()
+        assertTrue(p.repo.manualDose(1_000) is OpResult.Uncertain)
+        assertTrue(FirmwareSim.joinWake(20_000))
+        assertTrue(FirmwareSim.powerCutHappened())
+        wake()
+        p.connected()
+        val h1 = p.repo.allHistory()
+        assertEquals(cz.nowass.dispenser.device.ops.HistoryResult.INTERRUPTED, h1.first().result)
+        assertNull("reservoir change unknown after an interruption", h1.first().reservoirBeforeUl)
+        // another boot never logs it again
+        p.repo.disconnect(graceful = true)
+        assertTrue(FirmwareSim.joinWake(20_000))
+        wake()
+        p.connected()
+        val h2 = p.repo.allHistory()
+        assertEquals(h1, h2)
+        assertEquals(1, h2.count { it.result == cz.nowass.dispenser.device.ops.HistoryResult.INTERRUPTED })
+    }
+
+    @Test
+    fun history_needs_the_authenticated_session_and_validates_its_arguments() = runBlocking {
+        val p = Phone()
+        assertTrue(p.repo.history(0) is OpResult.NotSent) // no session: nothing sent
+        wake()
+        p.claim()
+        p.connected()
+        val sent = ports.sent(M.GET_HISTORY)
+        assertTrue(p.repo.history(0, max = 5) is OpResult.Refused)
+        assertTrue(p.repo.history(-1) is OpResult.Refused)
+        assertTrue(p.repo.history(0x1_0000_0000L) is OpResult.Refused)
+        assertEquals(sent, ports.sent(M.GET_HISTORY))
+        val page = (p.repo.history(0) as OpResult.Ok).value
+        assertTrue(page.events.isEmpty() || page.newestSeq >= page.events.first().seq)
     }
 
     @Test

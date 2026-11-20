@@ -75,8 +75,11 @@ interface DispenserRepository {
      */
     fun observeScheduleFreshness(): Flow<Freshness> = flowOf(Freshness.NotApplicable)
 
-    /** False when the source keeps no event history (DEVICE mode: not in protocol v1). */
+    /** False when the source keeps no local event history ([observeHistory]); DEVICE mode reads [deviceHistory]. */
     val historyAvailable: Boolean get() = true
+
+    /** DEVICE mode (Phase C): the device's own event log, paged over BLE; null for DEMO. */
+    val deviceHistory: cz.nowass.dispenser.data.device.DeviceHistorySource? get() = null
 
     /**
      * True when mutations need a live connection to the device (DEVICE mode: online-only, E12).

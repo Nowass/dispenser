@@ -131,6 +131,12 @@ object BleProtocol {
         f("name", Kind.Str(0, 32, StrKind.TEXT)),
     )
     val ERROR = listOf(f("code", range(1, 20)), f("detail", Kind.U32), f("aux", Kind.U32))
+    /** GET_HISTORY event (section 7.6, Phase C). */
+    val HISTORY_EVENT = listOf(
+        f("seq", Kind.U32), f("type", range(1, 5)), f("result", range(0, 4)), f("flags", Kind.Mask(1, 0x0F)),
+        f("at", Kind.I64), f("volume_ul", Kind.U32), f("before_ul", Kind.U32), f("after_ul", Kind.U32),
+        f("capacity_ul", Kind.U32), f("schedule_id", Kind.Str(0, 64, StrKind.ID)),
+    )
 
     data class TypeSpec(
         val type: Int,
@@ -200,6 +206,9 @@ object BleProtocol {
         TypeSpec(0x74, "RECOVERY_CANCEL", SecurityClass.ENCRYPTED, E, E, null),
         TypeSpec(0x7D, "FACTORY_RESET", SecurityClass.ENCRYPTED, listOf(f("confirm", Kind.Const32(FACTORY_RESET_CONFIRM))), E, null),
         TypeSpec(0x7E, "END_SESSION", SecurityClass.EITHER, E, E, null),
+        TypeSpec(0x90, "GET_HISTORY", SecurityClass.ENCRYPTED, listOf(f("before_seq", Kind.U32), f("max", range(1, 4))),
+            listOf(f("newest_seq", Kind.U32), f("oldest_seq", Kind.U32), f("flags", Kind.Mask(1, 0x01)),
+                f("items", Kind.ListOf(4, HISTORY_EVENT))), null),
         TypeSpec(0x80, "EV_SESSION_CLOSING", SecurityClass.ENCRYPTED, null, null,
             listOf(f("reason", range(1, 4)), f("seconds_left", Kind.U16))),
         TypeSpec(0x81, "EV_SUSPENDING_FOR_DOSE", SecurityClass.ENCRYPTED, null, null, listOf(f("seconds_until", Kind.U16))),

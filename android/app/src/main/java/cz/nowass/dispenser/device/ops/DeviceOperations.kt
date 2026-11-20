@@ -35,6 +35,7 @@ object MessageType {
     const val INVITE_CREATE = 0x72
     const val INVITE_CANCEL = 0x73
     const val RECOVERY_CANCEL = 0x74
+    const val GET_HISTORY = 0x90
 }
 
 /** One authenticated session as the operations see it (bound to one connection generation). */

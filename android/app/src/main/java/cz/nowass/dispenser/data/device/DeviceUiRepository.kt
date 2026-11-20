@@ -49,7 +49,8 @@ import kotlin.time.Duration.Companion.minutes
  * - DEVICE-only outcomes stay explicit: [ScheduleWriteResult.Uncertain] / [CommandResult.Uncertain]
  *   are never mapped to a failure, [ScheduleWriteResult.NotSent] / [CommandResult.NotSent] mean that
  *   provably nothing reached the device;
- * - there is no device history in protocol v1 ([historyAvailable] = false).
+ * - no local history ([historyAvailable] = false): the device's own log is paged by [deviceHistory]
+ *   (GET_HISTORY, Phase C).
  *
  * The device-only features (connection, manual dose, phones, configuration …) use [device] directly.
  */
@@ -66,6 +67,7 @@ class DeviceUiRepository(
 ) : DispenserRepository {
 
     override val historyAvailable: Boolean get() = false
+    override val deviceHistory: DeviceHistorySource = DeviceHistoryLoader(device)
     override val writesRequireConnection: Boolean get() = true
 
     private fun phoneNow(): Flow<Instant> = flow {
