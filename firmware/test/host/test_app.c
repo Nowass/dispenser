@@ -17,6 +17,7 @@
 #include "dsp_power.h"
 #include "dsp_reservoir.h"
 #include "dsp_storage.h"
+#include "dsp_pump_gpio.h"
 #include "dsp_test.h"
 #include "fake_kv.h"
 
@@ -427,6 +428,107 @@ static bool pump_is_off(void *ctx)
 }
 static const dsp_pump_port_t PUMP = {NULL, pump_run, pump_off, pump_is_off};
 
+/* ---- Bench GPIO pump control signal over the real scheduling path ----------------------------
+ * The real driver (dsp_pump_gpio) on a fake pad; its wait while the output is active is the pump
+ * oracle above (durable state, due window, duplicates, radio overlap, power cuts, time). */
+static struct {
+    bool on;            /* GPIO mode active in this test */
+    bool driven, held;
+    int level;
+    bool active;        /* electrically active (driven high; external pull-down otherwise) */
+    int activations;
+    uint32_t last_runtime_ms;
+    bool cut_next;      /* the power goes while the output is active */
+    int violations;     /* active outside a pump run, or not held/inactive at sleep */
+} gp;
+static dsp_pump_gpio_t gp_drv;
+static dsp_pump_port_t gp_drv_port;
+static void gp_track(void)
+{
+    gp.active = gp.driven && gp.level == 1;
+}
+static bool gp_configure(void *ctx, int level)
+{
+    (void)ctx;
+    if (!gp.held) {
+        gp.driven = true;
+        gp.level = level;
+    }
+    gp_track();
+    return true;
+}
+static bool gp_set(void *ctx, int level)
+{
+    (void)ctx;
+    if (!gp.held) {
+        gp.level = level;
+    }
+    gp_track();
+    return true;
+}
+static int gp_read(void *ctx)
+{
+    (void)ctx;
+    return gp.active ? 1 : 0;
+}
+static void gp_hold(void *ctx, bool on)
+{
+    (void)ctx;
+    gp.held = on;
+}
+static bool gp_arm(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    (void)ms;
+    return true;
+}
+static void gp_disarm(void *ctx)
+{
+    (void)ctx;
+}
+static bool gp_wait(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    if (!gp.active) {
+        gp.violations++;
+        fprintf(stderr, "GPIO wait without an active output\n");
+    }
+    gp.activations++;
+    gp.last_runtime_ms = ms;
+    if (gp.cut_next) {
+        gp.cut_next = false;
+        power_lost(); /* power lost while the output is active */
+    }
+    return pump_run(NULL, ms) == DSP_PUMP_OK;
+}
+static const dsp_pump_gpio_hw_t GP_HW = {NULL, gp_configure, gp_set, gp_read, gp_hold, gp_arm, gp_disarm, gp_wait};
+static dsp_pump_result_t gp_port_run(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    return gp_drv_port.run(gp_drv_port.ctx, ms);
+}
+static void gp_port_off(void *ctx)
+{
+    (void)ctx;
+    gp_drv_port.force_off(gp_drv_port.ctx);
+    pump_off(NULL); /* oracle bookkeeping (offs after the last run) */
+}
+static bool gp_port_is_off(void *ctx)
+{
+    (void)ctx;
+    return gp_drv_port.is_off(gp_drv_port.ctx) && pump_is_off(NULL);
+}
+static const dsp_pump_port_t GP_PUMP = {NULL, gp_port_run, gp_port_off, gp_port_is_off};
+/* A reset: the driver's RAM is gone and the pad is an undriven input again (pull-down). */
+static void gp_reset(void)
+{
+    gp.driven = false;
+    gp.held = false;
+    gp_track();
+    dsp_pump_gpio_init(&gp_drv, &GP_HW, true, HW_MAX_MS);
+    dsp_pump_gpio_port(&gp_drv, &gp_drv_port);
+}
+
 /* ---- Power port: wake cause, RTC memory, sleep, fail-safe -------------------------------- */
 
 static dsp_wake_cause_t g_cause;
@@ -465,6 +567,10 @@ static void pw_sleep(void *ctx, int64_t s)
     sleeps++;
     last_sleep_s = s;
     ev('Z');
+    if (gp.on && (gp.active || !gp.held)) {
+        gp.violations++;
+        fprintf(stderr, "sleep with the GPIO output active (%d) or not held (%d)\n", gp.active, !gp.held);
+    }
     if (pump_running || (pump.calls > 0 && pump.offs_after_last_run == 0) || wifi_on || ble_on ||
         http_in_session || s < 1) {
         sleep_violations++;
@@ -982,6 +1088,7 @@ static void world(void)
     mono_ms = 0;
     fail_notify_sets = false;
     memset(&pump, 0, sizeof pump);
+    memset(&gp, 0, sizeof gp);
     pump.off_confirmable = true;
     g_cause = DSP_CAUSE_POWER_ON;
     memset(rtc, 0xA5, sizeof rtc);
@@ -1029,8 +1136,12 @@ static void power_lost(void)
 }
 
 /* After an aborted wake: what survives. power_on: RTC memory and clock are lost. */
+static void gp_reset(void);
 static void reboot_state(bool power_on)
 {
+    if (gp.on) {
+        gp_reset();
+    }
     fake_kv_power_cycle(&kv);
     fake_kv_clear_faults(&kv);
     /* The Wi-Fi manager and HTTPS transport are platform RAM: re-initialized at boot. */
@@ -2400,6 +2511,88 @@ static void test_wifi_time_only_cycle(void)
     common_invariants(); /* incl. Wi-Fi never together with BLE or the pump, nothing on in sleep */
 }
 
+/* ---- Bench GPIO pump control signal through the real scheduling path ------------------------- */
+
+static void gpio_mode(void)
+{
+    gp.on = true;
+    gp_reset();
+    CFG.pump = &GP_PUMP;
+}
+
+static void test_gpio_scheduled_dose_drives_the_output(void)
+{
+    world();
+    gpio_mode();
+    boot_and_provision(CAP, 60, true);
+    add_schedule(sched("a", 8, 0, 5000));
+    replan();
+    run_until(T0 - 30 * 60);
+    DSP_CHECK_EQ_INT(0, gp.activations);
+    DSP_CHECK(gp.driven && gp.held && !gp.active); /* SAFE_OFF drove and held it inactive */
+    int guard = 0;
+    while (gp.activations == 0 && guard++ < 10) {
+        DSP_CHECK(sleep_and_wake(0));
+    }
+    DSP_CHECK_EQ_INT(1, gp.activations);
+    uint32_t rt = 0;
+    DSP_CHECK(dsp_dosing_runtime_ms(5000, 1200, &rt));
+    DSP_CHECK_EQ_INT((int)rt, (int)gp.last_runtime_ms); /* the calculated runtime, at the due time */
+    DSP_CHECK_EQ_INT(T0, pump.at[0]);
+    DSP_CHECK_EQ_INT(DSP_HISTORY_COMPLETED, history_state("a", date_of(T0)));
+    DSP_CHECK_EQ_INT(CAP - 5000, load_cfg().reservoir_remaining_ul); /* commanded volume (estimate) */
+    DSP_CHECK(!gp.active && gp.held);
+    run_until(T0 + DAY + HOUR);
+    DSP_CHECK_EQ_INT(2, gp.activations);
+    DSP_CHECK_EQ_INT(2, (int)gp_drv.st.runs);
+    DSP_CHECK_EQ_INT(0, (int)gp_drv.st.failures);
+    DSP_CHECK_EQ_INT(0, gp.violations); /* never active outside a run, inactive and held at every sleep */
+    common_invariants();
+}
+
+static void test_gpio_never_active_while_a_gate_is_closed(void)
+{
+    world();
+    gpio_mode();
+    boot_and_provision(CAP, 60, false); /* SERVICE_REQUIRED: readiness gate closed */
+    add_schedule(sched("a", 8, 0, 5000));
+    replan();
+    run_until(T0 + 2 * DAY);
+    DSP_CHECK_EQ_INT(0, gp.activations);
+    DSP_CHECK_EQ_INT(0, (int)gp_drv.st.runs);
+    DSP_CHECK(!gp.active && gp.held);
+    DSP_CHECK_EQ_INT(0, gp.violations);
+    common_invariants();
+}
+
+static void test_gpio_power_cut_while_active(void)
+{
+    world();
+    gpio_mode();
+    boot_and_provision(CAP, 60, true);
+    add_schedule(sched("a", 8, 0, 5000));
+    replan();
+    run_until(T0 - 30 * 60);
+    gp.cut_next = true;
+    bool cut = false;
+    for (int i = 0; i < 10 && !cut; i++) {
+        g_true += rep.plan.sleep_s;
+        cut = !wake(DSP_CAUSE_TIMER);
+    }
+    DSP_CHECK(cut && cut_happened);
+    DSP_CHECK(gp.active); /* the power went while the output was active */
+    reboot_state(true);
+    DSP_CHECK(!gp.active); /* after the reset only the external pull-down holds it */
+    DSP_CHECK(wake(g_cause)); /* SAFE_OFF first, then recovery */
+    DSP_CHECK(gp.driven && gp.held && !gp.active);
+    DSP_CHECK(history_state("a", date_of(T0)) != DSP_HISTORY_COMPLETED); /* never reported delivered */
+    DSP_CHECK(history_state("a", date_of(T0)) != DSP_HISTORY_STARTED);
+    run_until(T0 + DAY + HOUR);
+    DSP_CHECK_EQ_INT(2, gp.activations); /* the interrupted occurrence never re-runs; tomorrow runs */
+    DSP_CHECK_EQ_INT(0, gp.violations);
+    common_invariants(); /* incl. the duplicate oracle */
+}
+
 int main(void)
 {
     DSP_RUN(test_retained_block);
@@ -2412,6 +2605,9 @@ int main(void)
     DSP_RUN(test_refill_readiness_blocked);
     DSP_RUN(test_wifi_unavailable);
     DSP_RUN(test_wifi_time_only_cycle);
+    DSP_RUN(test_gpio_scheduled_dose_drives_the_output);
+    DSP_RUN(test_gpio_never_active_while_a_gate_is_closed);
+    DSP_RUN(test_gpio_power_cut_while_active);
     DSP_RUN(test_critical_notification_existing_wake);
     DSP_RUN(test_ble_interrupted_by_due_dose);
     DSP_RUN(test_ble_session_lifetime);

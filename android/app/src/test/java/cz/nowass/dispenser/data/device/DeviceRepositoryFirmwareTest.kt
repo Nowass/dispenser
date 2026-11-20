@@ -84,6 +84,8 @@ class DeviceRepositoryFirmwareTest {
         assertEquals("DSP_CHECK failures inside the firmware world", 0, d[0])
         assertEquals("security layer idle and wiped after the wake", 1, d[2])
         assertEquals("pump oracle: run without a durable decision, or a duplicate manual run", 0, d[5])
+        assertEquals("GPIO pump signal active outside a run, or not off/held at the end of a wake", 0, d[7])
+        assertEquals("every pump run went through the GPIO driver", d[4], d[8])
         scope.cancel()
     }
 

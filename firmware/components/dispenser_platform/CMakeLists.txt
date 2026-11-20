@@ -7,6 +7,8 @@
 #   M1.9c: power port (wake cause, RTC-retained block, deep sleep, fail-safe), queue lock,
 #          simulated pump (no GPIO), time-continuity port; pure logic in dsp_platform_logic.c
 #          (also compiled by the host tests).
+#   Bench: GPIO pump control signal (dsp_pump_gpio pure, host-tested; dsp_esp_pump_gpio compiles
+#          to nothing unless CONFIG_DSP_PUMP_GPIO).
 #   M1.10d.1: BLE byte transport (pure, host-tested) and the NimBLE adapter, only with
 #             CONFIG_DSP_BLE_TRANSPORT (build-only until M1.10c.2b and M1.10d.2).
 set(dsp_ble_srcs "")
@@ -19,6 +21,8 @@ idf_component_register(SRCS ${dsp_ble_srcs}
                             "src/dsp_esp_power.c"
                             "src/dsp_esp_sync.c"
                             "src/dsp_esp_pump_sim.c"
+                            "src/dsp_pump_gpio.c"
+                            "src/dsp_esp_pump_gpio.c"
                             "src/dsp_esp_clock.c"
                             "src/dsp_esp_wifi.c"
                             "src/dsp_esp_sntp.c"
@@ -29,7 +33,7 @@ idf_component_register(SRCS ${dsp_ble_srcs}
                        REQUIRES dispenser_domain
                        PRIV_REQUIRES nvs_flash esp_wifi esp_netif esp_event lwip esp_rom
                                      esp_http_client esp-tls mbedtls esp_timer esp_hw_support
-                                     esp_system freertos log esphome__libsodium bt)
+                                     esp_system freertos log esphome__libsodium bt esp_driver_gpio)
 # M1.10c.2a: the RNG adapter asks the Bluetooth controller whether the RF entropy source runs.
 if(CONFIG_BT_ENABLED)
     idf_component_get_property(_dsp_bt_lib bt COMPONENT_LIB)

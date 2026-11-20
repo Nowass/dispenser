@@ -127,6 +127,11 @@ static void pw_sleep(void *ctx, int64_t sleep_s)
                  CONFIG_DSP_BUTTON_WAKE_GPIO);
     }
 #endif
+    /* Last action before sleep: the pump output inactive (the GPIO driver also enables the
+     * deep-sleep pad hold of the inactive level; idempotent). */
+    if (s_pump != NULL && s_pump->force_off != NULL) {
+        s_pump->force_off(s_pump->ctx);
+    }
     /* Stack high-water mark of the application task (hardware acceptance 7.6). */
     ESP_LOGI(TAG, "deep sleep for %lld s (stack free min %u B)", (long long)sleep_s,
              (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));

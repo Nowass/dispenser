@@ -54,6 +54,9 @@ typedef struct {
 const dsp_pump_port_t *dsp_esp_pump_sim(void);
 dsp_esp_pump_sim_stats_t dsp_esp_pump_sim_stats(void);
 
+/* BENCH GPIO pump control signal (only with CONFIG_DSP_PUMP_GPIO; see dsp_pump_gpio.h). */
+const dsp_pump_port_t *dsp_esp_pump_gpio(void);
+
 #ifdef __cplusplus
 }
 #endif

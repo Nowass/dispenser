@@ -1,0 +1,9 @@
+# BENCH fragment (BUILD-ONLY): the Dosing Service drives a GPIO as the pump control signal instead of
+# the simulated pump (CONFIG_DSP_PUMP_GPIO). No pump, MOSFET or other load is connected at this stage.
+# XIAO ESP32-C3 D10 = GPIO10, active high (low-side N-MOSFET with an external gate pull-down), at most
+# 10 s per run (independent cutoff at runtime + 100 ms). Refused together with the production endpoint.
+# Use after sdkconfig.defaults, sdkconfig.ble.defaults (and optionally sdkconfig.wifitime.defaults).
+CONFIG_DSP_PUMP_GPIO=y
+CONFIG_DSP_PUMP_GPIO_NUM=10
+CONFIG_DSP_PUMP_GPIO_ACTIVE_HIGH=y
+CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS=10000

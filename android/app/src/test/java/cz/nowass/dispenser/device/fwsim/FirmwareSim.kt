@@ -73,6 +73,12 @@ object FirmwareSim {
     /** Pump-oracle violations: a run without a durable decision, or a duplicate run of one manual request. */
     fun pumpViolations(): Int = diagnostics()[5]
 
+    /** Bench GPIO pump driver (the real dsp_pump_gpio on a fake pad): output active outside a run, or not off/held when a wake ended. */
+    fun gpioViolations(): Int = diagnostics()[7]
+
+    /** Activations of the GPIO pump control signal (each one is a pump run of the oracle). */
+    fun gpioActivations(): Int = diagnostics()[8]
+
     /** Durable ownership state between wakes. */
     data class Ownership(val claimState: Int, val identity: ByteArray, val slots: List<ByteArray?>)
 

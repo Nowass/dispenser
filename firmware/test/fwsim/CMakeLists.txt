@@ -34,7 +34,8 @@ add_library(dsp_fwsim SHARED
     fwsim.c
     "${FW_ROOT}/test/host/support/fake_kv.c"
     "${FW_ROOT}/test/host/support/test_rng.c"
-    "${PLATFORM}/src/dsp_ble_transport.c")
+    "${PLATFORM}/src/dsp_ble_transport.c"
+    "${PLATFORM}/src/dsp_pump_gpio.c")
 target_include_directories(dsp_fwsim PRIVATE "${FW_ROOT}/test/host" "${FW_ROOT}/test/host/support"
                            "${PLATFORM}/include" ${JNI_INCLUDE_DIRS})
 target_compile_definitions(dsp_fwsim PRIVATE DSP_VIA_TRANSPORT=1 DSP_FW_VERSION="${DSP_FW_VERSION}")

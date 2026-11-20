@@ -8,7 +8,9 @@
  * HTTPS transport (M1.7; never posts an event).
  *
  * Optional application runtime (M1.9c, CONFIG_DSP_APP_RUNTIME, default off): the M1.9b
- * application cycle with a SIMULATED pump (no GPIO) and deep sleep; see app_runtime().
+ * application cycle with a SIMULATED pump (no GPIO) and deep sleep; see app_runtime(). The bench
+ * opt-in CONFIG_DSP_PUMP_GPIO (default off) replaces the simulation with a GPIO control signal
+ * (dsp_esp_pump_gpio; no load connected at this stage).
  *
  * Optional RNG-gate diagnostic image (M1.10c.2b evidence, CONFIG_DSP_RNG_GATE_DIAGNOSTIC, default
  * off, sdkconfig.rnggate.defaults): BT controller only, no host stack; see rng_gate_task().
@@ -287,7 +289,11 @@ static void app_task(void *arg)
 static void app_runtime(void)
 {
     /* SAFE_OFF before anything else (the application repeats it as its first stage). */
+#if CONFIG_DSP_PUMP_GPIO
+    const dsp_pump_port_t *pump = dsp_esp_pump_gpio(); /* BENCH: GPIO control signal, no load */
+#else
     const dsp_pump_port_t *pump = dsp_esp_pump_sim();
+#endif
     (void)dsp_dosing_port_safe_off(pump);
 
     memset(&s_cfg, 0, sizeof s_cfg);
@@ -312,7 +318,11 @@ static void app_runtime(void)
     s_cfg.kv = &s_kv;
     s_cfg.tz = &DSP_TZ_EUROPE_PRAGUE;
     s_cfg.pump = pump;
+#if CONFIG_DSP_PUMP_GPIO
+    s_cfg.hw_max_runtime_ms = (uint32_t)CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS;
+#else
     s_cfg.hw_max_runtime_ms = (uint32_t)CONFIG_DSP_APP_SIM_HW_MAX_RUNTIME_MS;
+#endif
     s_cfg.power = &s_power;
     s_cfg.clock = &s_clock;
     s_cfg.time = &s_time;
@@ -685,7 +695,12 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "project=%s build=%s %s", app->project_name, app->date, app->time);
 #if CONFIG_DSP_APP_RUNTIME
+#if CONFIG_DSP_PUMP_GPIO
+    ESP_LOGW(TAG, "application runtime: BENCH GPIO%d pump control signal (no load), deep sleep",
+             CONFIG_DSP_PUMP_GPIO_NUM);
+#else
     ESP_LOGI(TAG, "M1.9c application runtime: SIMULATED pump (no GPIO), deep sleep");
+#endif
 #elif CONFIG_DSP_RNG_GATE_DIAGNOSTIC
     ESP_LOGI(TAG, "RNG-gate diagnostic: BT controller only, no GPIO, NVS, sleep or dosing activity");
 #else

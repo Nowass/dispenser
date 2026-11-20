@@ -131,11 +131,51 @@ config DSP_BLE_BRINGUP_POWER_ON_WINDOW
         unchanged; deterministic randomness is never used. Refused together with
         the production endpoint.
 
+config DSP_PUMP_GPIO
+    bool "BENCH: drive a GPIO as the pump control signal (no load connected)"
+    default n
+    depends on DSP_APP_RUNTIME
+    help
+        Replaces the simulated pump with a GPIO control signal driven by the Dosing Service:
+        active for the calculated runtime of a dose that passed every gate and limit, then
+        inactive (pad readback, independent esp_timer cutoff at runtime + 100 ms, deep-sleep hold
+        of the inactive level). Bench stage: no pump, MOSFET or other load is connected; nothing
+        measures liquid. The driver circuit must keep the gate inactive by itself whenever the
+        pad is not driven (reset, boot, after a wake): see firmware/README.md. Refused together
+        with the production endpoint. Off by default.
+
+config DSP_PUMP_GPIO_NUM
+    int "Pump control GPIO (XIAO ESP32-C3 D10 = GPIO10)"
+    range 0 21
+    default 10
+    depends on DSP_PUMP_GPIO
+    help
+        Allowed: 0, 1, 3-7, 10. Never a strapping pin (2, 8, 9), the SPI flash pins (11-17),
+        USB (18, 19) or UART0 (20, 21); checked at build time.
+
+config DSP_PUMP_GPIO_ACTIVE_HIGH
+    bool "Pump control signal is active high"
+    default y
+    depends on DSP_PUMP_GPIO
+    help
+        Active high fits a low-side N-channel MOSFET with a gate pull-down: an undriven pad (reset,
+        boot, deep sleep without hold) then reads inactive.
+
+config DSP_PUMP_GPIO_MAX_RUNTIME_MS
+    int "Pump control signal: maximum active time per run (ms)"
+    range 1 60000
+    default 10000
+    depends on DSP_PUMP_GPIO
+    help
+        The hardware runtime maximum of this build: pump configuration with a larger
+        max_runtime_ms is refused (PUMP_CONFIG gate) and the driver refuses longer runs. The
+        independent cutoff fires at runtime + 100 ms.
+
 config DSP_APP_SIM_HW_MAX_RUNTIME_MS
     int "Simulated pump hardware runtime maximum (ms, 0 = never actuate)"
     range 0 60000
     default 0
-    depends on DSP_APP_RUNTIME
+    depends on DSP_APP_RUNTIME && !DSP_PUMP_GPIO
     help
         Stands in for the hardware cutoff of the future pump driver. 0 (the
         default) closes every dose in the Dosing Service. Even a non-zero

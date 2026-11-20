@@ -35,6 +35,13 @@ if((CONFIG_DSP_BLE_TRANSPORT OR CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW) AND CONF
             "CONFIG_DSP_APP_ALLOW_PRODUCTION")
 endif()
 
+# Bench GPIO pump control signal: never together with the production endpoint (no reviewed
+# driver circuit, CPU-independent hardware cutoff or watchdog acceptance yet).
+if(CONFIG_DSP_PUMP_GPIO AND CONFIG_DSP_APP_ALLOW_PRODUCTION)
+    message(FATAL_ERROR "CONFIG_DSP_PUMP_GPIO is a bench-only control signal; it cannot be combined "
+            "with CONFIG_DSP_APP_ALLOW_PRODUCTION")
+endif()
+
 # RNG-gate diagnostic (M1.10c.2b evidence; docs/ANDROID_BLE_DESIGN.md Appendix B): a separate,
 # build-only image, never a production image. Kconfig dependencies already exclude the runtime
 # (and with it the production endpoint); this is the second, independent check. The fragment

@@ -89,7 +89,9 @@ dsp_add_host_test(test_notify test_notify.c support/fake_kv.c)
 dsp_add_host_test(test_proto test_proto.c)
 dsp_add_host_test(test_https test_https.c support/fake_kv.c)
 dsp_add_host_test(test_dosing test_dosing.c support/fake_kv.c)
-dsp_add_host_test(test_app test_app.c support/fake_kv.c)
+dsp_add_host_test(test_app test_app.c support/fake_kv.c
+                  "${CMAKE_CURRENT_LIST_DIR}/../../components/dispenser_platform/src/dsp_pump_gpio.c")
+target_include_directories(test_app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../components/dispenser_platform/include")
 # M1.10b.1: configuration, schedules and phone time through the Application Service.
 dsp_add_host_test(test_app_ops test_app_ops.c support/fake_kv.c)
 # M1.10b.2: manual dose with durable anti-replay (reuses the test_app_ops harness).
@@ -119,6 +121,9 @@ set(DSP_PLATFORM_DIR "${CMAKE_CURRENT_LIST_DIR}/../../components/dispenser_platf
 dsp_add_host_test(test_platform test_platform.c support/fake_kv.c
                   "${DSP_PLATFORM_DIR}/src/dsp_platform_logic.c")
 target_include_directories(test_platform PRIVATE "${DSP_PLATFORM_DIR}/include")
+# Bench GPIO pump control signal (pure driver logic, compiled unchanged into the firmware).
+dsp_add_host_test(test_pump_gpio test_pump_gpio.c "${DSP_PLATFORM_DIR}/src/dsp_pump_gpio.c")
+target_include_directories(test_pump_gpio PRIVATE "${DSP_PLATFORM_DIR}/include")
 find_package(Threads REQUIRED)
 # M1.9c: build-time endpoint guard of the application runtime (pure CMake script).
 add_test(NAME test_sec_header_guard

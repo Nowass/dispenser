@@ -22,6 +22,7 @@
  */
 #define _POSIX_C_SOURCE 200809L /* clock_gettime, pthread_cond_timedwait */
 #define DSP_BLESEC_NO_MAIN
+#include "dsp_pump_gpio.h"
 #include "test_blesec.c"
 
 #include <jni.h>
@@ -256,9 +257,102 @@ static const dsp_app_sync_t FS_SYNC = {NULL, fq_lock, fq_unlock};
 static void fs_transport_init(void);
 static bool fs_cut_armed, fs_cut_done;
 
+/* ---- Bench GPIO pump control signal: the real driver (dsp_pump_gpio) on a fake pad -------------
+ * Every wake is a boot (the pad is an undriven input, the driver's RAM is fresh); while the output is
+ * active the wait is the harness pump oracle (durable decision, duplicates, power cut). Checked: the
+ * output is never active outside a run and is inactive and held when a wake ends. */
+static struct {
+    bool driven, held, active;
+    int level;
+    int activations, violations;
+} fs_gp;
+static dsp_pump_gpio_t fs_gp_drv;
+static dsp_pump_port_t fs_gp_drv_port;
+static void fs_gp_track(void)
+{
+    fs_gp.active = fs_gp.driven && fs_gp.level == 1;
+}
+static bool fs_gp_configure(void *ctx, int level)
+{
+    (void)ctx;
+    if (!fs_gp.held) {
+        fs_gp.driven = true;
+        fs_gp.level = level;
+    }
+    fs_gp_track();
+    return true;
+}
+static bool fs_gp_set(void *ctx, int level)
+{
+    (void)ctx;
+    if (!fs_gp.held) {
+        fs_gp.level = level;
+    }
+    fs_gp_track();
+    return true;
+}
+static int fs_gp_read(void *ctx)
+{
+    (void)ctx;
+    return fs_gp.active ? 1 : 0;
+}
+static void fs_gp_hold(void *ctx, bool on)
+{
+    (void)ctx;
+    fs_gp.held = on;
+}
+static bool fs_gp_arm(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    (void)ms;
+    return true;
+}
+static void fs_gp_disarm(void *ctx)
+{
+    (void)ctx;
+}
+static bool fs_gp_wait(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    if (!fs_gp.active) {
+        fs_gp.violations++;
+    }
+    fs_gp.activations++;
+    return pump_run(NULL, ms) == DSP_PUMP_OK; /* may power_lost() (longjmp) like the pump */
+}
+static const dsp_pump_gpio_hw_t FS_GP_HW = {NULL, fs_gp_configure, fs_gp_set, fs_gp_read, fs_gp_hold,
+                                            fs_gp_arm, fs_gp_disarm, fs_gp_wait};
+static dsp_pump_result_t fs_gp_run(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    return fs_gp_drv_port.run(fs_gp_drv_port.ctx, ms);
+}
+static void fs_gp_off(void *ctx)
+{
+    (void)ctx;
+    fs_gp_drv_port.force_off(fs_gp_drv_port.ctx);
+    pump_off(NULL);
+}
+static bool fs_gp_is_off(void *ctx)
+{
+    (void)ctx;
+    return fs_gp_drv_port.is_off(fs_gp_drv_port.ctx) && pump_is_off(NULL);
+}
+static const dsp_pump_port_t FS_GP_PUMP = {NULL, fs_gp_run, fs_gp_off, fs_gp_is_off};
+static void fs_gp_boot(void)
+{
+    fs_gp.driven = false; /* reset: undriven input, the external pull-down holds it inactive */
+    fs_gp.held = false;
+    fs_gp_track();
+    dsp_pump_gpio_init(&fs_gp_drv, &FS_GP_HW, true, 60000u);
+    dsp_pump_gpio_port(&fs_gp_drv, &fs_gp_drv_port);
+    CFG.pump = &FS_GP_PUMP;
+}
+
 static void *fs_app_task(void *arg)
 {
     (void)arg;
+    fs_gp_boot();
     CFG.recovery_hold_ms = fs_hold ? DSP_OWNER_ARM_HOLD_MS : 0;
     clear_script();
     if (fs_cut_armed) {
@@ -267,7 +361,11 @@ static void *fs_app_task(void *arg)
         cut_at = 0;
     }
     /* returns when the service window ends (idle, maximum, owner's END), or false on a power cut */
-    if (!wake(DSP_CAUSE_BUTTON)) {
+    bool completed = wake(DSP_CAUSE_BUTTON);
+    if (completed && (fs_gp.active || !fs_gp.held)) {
+        fs_gp.violations++; /* the wake ended with the output active or not held */
+    }
+    if (!completed) {
         /* power lost (longjmp out of the wake): the radio is gone, then the power comes back */
         pthread_mutex_lock(&fs_m);
         if (fs_conn) {
@@ -324,6 +422,7 @@ JNIEXPORT jboolean JNICALL FS(reset)(JNIEnv *env, jclass cls, jbyteArray device_
     }
     memcpy(DEV_ID, id, 6);
     fresh_unclaimed(); /* world, provisioning wake, blesec init, transport (re-initialized below) */
+    memset(&fs_gp, 0, sizeof fs_gp);
     memcpy(g_dev_setup, code, 16);
     fs_transport_init();
     manual_via_ble = true;
@@ -680,7 +779,7 @@ JNIEXPORT jbyteArray JNICALL FS(inspect)(JNIEnv *env, jclass cls)
 JNIEXPORT jintArray JNICALL FS(diagnostics)(JNIEnv *env, jclass cls)
 {
     (void)cls;
-    jint d[7];
+    jint d[9];
     d[0] = dsp_test_failures;
     pthread_mutex_lock(&fs_m);
     d[1] = fs_qdropped;
@@ -690,9 +789,11 @@ JNIEXPORT jintArray JNICALL FS(diagnostics)(JNIEnv *env, jclass cls)
     d[3] = (jint)app.rep.ble_end;
     d[4] = pump.calls;      /* read while the application task is between pump runs */
     d[5] = pump.violations;
-    jintArray r = (*env)->NewIntArray(env, 7);
+    d[7] = fs_gp.violations; /* bench GPIO driver: active outside a run, or not off/held at the end */
+    d[8] = fs_gp.activations;
+    jintArray r = (*env)->NewIntArray(env, 9);
     if (r != NULL) {
-        (*env)->SetIntArrayRegion(env, r, 0, 7, d);
+        (*env)->SetIntArrayRegion(env, r, 0, 9, d);
     }
     return r;
 }

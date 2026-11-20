@@ -151,7 +151,7 @@ hardware-validated.**
 | SoC / IDF target | ESP32-C3 (RISC-V) / `esp32c3` |
 | Flash size in build | **4 MB** (M1.7). Confirmed on the first board 2026-11-19 (`esptool flash-id`: ESP32-C3 rev v0.4, 4 MB XMC; [`HARDWARE_ACCEPTANCE.md`](HARDWARE_ACCEPTANCE.md) 1.1). |
 | Partition table | custom [`partitions.csv`](partitions.csv): two 1.75 MiB OTA slots, `nvs` 80 KiB, `nvs_sec` 24 KiB, reserved `nvs_keys`, `coredump`, 256 KiB reserve (see [Partition table](#partition-table-4-mb-m17)) |
-| GPIO assignments | **None defined.** Pump, button and indicator pins come from the hardware review. |
+| GPIO assignments | **None in default builds.** Bench opt-in only: pump control signal on XIAO D10 = GPIO10, active high (`CONFIG_DSP_PUMP_GPIO`, see "GPIO pump control signal"). Button and indicator pins come from the hardware review. |
 
 ## Versioning
 
@@ -221,6 +221,7 @@ firmware/
 ├── sdkconfig.defaults          committed Kconfig defaults (target, flash size, partition table, TLS bundle)
 ├── sdkconfig.ble.defaults      BUILD-ONLY fragment: runtime + security + NimBLE transport (M1.10d.1)
 ├── sdkconfig.wifitime.defaults BUILD-ONLY fragment: Wi-Fi/SNTP time sync without HTTPS (bench MVP)
+├── sdkconfig.pumpgpio.defaults BUILD-ONLY fragment: GPIO10 pump control signal instead of the simulation (bench)
 ├── partitions.csv              4 MB partition table (M1.7)
 ├── tools/provision_dev_secrets.py  developer-only nvs_sec image builder (+ its test, M1.7)
 ├── HARDWARE_ACCEPTANCE.md      on-device acceptance checklist (M1.8; not run yet)
@@ -1989,6 +1990,50 @@ dosing/connectivity application service is a later milestone.
    stay untouched (no attempt counted, no freeze) for the next session. The budget does
    not guarantee that all 16 queued entries go in one session.
 6. **Wi-Fi is always shut down** before returning.
+
+### GPIO pump control signal (`CONFIG_DSP_PUMP_GPIO`, bench stage)
+
+Bench opt-in (fragment `sdkconfig.pumpgpio.defaults`, default off; refused together with
+`CONFIG_DSP_APP_ALLOW_PRODUCTION`): the Dosing Service drives a GPIO as the pump control signal
+instead of the simulated pump. **No pump, MOSFET or other load is connected at this stage**; the
+stage verifies the control signal and the real scheduling path.
+
+| Item | Value |
+|---|---|
+| Pin | XIAO ESP32-C3 **D10 = GPIO10** (`CONFIG_DSP_PUMP_GPIO_NUM`). Not a strapping pin (GPIO2/8/9), not SPI flash (GPIO11–17), not USB (GPIO18/19), not UART0 (GPIO20/21); the build refuses those and the button-wake pin |
+| Polarity | **active high** (`CONFIG_DSP_PUMP_GPIO_ACTIVE_HIGH`): intended for a low-side N-channel logic-level MOSFET, gate driven from GPIO10 through a series resistor (≈ 100–220 Ω) with a **gate-to-source pull-down (≈ 47–100 kΩ)**, a flyback diode across the motor |
+| Maximum per run | `CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS` = **10,000 ms** (bench): the hardware runtime maximum of the build (pump configuration with a larger `max_runtime_ms` keeps the PUMP_CONFIG gate closed) and the driver's own limit |
+| Independent cutoff | `esp_timer` one-shot at runtime + 100 ms, dispatched by the esp_timer task (above the application task): **at most 10.1 s active per run** even if the application task stalls; a stopped CPU is reset by the interrupt (300 ms) / task (5 s) watchdogs |
+
+Activation path: a dose becomes due → every existing gate and limit (trusted clock, reservoir
+configured and covering, calibration and limits, READY, max dose/runtime/daily, minimum interval,
+durable claim) → `dsp_pump_gpio` run: refuses runtime 0 or above its maximum, configures the pad
+and confirms by readback that it is inactive, arms the cutoff, drives it active, reads it back,
+waits the calculated runtime, drives it inactive, disarms the cutoff, reads it back, holds the pad.
+Any mismatch, interrupted wait or fired cutoff is `DSP_PUMP_FAILED` (the Dosing Service counts the
+volume with uncertainty, as for a pump fault). Code: `dsp_pump_gpio.c` (pure, host-tested) and
+`dsp_esp_pump_gpio.c` (ESP-IDF, compiled only with the opt-in).
+
+Output level outside a run:
+- **Reset, boot ROM, until SAFE_OFF**, and **after every wake from deep sleep** (on the ESP32-C3 a
+  digital pad returns to its default unconfigured state): the firmware does not drive GPIO10, so
+  only the **external gate pull-down** keeps the driver off. Software cannot guarantee this
+  interval; the pull-down is mandatory for any real driver.
+- **SAFE_OFF** (first action of every wake, before anything else) and after every run: driven
+  inactive (low), internal pull-down enabled, readback confirmed, pad held.
+- **Before deep sleep**: driven inactive and held (`gpio_hold_en` + `gpio_deep_sleep_hold_en`); the
+  SHUTDOWN checklist sleeps only after a confirmed OFF readback, otherwise fail-safe reset.
+- **Fail-safe reset / watchdog / brownout**: the pad reverts to its unconfigured state → pull-down.
+
+What a bench run means: `DSP_PUMP_OK` / history `COMPLETED` mean "the control signal was active for
+the commanded runtime". Nothing measures liquid in any configuration (there is no flow sensor; the
+same holds for the future pump), so the reservoir value is the firmware's **estimate** of the
+commanded volume. With no load connected, bench runs lower that estimate although no liquid moved:
+keep a bench reservoir configuration and set the real capacity and amount again ("Změnit kapacitu
+nebo stav") before connecting a pump. The firmware cannot detect whether a load is connected.
+
+Log lines: `dsp_pump_gpio: BENCH pump control signal on GPIO10, active-high, max 10000 ms per run`,
+`GPIO10 ACTIVE for N ms (bench: control signal only, no liquid measured)`, `GPIO10 inactive after N ms`.
 
 ### Wi-Fi time synchronization only (`CONFIG_DSP_APP_WIFI_TIME`, bench MVP)
 

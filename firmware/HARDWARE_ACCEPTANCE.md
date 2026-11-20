@@ -418,6 +418,21 @@ Test-environment observations:
   capture did not cover the phone test (00:13–00:14), and this build logs neither connections nor
   disconnects.
 
+### 8c. Bench GPIO pump control signal (planned, not run)
+
+Firmware with `sdkconfig.pumpgpio.defaults` (README "GPIO pump control signal"). **No pump, MOSFET
+or other load connected.** Probe GPIO10 (XIAO D10) against GND with a logic analyzer or scope
+(≥ 1 kHz sampling), or a current-limited LED (≥ 1 kΩ in series, ≤ 3 mA) to GND.
+
+| # | Check | Expected | Result |
+|---|---|---|---|
+| G1 | Level through power-on, reset and boot until the app runs (record the first 2 s after RESET) | low or high-impedance only; never high | |
+| G2 | Level during the BLE window and Wi-Fi sync without a due dose | low | |
+| G3 | Scheduled dose with every gate open (READY, calibration, limits, reservoir, trusted clock) | one high pulse at the due minute, width = calculated runtime (± 10 ms tick) ≤ 10,000 ms; log `GPIO10 ACTIVE for N ms` | |
+| G4 | Same schedule with one gate closed (e.g. SERVICE_REQUIRED) | no pulse | |
+| G5 | Through deep sleep after the dose | low (held) | |
+| G6 | RESET during a pulse | the pulse ends at the reset; low afterwards; the occurrence is not repeated (history INTERRUPTED) | |
+
 ## 9. Configuration limits and storage (M1.10b.1)
 
 The firmware accepts every representable value of the calibration and safety fields (only
