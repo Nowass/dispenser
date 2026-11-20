@@ -443,6 +443,40 @@ class FirmwareInTheLoopTest {
         waitWakeEnd()
     }
 
+    /**
+     * The 30 s limit (DSP_LINK_UNAUTH_MS) applies only before authentication: an authenticated
+     * connection (the CLAIM connection after ENROLL_RESULT, and an IK SESSION) stays open and usable
+     * at 31 s and 120 s device time without any traffic; only the window maximum or END_SESSION ends it.
+     */
+    @Test
+    fun authenticated_connections_outlive_the_unauthenticated_limit() = runBlocking {
+        val (_, a) = phone("A")
+        wake()
+        a.claim("A") // the CLAIM connection itself is authenticated
+        val claimGen = a.session!!.generation
+        FirmwareSim.advance(31_000)
+        kotlinx.coroutines.delay(500) // let the device's loop run its deadlines
+        assertTrue("CLAIM connection alive at 31 s", a.session?.isOpen == true)
+        assertTrue(a.request(0x10) is RequestResult.Ok)
+        assertEquals(claimGen, a.session!!.generation)
+
+        a.closeNow(deviceIdHex) // plain drop: the window continues
+        assertTrue(FirmwareSim.waitAdvertising(5_000))
+        a.sessionOk() // IK SESSION
+        val ikGen = a.session!!.generation
+        FirmwareSim.advance(31_000)
+        kotlinx.coroutines.delay(500)
+        assertTrue("IK SESSION alive at 31 s", a.session?.isOpen == true)
+        assertTrue(a.request(0x10) is RequestResult.Ok)
+        FirmwareSim.advance(89_000) // 120 s after the IK SESSION opened
+        kotlinx.coroutines.delay(500)
+        assertTrue("IK SESSION alive at 120 s", a.session?.isOpen == true)
+        assertTrue(a.request(0x10) is RequestResult.Ok)
+        assertEquals(ikGen, a.session!!.generation)
+        a.end()
+        waitWakeEnd()
+    }
+
     @Test
     fun session_closing_event_and_cleanup_at_the_window_maximum() = runBlocking {
         val (_, a) = phone("A")

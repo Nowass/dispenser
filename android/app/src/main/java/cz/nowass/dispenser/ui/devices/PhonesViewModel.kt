@@ -24,7 +24,7 @@ data class PhonesUiState(
     val busy: Boolean = false,
 )
 
-/** The device's phone list (M1.10e.4c). [runAfterClose] ends the session after the screen is gone. */
+/** The device's phone list (M1.10e.4c). [runAfterClose] drops the link (no END_SESSION) after the screen is gone. */
 class PhonesViewModel(
     private val controller: PhonesController,
     private val runAfterClose: (suspend () -> Unit) -> Unit,
