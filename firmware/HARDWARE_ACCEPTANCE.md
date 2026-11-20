@@ -569,6 +569,20 @@ F1 READY dosing floor (firmware README "READY dosing floor"), F2 Android readine
 now tested), F4 interval semantics labelled; pulse-timing comment corrected. All offline; the board
 was not touched after the first boot.
 
+**Deployment of 0cbb830 (2026-11-20, approved firmware-only):** pre-flash read-only check in ROM
+download mode (BOOT held at RESET, application never started; `--before/--after no-reset`): 19:23
+READY (stop; owner disarmed via the app), 19:50 SERVICE_REQUIRED (2), no schedule eligible before
+2026-11-21 10:17. 19:58: identity, db7e593/table/ca282f1 verified; fresh backups (`nvs` identical to
+the 19:50 read, `nvs_sec` = provisioned image, readiness 2); only 0x30000 written (0x30000–0x157fff,
+1,211,872 B, hash verified); before the first run app, bootloader, table verified and `otadata`,
+`nvs`, `nvs_sec` byte-identical. The logger's RTS pulse left the chip in ROM download mode
+(`boot:0x0 USB_BOOT`, entered by the BOOT button), so the controlled boot was one manual RESET at
+20:18:47. First boot (redacted `serial-0cbb830-boot.redacted.log`): one application boot, driver line,
+Wi-Fi 1.6 s, SNTP sample, clock accepted (RTC time had been lost by the USB resets: first trust),
+Wi-Fi stopped before BLE, BLE window up; no GPIO10 activation, no panic/watchdog/error line; deep sleep
+at 20:21:52 after the idle window. Storage initialization is not logged at INFO level: no error, but a
+positive check (Status `storage_ok`, history) needs the app session or a read, both not yet approved.
+
 Still open for this firmware: E1–E6 (need the new APK; with the incident fixes the next deployment is
 the 0cbb830 image, 8d.1), confirmation that ownership, schedules and reservoir are unchanged (the
 pulses imply storage, credentials and gates were valid; a post-boot NVS read was not authorized).
