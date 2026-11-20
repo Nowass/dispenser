@@ -53,6 +53,9 @@ _Static_assert(PIN != CONFIG_DSP_BUTTON_WAKE_GPIO, "pump control pin equals the 
 #define ACTIVE_HIGH false
 #endif
 
+_Static_assert(portTICK_PERIOD_MS < DSP_PUMP_GPIO_CUTOFF_MARGIN_MS,
+               "one tick must stay below the cutoff margin (a normal pulse never reaches the cutoff)");
+
 static const char *TAG = "dsp_pump_gpio";
 static dsp_pump_gpio_t s_drv;
 static dsp_pump_port_t s_port;
@@ -135,7 +138,9 @@ static bool hw_wait_ms(void *ctx, uint32_t ms)
     int64_t t0 = esp_timer_get_time();
     ESP_LOGW(TAG, "GPIO%d ACTIVE for %u ms (bench: control signal only, no liquid measured)", PIN,
              (unsigned)ms);
-    vTaskDelay((ms + portTICK_PERIOD_MS - 1u) / portTICK_PERIOD_MS); /* never shorter than ms */
+    /* The pulse lasts (ms - 1 tick, ms + 1 tick): vTaskDelay(n) waits n tick interrupts, the first
+     * one may come at once (dsp_pump_gpio_delay_ticks). Never past the cutoff (ms + margin). */
+    vTaskDelay(dsp_pump_gpio_delay_ticks(ms, portTICK_PERIOD_MS));
     ESP_LOGW(TAG, "GPIO%d inactive after %u ms", PIN, (unsigned)((esp_timer_get_time() - t0) / 1000));
     return true;
 }

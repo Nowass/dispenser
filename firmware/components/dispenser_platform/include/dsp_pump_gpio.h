@@ -79,6 +79,17 @@ void dsp_pump_gpio_port(dsp_pump_gpio_t *d, dsp_pump_port_t *out);
 /* Called from the cutoff context after it drove the pad inactive. */
 void dsp_pump_gpio_cutoff_fired(dsp_pump_gpio_t *d);
 
+/*
+ * Tick count for a blocking wait of ms with a tick period of tick_ms (FreeRTOS vTaskDelay).
+ * vTaskDelay(n) returns after n tick interrupts, i.e. after a time in ((n - 1) * tick, n * tick]
+ * depending on the phase of the first tick. With n = ceil(ms / tick) the GPIO pulse is therefore
+ * in (ms - tick, ms + tick): up to one tick SHORTER or longer than requested (bench 2026-11-20:
+ * 7,991 ms for 8,000 ms at a 10 ms tick). The independent cutoff fires at ms +
+ * DSP_PUMP_GPIO_CUTOFF_MARGIN_MS, which must exceed one tick (checked at build time by the ESP-IDF
+ * adapter), so a normal run never reaches it. 0 for ms 0 or tick 0.
+ */
+uint32_t dsp_pump_gpio_delay_ticks(uint32_t ms, uint32_t tick_ms);
+
 #ifdef __cplusplus
 }
 #endif

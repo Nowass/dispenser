@@ -313,8 +313,35 @@ static void test_reset_during_a_run(void)
     check_off_and_held();
 }
 
+/* Bench 2026-11-20: 8,000 ms requested, 7,991 ms measured at a 10 ms tick. The tick-based wait is
+ * within (ms - tick, ms + tick) for every phase of the first tick, and never reaches the cutoff. */
+static void test_tick_rounded_pulse_bounds(void)
+{
+    const uint32_t ticks[] = {1, 10, 20};
+    const uint32_t runs[] = {1, 9, 10, 11, 999, 1000, 5000, 7991, 8000, 9999, 10000};
+    for (size_t t = 0; t < sizeof ticks / sizeof ticks[0]; t++) {
+        uint32_t tick = ticks[t];
+        DSP_CHECK(tick < DSP_PUMP_GPIO_CUTOFF_MARGIN_MS);
+        for (size_t r = 0; r < sizeof runs / sizeof runs[0]; r++) {
+            uint32_t ms = runs[r];
+            uint32_t n = dsp_pump_gpio_delay_ticks(ms, tick);
+            /* vTaskDelay(n): (n - 1) * tick < elapsed <= n * tick */
+            uint64_t shortest = (uint64_t)(n - 1) * tick, longest = (uint64_t)n * tick;
+            DSP_CHECK(shortest < ms);                       /* may be shorter, by less than a tick */
+            DSP_CHECK(shortest + tick >= ms);               /* ... never by a tick or more */
+            DSP_CHECK(longest < (uint64_t)ms + tick);       /* longer by less than a tick */
+            DSP_CHECK(longest < (uint64_t)ms + DSP_PUMP_GPIO_CUTOFF_MARGIN_MS); /* cutoff not reached */
+        }
+    }
+    DSP_CHECK_EQ_INT(800, dsp_pump_gpio_delay_ticks(8000, 10)); /* the bench case: 7,990..8,000 ms */
+    DSP_CHECK_EQ_INT(0, dsp_pump_gpio_delay_ticks(0, 10));
+    DSP_CHECK_EQ_INT(0, dsp_pump_gpio_delay_ticks(10, 0));
+    DSP_CHECK_EQ_INT(UINT32_MAX, dsp_pump_gpio_delay_ticks(UINT32_MAX, 1));
+}
+
 int main(void)
 {
+    DSP_RUN(test_tick_rounded_pulse_bounds);
     DSP_RUN(test_activation_timing_and_hold);
     DSP_RUN(test_active_low_polarity);
     DSP_RUN(test_own_limit_never_activates);

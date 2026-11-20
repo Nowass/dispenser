@@ -128,3 +128,11 @@ void dsp_pump_gpio_port(dsp_pump_gpio_t *d, dsp_pump_port_t *out)
     out->force_off = gpio_force_off;
     out->is_off = gpio_is_off;
 }
+
+uint32_t dsp_pump_gpio_delay_ticks(uint32_t ms, uint32_t tick_ms)
+{
+    if (ms == 0 || tick_ms == 0) {
+        return 0;
+    }
+    return (uint32_t)(((uint64_t)ms + tick_ms - 1u) / tick_ms);
+}
