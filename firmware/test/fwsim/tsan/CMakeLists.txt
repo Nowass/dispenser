@@ -33,7 +33,8 @@ add_executable(fwsim_tsan
     fwsim_tsan.c
     "${FW_ROOT}/test/host/support/fake_kv.c"
     "${FW_ROOT}/test/host/support/test_rng.c"
-    "${PLATFORM}/src/dsp_ble_transport.c")
+    "${PLATFORM}/src/dsp_ble_transport.c"
+    "${PLATFORM}/src/dsp_pump_gpio.c")
 target_include_directories(fwsim_tsan PRIVATE "${FW_ROOT}/test/fwsim" "${FW_ROOT}/test/host"
                            "${FW_ROOT}/test/host/support" "${PLATFORM}/include" ${JNI_INCLUDE_DIRS})
 target_compile_definitions(fwsim_tsan PRIVATE DSP_VIA_TRANSPORT=1 DSP_FW_VERSION="${DSP_FW_VERSION}")
