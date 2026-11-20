@@ -238,8 +238,11 @@ When `has_end` is 0 the `end_date` bytes MUST be zero.
 `seq u32 | type u8 | result u8 | flags u8 | at i64 | volume_ul u32 | before_ul u32 | after_ul u32 |
 capacity_ul u32 | schedule_id str(0..64,id)` (32–96 bytes).
 
-- `seq`: the device's event number, from 1, strictly increasing, gaps possible (a lost append or a
-  skipped ring after a damaged slot). It is the only order: newest = highest.
+- `seq`: the device's event number and identity, from 1, strictly increasing, **never reused** (the
+  device keeps a durable reservation of every number it hands out); gaps are possible (an event lost
+  to a storage failure, or a damaged reservation record). It is the only order: newest = highest.
+  Sole exception: a device whose whole history storage is erased starts again at 1; a client then
+  sees `newest_seq` drop below numbers it already holds and discards them.
 - `at`: the dose start (claim time) or the time of the reservoir change, in UTC seconds; 0 = the
   device knew no time. `CLOCK_TRUSTED` clear: the device time was not trusted then.
 - `volume_ul`: the requested (nominal) dose volume; 0 for reservoir events. **No event is a
@@ -464,6 +467,9 @@ equals `oldest_seq`, is the last one. `newest_seq` / `oldest_seq`: the range the
 - **Stable under appends:** new events get higher `seq` values and never appear below a cursor, so a
   paged read never repeats or reorders an event. A client that wants the newest events reads again
   from 0 and de-duplicates by `seq`.
+- **Not an audit trail:** an event can be missing after a power loss between the change and its
+  event, or after a storage failure; refused, blocked and skipped doses are never events. A missing
+  event does not prove that no dose was scheduled or attempted.
 - **Retention:** the device keeps the last 64 events; older ones are overwritten. An event evicted
   while a client pages is simply absent (its `seq` is below `oldest_seq`).
 - **`FAULTS`:** since its last boot the device found unreadable history slots or could not store an

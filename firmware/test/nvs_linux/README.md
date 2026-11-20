@@ -25,14 +25,17 @@ two phones), each cut at every flash write/erase cycle. Patched component (2026-
 unpatched component loses the record at cycle 115 of each `auth` write (the known defect, also a
 negative control). Check 1 with layout v5: dispenser namespace 324 entries (budget 325).
 
-**Phase C capacity check (2026-11-20):** check 1 now also fills the event history to its maximum
-(64 events with 64-character schedule IDs, written twice round the ring) before measuring, so checks
-1, 2 and 4 run with the worst case. Patched component: dispenser namespace 708 entries (layout 324 +
-event history 384 = 6 per event, budget asserted); partition 2,520 entries, used 846, available
-1,548; check 2 (20,000 maximum `sched` + 2,000 `config` writes) 16,364 page erases (0.818 per write,
-unchanged), per page max 1,259 (was 1,023: more live data to move during reclamation); check 4
-steady-state headroom 112 available entries, margin 1,436. Whole run: patched 930,172 checks, 0
-failed; the unpatched component still reproduces the known defect; image exchange both ways passes.
+**Phase C capacity check (2026-11-20, review revision with the sequence reservation `evhw`):** check 1
+fills the event history to its maximum (64 events with 64-character schedule IDs, twice round the
+ring) before measuring, so checks 1, 2 and 4 run with the worst case; check 2b appends 20,000
+maximum-size events (312 wraparounds) with a power cycle and reopen every 2,000. Patched component:
+namespace 711 entries (layout 324 + history 387 incl. reservation; budget asserted); partition 2,520,
+used 849, available 1,545; check 2: 16,364 page erases (0.818 per set write, unchanged), per page max
+1,488 (1,023 without the log: more live data moved during reclamation); check 2b: 0.071 page erases
+per append, per page max 110, used entries constant, `seq` strictly increasing across every reopen;
+check 4 steady-state headroom 140, margin 1,405. Whole run: patched 681,774 checks, 0 failed (the
+count of check 4 depends on the fragmentation state the earlier checks leave: 5,601 cut points here,
+9,036 in the previous run); unpatched still reproduces the known defect; image exchange passes.
 
 Prerequisite: the host's libbsd development headers (`libbsd-dev`), which ESP-IDF's linux target
 needs. Without root they can be unpacked locally (`apt-get download libbsd-dev && dpkg-deb -x

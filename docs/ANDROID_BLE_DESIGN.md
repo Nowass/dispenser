@@ -1498,8 +1498,12 @@ The DEVICE-mode History tab reads the device's own log with GET_HISTORY (BLE_PRO
 - `HistoryViewModel` (DEVICE branch, `DispenserRepository.deviceHistory`): loads by itself only once a
   session is up (opening the tab never starts a connection); "Načíst ze zařízení" / "Obnovit" connect
   explicitly. Each action reads up to 3 pages (12 events); "Načíst starší" continues below the oldest
-  shown `seq`. Rows are merged by `seq` (repeated, overlapping or concurrent reads never duplicate);
-  a failed refresh never clears what is shown; a failed page keeps the list and can be retried.
+  shown `seq`. Rows are merged by the whole event (repeated, overlapping or concurrent reads return
+  identical events and never duplicate; two different events never hide each other even with an
+  equal `seq`); if the device's `newest_seq` drops below the highest shown `seq` (its history storage
+  was lost and restarted), the list is discarded and reloaded from the newest. A failed refresh never
+  clears what is shown; a failed page keeps the list and can be retried; a reconnect in the middle
+  continues below the last shown event.
 - Order is the device's `seq` (its chronology); consecutive events of one local date form a day card
   (a clock correction never reorders events by time); events without a time are shown in device order
   under "Neznámý čas".
@@ -1507,16 +1511,19 @@ The DEVICE-mode History tab reads the device's own log with GET_HISTORY (BLE_PRO
   (storage, pump never ran) doses; reservoir set / refilled / adjusted with the estimate before → after
   and the capacity. Tags: "BENCH: jen signál GPIO" (bench GPIO build: "dodání kapaliny nebylo
   ověřeno"), "SIMULACE" (simulated pump), "čas neověřen". The header says volumes are calculated from
-  the runtime and the reservoir is an estimate. Deleted schedules show "Plán (již neexistuje)", never
+  the runtime, the reservoir is an estimate, and a missing entry does not prove that no dose was
+  scheduled or attempted (blocked and skipped doses are not recorded; a power loss can lose an entry). Deleted schedules show "Plán (již neexistuje)", never
   an invented name. The device's FAULTS flag shows a warning that events may be missing.
 - Not kept beyond the screen (no local copy, no merge with DEMO events); DEMO mode is unchanged
   (simulated events, `observeHistory`). The release feature policy is unchanged (DEVICE mode as
   before; nothing debug-only was added). Navigating away never disconnects the shared session.
-- Tests: `DeviceHistoryViewModelTest` (empty, paging and end, refresh with a new event, merge by seq,
+- Tests: `DeviceHistoryViewModelTest` (empty, paging and end, refresh with a new event, merge by
+  event, distinct events with an equal seq, device log restart, reconnect halfway,
   names and unknown time, unsupported firmware, disconnected not contacted until asked, failed pages,
   faults, loader mapping), `HistoryRecordsTest` (typed records from the shared vector),
   `DeviceRepositoryFirmwareTest` (firmware in the loop: dose → history → reconnect, new wake, new
-  process → identical history; a pump power cut → exactly one INTERRUPTED across boots; no session →
+  process → identical history; paging across a new event and a reconnect; a pump power cut → exactly
+  one INTERRUPTED across boots; no session →
   NotSent; invalid arguments never sent), `ModeShellTest` (DEVICE tab, disconnected, no simulation
   text).
 

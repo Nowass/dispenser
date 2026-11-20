@@ -1476,18 +1476,42 @@ claimed) are not events (they never started); see "Secondary diagnostics" below 
 
 - One event per NVS key, slot = `seq % 64`; an append is one `set` + `commit` + read-back compare
   (single-key atomicity: after a power loss the slot holds the old or the new event, never a mix).
-  No head key: at boot the head is the highest valid `seq`. Wraparound overwrites the oldest event.
-- **Ordering after an append before the event:** the transition (claim finish, marker clear, refill
-  R4, config save) is durable first, so a power cut between them loses the event and never repeats
-  it (recovery does not see a finished transition again). Each event also carries a
-  deduplication key (the dose-bound report key, `RF`|refill intent seq, `CF`|config revision); an
-  append whose key is still in the log is a no-op.
+  Wraparound overwrites the oldest event.
+- **Event identity (`seq`), Phase C review 2026-11-20:** `seq` is the identity, the phone's
+  de-duplication key and the paging cursor, and is never handed out twice. Revision 0f843ec derived
+  the head from the readable slots only, so a newest event dropped by NVS (before or after a
+  wraparound) or the loss of every slot let the next event take an old `seq`
+  (`test_seq_never_reused_after_lost_slots` failed 3 of 3 cases there). Now the key `evhw` holds a
+  durable upper bound of every `seq` used: before each append the bound is raised to the new `seq`
+  (5-byte blob, set + commit + read-back) and only then is the event written; at boot the head is
+  the bound. If the bound itself is missing, damaged or behind a readable event while events exist,
+  the head is the highest readable `seq` + 64 + 1. A failed reservation writes no event and uses no
+  `seq`; a failed event write after a confirmed reservation leaves a gap. Gaps are allowed, duplicates
+  never. One `seq` per reservation (not blocks): with slot = `seq % 64`, block gaps would shrink the
+  retention when wakes log one event each, and the first append of a wake writes the bound anyway.
+  **Residual (not closable with this storage):** if all 64 event keys AND `evhw` vanish at once (an
+  erased or destroyed namespace), that state is indistinguishable from a never-used log and the log
+  restarts at 1. The phone keeps no history copy, merges rows by the whole event (two different
+  events with an equal `seq` never hide each other) and resets its list when the device's newest
+  `seq` drops below what it shows, so no event can disappear from the app; device-side paging stays
+  consistent because the device never holds two events with the same `seq`.
+- **Persistence order (as implemented):** the transition (automatic: `dsp_exec_finish`; manual: the
+  completion write that clears the marker; recovery: `dsp_exec_mark_interrupted` / the marker clear;
+  refill: R4; SET_CONFIG: the config save) is durable first, then the reservation, then the event.
+  A power cut in between loses the event (a window of two small NVS commits) and never repeats it:
+  the transition is finished, so recovery does not see it again. Each event also carries a
+  deduplication key (dose-bound report key, `RF`|refill intent seq, `CF`|config revision); an append
+  whose key is still in the log is a no-op. An event never claims a change that is not durable
+  (tests: power cut at every write of a dose wake, a manual dose and a refill). **The history is
+  therefore not a complete audit trail:** an event can be missing after a power loss or a storage
+  failure, and refused, blocked or skipped doses are never events.
 - **Failures never touch dosing:** an append failure (write, commit, read-back, NVS full) is counted
-  (`faults`, RAM, reported by GET_HISTORY as FAULTS in that wake) and changes nothing else: no gate,
-  no DEGRADED, no decision depends on the log. A corrupt or foreign slot is ignored at open (counted)
-  and the next `seq` skips one ring (`head + 64`) so a `seq` still held by an unreadable slot is never
-  handed out again (gaps are allowed; order is by `seq` only). Known limit: if NVS drops the newest
-  event as corrupt before the first wraparound, its `seq` can be reused once.
+  (`faults`, RAM only, reported by GET_HISTORY as FAULTS in that wake; a failure in an earlier wake
+  shows only as a missing event) and changes nothing else: no gate, no DEGRADED, no decision depends
+  on the log, the anti-replay records are never read or written by it. Tests with every history write
+  failing (write error and NO_SPACE): doses, refill and configuration still persist; ownership,
+  schedules and the reservoir stay intact; no dose repeats. A corrupt or foreign slot is ignored at
+  open (counted) and never lowers the head.
 - **No migration:** the keys are outside the layout's explicit-presence rule (missing = empty), so
   the layout stays v5 and older firmware ignores them. Nothing existing is erased or repurposed.
   Doses from before this firmware are not reconstructed from the anti-replay records (those hold only
@@ -1496,26 +1520,39 @@ claimed) are not events (they never started); see "Secondary diagnostics" below 
 ### Capacity and wear
 
 An event is 41 + ID bytes (≤ 105 B with a 64-character ID; 77 B with a UUID): at most 6 NVS entries
-(4 data + header + index), so the full log occupies ≤ 384 entries. The partition has 2,520 entries, of
-which the layout uses about 325 and the PHY/Wi-Fi co-tenants about 120 (check 1 of
-`test/nvs_linux`, 1,952 available before the log); the steady state needs about 140 available
-entries for page reclamation (check 4). 64 events ≈ 3 weeks at three doses a day. Wear: one small
-blob per event (a few per day) against the existing per-dose writes (claim, ledger, consumption,
-finish: four records per dose), well under 10 % more flash writes per dose; NVS spreads them over all
-pages. Measured with the full log on the real ESP-IDF NVS over the emulated flash (`test/nvs_linux`, check
-1): 708 entries in the namespace (layout 324 + log 384), 1,548 still available against a steady-state
-need of 112; page erases per schedule-set write unchanged (0.818). See "Phase C capacity check" in
-`test/nvs_linux/README.md`. Not yet measured on the device's flash.
+(4 data + header + index); `evhw` is 3 entries; the full log ≤ 387 entries. Keys `ev00`…`ev63` and
+`evhw` differ from every layout key (`layout`, `h00`…`h31`, `sched`, `config`, `time`, `notify`,
+`dosing`, `auth`); `nvs_sec` is a separate partition.
+
+Measured on the real ESP-IDF v6.1 NVS over the emulated flash (`test/nvs_linux`, 2026-11-20, every
+layout record at its maximum incl. a full schedule set, ownership with 4 phones, calibration, PHY/Wi-Fi
+co-tenants): namespace 711 entries (layout 324 + log with reservation 387); partition 2,520 entries,
+used 849, available 1,545; steady-state reclamation needs 140 available entries (check 4): margin
+1,405. 20,000 maximum-size appends (312 wraparounds) with a power cycle every 2,000: used entries
+constant, `seq` strictly increasing across every reopen, 0.071 page erases per append, wear spread
+(per page max 110). A full partition refuses only the write that does not fit; dosing safety does
+not depend on the log (see above). Not yet measured on the device's flash.
+
+Wear estimate (from those rates): a dose writes claim, dosing state, configuration and finish
+(about 23 NVS entries, ≈ 740 B); its event adds reservation + event (9 entries, ≈ 290 B), about
++40 % flash bytes per dose (the earlier "under 10 %" estimate was wrong). At 3 doses and a reservoir
+change per day: ≈ 4 KB/day, about one page erase per day spread over 20 pages, i.e. ≈ 0.05 erases per
+page per day against the ESP32-C3 flash's 100,000-cycle rating: no practical endurance limit even
+with a 10× concentration. Retention: 64 events ≈ 3 weeks at three doses a day.
 
 ### Tests
 
 `test/host/test_evlog.c` (codec golden bytes and malformed records, paging, wraparound, restart,
-duplicates, set/commit/NO_SPACE/read-back failures, power cut, corruption and seq skip, arguments) and
+duplicates, reservation and event-write failures, power cut, corruption, `seq` never reused after a
+lost newest slot / all slots / a lost or damaged reservation, repeated wraparound across boots,
+arguments) and
 `test/host/test_history_app.c` (through the Application Service: dose and reservoir events with the
 estimate, pump fault, manual dose, adjustment, persistence across reboots; automatic and manual pump
 power cuts logged once as INTERRUPTED across repeated reboots; a power cut at every write of a dose
 wake never duplicates an event nor logs OK without a pump run; a failing history never blocks a dose
-or makes the wake DEGRADED; GET_HISTORY paging, empty page, FORBIDDEN, invalid `max`). Android: firmware
+or makes the wake DEGRADED; history writes failing with write errors or NO_SPACE leave ownership,
+schedules and reservoir intact; power cuts at every write of a manual dose and of a refill; GET_HISTORY
+paging, empty page, FORBIDDEN, invalid `max`). Android: firmware
 in the loop over the simulator (`DeviceRepositoryFirmwareTest`).
 
 ### Secondary diagnostics (proposal, not implemented)
