@@ -1480,6 +1480,18 @@ amount <= max_dose_ul when a max dose is set (LIMIT, detail DSP_DOSING_L_DOSE, a
 dose could never run. The app now shows that reason ("Množství je větší než maximální dávka…",
 `ScheduleWriteResult.AboveMaxDose`) instead of the generic "Zařízení změnu odmítlo".
 
+Readiness feedback (incident 2026-11-20, F2): the device confirmed READY and suspended BLE for a dose
+right away; the reload after the answer failed and the screen showed "not connected" with the old NOT
+READY. Now `BenchPumpController.setReady` keeps the status carried by a confirmed answer when the reload
+fails (`Loaded.reloadFailed`, text "Potvrzeno zařízením. Spojení se poté ukončilo …"; without an earlier
+snapshot `ReadinessConfirmedOnly`). Readiness and the BLE connection are separate lines ("Spojení:
+připojeno / nepřipojeno …"). An Uncertain answer marks the readiness "NEOVĚŘENO … zařízení může být
+READY"; only NOT READY is offered; the next authenticated connection resolves it by a status READ
+(the journal's read-back runs too); the command is never repeated. The minimum-interval field says it
+is measured between dose starts (F4). Tests: `BenchPumpControllerTest`, `BenchPumpFirmwareTest`
+(firmware in the loop: the incident scenario; without firmware F1 it reproduces READY confirmed +
+reload failed).
+
 Re-timing an executed schedule (bench observation, 2026-11-20): the device doses a schedule at most
 once per local date (anti-replay watermark `<id>@<date>`, firmware README "Re-timing an executed
 schedule"). An edit of a schedule that already dosed today is accepted and listed with its new time

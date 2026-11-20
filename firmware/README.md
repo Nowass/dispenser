@@ -1358,7 +1358,7 @@ items); the host tests use a fake pump. Nothing calls the service from `app_main
 | Gate | Opened by |
 |---|---|
 | dosing record loaded, no storage failure earlier in this wake (DEGRADED) | a clean boot |
-| readiness READY (a new or migrated record is **SERVICE_REQUIRED**) | `dsp_dosing_set_readiness(READY)`, which re-checks every gate below except the clock |
+| readiness READY (a new or migrated record is **SERVICE_REQUIRED**) | `dsp_dosing_set_readiness(READY)`, which re-checks every gate below except the clock; the Application Service first stores the READY dosing floor (below) |
 | BLOCKED latch clear (FR-007/022; also blocks manual doses, Q7) | a completed refill only |
 | no refill pending, no manual marker (recovery not yet run) | `dsp_dosing_recover()` |
 | trusted clock | M1.4 timekeeper |
@@ -1374,7 +1374,38 @@ items); the host tests use a fake pump. Nothing calls the service from `app_main
   greater; a clock moved back to an earlier date keeps counting against the highest date
   (never a fresh budget). DST days (23/25 h) are simply one local date.
 - **Interval:** `now ≥ last_start + min_interval_s`; a clock behind the last start waits.
-  `last_start` is durable, so the cooldown survives restarts and power loss.
+  `last_start` is durable, so the cooldown survives restarts and power loss. It is measured
+  **between pump starts**, not from the end of the previous run: with `min_interval_s` below the
+  runtime, the next dose can start right after the previous one ends (bench 2026-11-20,
+  `min_interval_s` = 1: an 8 s and a 5 s pulse 40 ms apart, starts 8.04 s apart; correct).
+  **Design decision for the real pump driver (open, not implemented):** a real pump may need a
+  cooldown measured from the end of the previous run (motor and supply recovery, flow settling);
+  decide with the driver hardware review whether to add a separate `min_cooldown_s` from the run's
+  end, or to validate `min_interval_s ≥ max_runtime + cooldown`. The current semantics are unchanged.
+
+### READY dosing floor (incident 2026-11-20, F1)
+
+Entering READY never releases occurrences that fell due while the device was NOT READY. On the
+bench, "Nuli" (8 ml, 17:17) and "Bar" (5 ml, 17:20) were refused at their times (NOT READY), stayed
+inside their 10-minute due window, and ran at 17:20:22 right after the owner switched to READY.
+Now `dsp_app_set_readiness` handles NOT READY → READY as follows:
+
+1. The gates are checked first (`dsp_dosing_ready_gates`); a refused READY writes nothing.
+2. With a trusted time, the timekeeper's durable dosing floor (`time.not_before_utc`, the same
+   floor a large forward clock step raises) becomes the transition instant + 1 s: written,
+   committed and read back. If that write fails: `STORAGE`, READY is **not** entered.
+3. Only then is READY written to the dosing record.
+
+Boundary: an occurrence scheduled at or before the transition instant (also in the same second or
+minute, e.g. READY at 08:20:00 → the 08:20 occurrence) is MISSED; at 08:19:59 the 08:20 occurrence
+runs. Later occurrences of the same day and of every following day are unaffected. Power loss: after
+step 2 the device is NOT READY with a raised floor (harmless); READY is never durable with an older
+floor (tested by a cut at every write). Without a trusted time no floor is written: no automatic dose
+runs before the first trusted time, which raises the floor to the sync instant + 1 s anyway. Other
+consumers of the floor are unchanged (clock corrections only raise it; the per-schedule edit floors,
+anti-replay records and manual doses are not involved). READY → READY and SERVICE_REQUIRED never touch
+it. Tests: `test/host/test_ready_floor.c` (the incident fails without the fix: two doses right after
+READY), Android firmware-in-the-loop `BenchPumpFirmwareTest`.
 - **Untrusted clock:** no activation, ledger untouched.
 
 ### Write order (approved: restricting before enabling)
@@ -2171,7 +2202,10 @@ stage verifies the control signal and the real scheduling path.
 | Independent cutoff | `esp_timer` one-shot at runtime + 100 ms with **ISR dispatch**: the callback runs in the timer interrupt from IRAM (one GPIO register write, one flag), independent of every task and of the flash cache. The build refuses the GPIO pump without ISR dispatch, the interrupt watchdog, a panicking task watchdog and panic = reboot without OCD awareness (all set by `sdkconfig.pumpgpio.defaults`) |
 
 Bounds on the active time (software only; reviewed 2026-11-20):
-- Normal path: exactly the calculated runtime (FreeRTOS tick 10 ms, rounded up), ≤ 10,000 ms.
+- Normal path: the calculated runtime within ± one FreeRTOS tick (10 ms): `vTaskDelay(n)` waits n
+  tick interrupts and the first may come at once, so the pulse is in (runtime − 10 ms,
+  runtime + 10 ms) (bench: 7,991 ms for 8,000 ms; host test `test_tick_rounded_pulse_bounds`); never
+  near the cutoff (one tick < the 100 ms margin, checked at build time); ≤ 10,010 ms.
 - Application task stalls or the scheduler is starved: the interrupt cutoff ends the pulse at
   runtime + 100 ms (≤ 10.1 s). A scheduler starved for 5 s also panics through the task watchdog.
 - Interrupts disabled (or the timer interrupt cannot run): the interrupt watchdog panics after

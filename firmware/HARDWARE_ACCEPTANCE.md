@@ -499,11 +499,14 @@ ACCEPTED (bench-only security deviation, 8a.2). This is not an authorization to 
 
 #### 8d.1 Proposed deployment procedure (requires separate approval; nothing done yet)
 
-Artifacts (source commit `ca282f1fca83e1aef1e34e45ebb3c56669e0b6b5`):
-`~/dispenser-hw-builds/ble-wifitime-gpio-phasec-ca282f1/dispenser.bin` 1,211,456 B, SHA-256
-`84d79e04e6fc1618386ba8cbed14a47b7f3e3e3e5b3f53ef4fcbc94b3c4fc2f3`;
-`~/dispenser-hw-builds/apk-debug-phasec-ca282f1/app-debug.apk` 18,143,267 B, SHA-256
-`4a2891b9a44bcf0280b0dc2863370f23388c6bbd070f0c421b1f53244f2e0f9f`.
+Artifacts for the NEXT deployment (incident fixes; source commit
+`0cbb8302562251df7bea5b5437a57386d9286e11`, see 8d.2; the board runs ca282f1 since 2026-11-20 17:11):
+`~/dispenser-hw-builds/ble-wifitime-gpio-incident-0cbb830/dispenser.bin` 1,211,872 B, SHA-256
+`bec8eaac7a4912fc005b457ddb38ad147ddd0cef5751fbdceec06fcd51aa10fb` (erase range again
+0x00030000..0x00157fff);
+`~/dispenser-hw-builds/apk-debug-incident-0cbb830/app-debug.apk` 18,145,895 B, SHA-256
+`a3d5f7908ea243bfd6dbf38db8c03bae08d8ee08a5f4214f34d412c6bdcafead`. Superseded: the ca282f1 APK
+`4a2891b9…` (never installed) and, for future writes, the ca282f1 image `84d79e04…`.
 
 1. Preconditions: no pump, MOSFET or load on GPIO10 (analyzer optional); `pgrep -a openocd` empty;
    no VS Code flash/debug session; `fuser /dev/ttyACM0` empty; the board currently runs 54a7925.
@@ -529,9 +532,46 @@ Artifacts (source commit `ca282f1fca83e1aef1e34e45ebb3c56669e0b6b5`):
 10. Run E1–E6 (E3/E5: one new 5 ml schedule, READY set by the owner in the bench screen; E5 also is
     G6). After the tests: NOT READY again in the bench screen.
 
+Lessons from 2026-11-20 (8d.2): the readiness check from the `nvs` backup is essential (it stopped two
+runs while the app showed NOT READY); in the script every variable used after a `{ … } | tee` block
+must be defined outside it (run 3 stopped falsely after a verified write); the owner's confirmation
+of NOT READY must be read back from the device, not from the app's last message.
+
 Rollback (also separately approved): write the 54a7925 application back at 0x30000 only, with the
 same verification. The new keys `ev00`…`ev63`/`evhw` stay in `nvs` and are ignored by 54a7925; no
 NVS write or erase is part of the rollback.
+
+#### 8d.2 Phase C firmware deployment and the 17:20 incident (2026-11-20)
+
+Approved: firmware update only (ca282f1), first-boot verification. Runs (logs in
+`~/dispenser-hw-evidence/phasec-20261120/`, backups owner-only in
+`~/.config/dispenser-device/bench/backup-20261120-phasec{,2,3}/`):
+
+| Run | Result |
+|---|---|
+| 1 (17:05) | identity, bootloader/table/app 54a7925 verified, backups; **stopped**: `nvs` dosing record READY although the owner believed NOT READY. Nothing written |
+| 2 (17:08) | same, still READY; **stopped**. Nothing written |
+| 3 (17:11) | readiness SERVICE_REQUIRED (2) read back; **only 0x30000 written** (0x30000–0x157fff erased, 1,211,456 B, hash verified); the script then stopped falsely (own variable-scope bug). Separate read-only verification before the first run: app, bootloader, table match; `otadata`, `nvs`, `nvs_sec` byte-identical to the backups |
+
+First boot of ca282f1 (redacted log `serial-phasec-boot.redacted.log`): one boot, GPIO10 driver line,
+no panic/watchdog/error line, Wi-Fi connected in 1.8 s, SNTP sample, clock accepted, Wi-Fi stopped
+before BLE started, BLE service window up. **17:20:22: two GPIO10 pulses (8,000 ms, 5,000 ms) —
+stop condition.** No load connected.
+
+Analysis (offline; evidence: code, redacted log, non-secret records of the 17:11 backup, the owner's
+screenshot): no safety-gate bypass. Between 17:12 and 17:20 the owner switched READY in the bench
+screen; the firmware accepted it and, in the same loop, found "Nuli" (8 ml, 17:17) and "Bar" (5 ml,
+17:20) inside their 10-minute due window, suspended BLE and ran both. The bench screen's reload after
+the confirmed answer failed (BLE suspended) and showed "not connected" with the stale NOT READY. The
+second pulse respected `min_interval_s` = 1 (starts 8.04 s apart; measured between starts). Fixes:
+F1 READY dosing floor (firmware README "READY dosing floor"), F2 Android readiness feedback
+(docs/ANDROID_BLE_DESIGN.md §16b), F3 reviewed (the bounded TX drain before a suspend already exists;
+now tested), F4 interval semantics labelled; pulse-timing comment corrected. All offline; the board
+was not touched after the first boot.
+
+Still open for this firmware: E1–E6 (need the new APK; with the incident fixes the next deployment is
+the 0cbb830 image, 8d.1), confirmation that ownership, schedules and reservoir are unchanged (the
+pulses imply storage, credentials and gates were valid; a post-boot NVS read was not authorized).
 
 ## 9. Configuration limits and storage (M1.10b.1)
 
