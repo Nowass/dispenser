@@ -225,6 +225,9 @@ typedef struct {
      * every authorization rule are unchanged. The firmware build refuses it together with the
      * production endpoint; false everywhere else. */
     bool service_on_power_on;
+    /* Phase C: DSP_EVF_PUMP_SIMULATED / DSP_EVF_PUMP_BENCH_GPIO, marking every dose event of this
+     * build in the user-visible history (0 = neither). Build-time, never changed over BLE. */
+    uint8_t event_pump_flags;
 } dsp_app_config_t;
 
 typedef enum {
@@ -415,6 +418,22 @@ typedef struct {
         uint32_t revision;
     } items[DSP_APP_SCHEDULE_PAGE];
 } dsp_app_schedule_page_t;
+
+/* Phase C: event history (GET_HISTORY, docs/BLE_PROTOCOL.md 10.7). Newest first: up to max
+ * (1..DSP_APP_HISTORY_PAGE) events with seq < before_seq (0 = from the newest). Read-only: no
+ * write budget, never changes state. newest/oldest: the seq range currently held (0 = empty);
+ * faults: since this boot the log saw unreadable slots or failed appends (events may be missing;
+ * not persisted, a failure in an earlier wake is not reported). */
+#define DSP_APP_HISTORY_PAGE 4
+typedef struct {
+    uint32_t newest_seq, oldest_seq;
+    bool faults;
+    uint8_t n;
+    dsp_event_t items[DSP_APP_HISTORY_PAGE];
+} dsp_app_history_page_t;
+dsp_app_op_result_t dsp_app_get_history(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                        uint32_t before_seq, uint8_t max,
+                                        dsp_app_history_page_t *out);
 
 /* page beyond the last one -> INVALID (page 0 of an empty set is valid and empty). */
 dsp_app_op_result_t dsp_app_list_schedules(dsp_app_t *app, const dsp_app_auth_t *auth,
@@ -662,6 +681,7 @@ struct dsp_app {
     dsp_app_qitem_t rx;   /* the queue item being processed (not on the stack) */
     uint8_t tx[DSP_BLE_FRAME_MAX]; /* reply frame buffer */
     dsp_app_report_t rep;
+    dsp_evlog_t evlog;    /* Phase C: user-visible event history (separate keys, informational) */
 };
 
 /* Runs one complete wake (ends with the sleep or fail-safe port call). */

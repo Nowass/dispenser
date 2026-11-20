@@ -20,7 +20,7 @@
 #include "dsp_codec.h"
 #include "dsp_kv.h"
 
-#define FAKE_KV_MAX_KEYS 48
+#define FAKE_KV_MAX_KEYS 112 /* layout keys (39) + event log (64) + spare */
 #define FAKE_KV_MAX_VALUE (DSP_RECORD_MAX_BYTES + 64)
 
 typedef struct {

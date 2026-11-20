@@ -38,6 +38,7 @@
 
 #include "dsp_config.h"
 #include "dsp_dosing_state.h"
+#include "dsp_evlog.h"
 #include "dsp_exec.h"
 #include "dsp_notify.h"
 #include "dsp_recurrence.h"
@@ -135,6 +136,9 @@ typedef struct {
     bool degraded;
     bool cred_inhibit;     /* M1.10b.3: DSP_DOSING_G_CREDENTIALS (set by the Application Service) */
     uint16_t adm_limit;    /* M1.10b.3: fresh manual-dose decisions per day (>= 1) */
+    dsp_evlog_t *log;      /* Phase C: user-visible event history (NULL = none); written only
+                              after each durable transition, never read by this service */
+    uint8_t ev_pump_flags; /* DSP_EVF_PUMP_SIMULATED / DSP_EVF_PUMP_BENCH_GPIO for dose events */
 } dsp_dosing_t;
 
 #define DSP_MANUAL_DECISIONS_PER_DAY_DEFAULT 32 /* approved starting policy (O10) */
@@ -242,6 +246,22 @@ void dsp_dosing_set_admission_limit(dsp_dosing_t *d, uint16_t per_day); /* 0 = d
  * before suspending BLE; the request path re-checks authoritatively). *retry_s (optional):
  * seconds until the next local midnight with a trusted clock, 0 if unknown. */
 bool dsp_dosing_manual_admissible(const dsp_dosing_t *d, dsp_clock_t clock, uint32_t *retry_s);
+
+/* Phase C: attaches the event history (dsp_evlog.h). Events are appended only AFTER the durable
+ * transition they describe; an append failure is counted in the log and changes nothing else
+ * (no gate, no DEGRADED, no decision depends on the log). pump_flags (DSP_EVF_PUMP_*) mark every
+ * dose event of this firmware (simulated pump / bench GPIO signal only). */
+void dsp_dosing_set_event_log(dsp_dosing_t *d, dsp_evlog_t *log, uint8_t pump_flags);
+
+/* Phase C: logs a reservoir change that is ALREADY durable (refill roll-forward, or a capacity
+ * change saved by SET_CONFIG). Classified from before (NULL = unknown: REFILL with
+ * DSP_EVF_RESERVOIR_UNKNOWN): INIT when the reservoir was unconfigured, ADJUST when the capacity
+ * changed or the remaining amount did not increase, otherwise REFILL. key: deduplication key
+ * (DSP_EVKEY_* | a durable unique number). Never fails visibly (informational). */
+#define DSP_EVKEY_REFILL 0x5246000000000000ull /* "RF" | refill intent seq */
+#define DSP_EVKEY_CONFIG 0x4346000000000000ull /* "CF" | configuration revision */
+void dsp_dosing_log_reservoir(dsp_dosing_t *d, const dsp_config_t *before,
+                              const dsp_config_t *target, uint64_t key, dsp_notify_clock_t clock);
 
 /* Credentials gate (CRED_DEGRADED or a key fault): closes DSP_DOSING_G_CREDENTIALS. */
 void dsp_dosing_set_credentials_inhibit(dsp_dosing_t *d, bool inhibit);

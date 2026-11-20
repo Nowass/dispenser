@@ -89,6 +89,8 @@ dsp_add_host_test(test_notify test_notify.c support/fake_kv.c)
 dsp_add_host_test(test_proto test_proto.c)
 dsp_add_host_test(test_https test_https.c support/fake_kv.c)
 dsp_add_host_test(test_dosing test_dosing.c support/fake_kv.c)
+# Phase C: persistent event history (separate from the anti-replay records).
+dsp_add_host_test(test_evlog test_evlog.c support/fake_kv.c)
 dsp_add_host_test(test_app test_app.c support/fake_kv.c
                   "${CMAKE_CURRENT_LIST_DIR}/../../components/dispenser_platform/src/dsp_pump_gpio.c")
 target_include_directories(test_app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../components/dispenser_platform/include")
@@ -97,6 +99,9 @@ dsp_add_host_test(test_app_ops test_app_ops.c support/fake_kv.c)
 # M1.10b.2: manual dose with durable anti-replay (reuses the test_app_ops harness).
 dsp_add_host_test(test_manual test_manual.c support/fake_kv.c)
 target_compile_options(test_manual PRIVATE -Wno-unused-function)
+# Phase C: the event history through the Application Service (same harness).
+dsp_add_host_test(test_history_app test_history_app.c support/fake_kv.c)
+target_compile_options(test_history_app PRIVATE -Wno-unused-function)
 # M1.10b.3: credential record, RTC overlays, confirmation (pure) and ownership through the
 # Application Service (reuses the test_app_ops harness).
 dsp_add_host_test(test_auth test_auth.c)

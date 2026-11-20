@@ -211,6 +211,25 @@ LAYOUT(EV_SUSPEND_L, EV_SUSPEND_F);
 static const dsp_ble_field_t EV_CONFIRM_F[] = {F_ENUM(dsp_ble_ev_confirm_t, action, 1, 1), F_U8(dsp_ble_ev_confirm_t, seconds)};
 LAYOUT(EV_CONFIRM_L, EV_CONFIRM_F);
 
+static const dsp_ble_field_t HIST_ITEM_F[] = {
+    F_U32(dsp_ble_hist_item_t, seq), F_ENUM(dsp_ble_hist_item_t, type, 1, 5),
+    F_ENUM(dsp_ble_hist_item_t, result, 0, 4), F_MASK8(dsp_ble_hist_item_t, flags, 0x0Fu),
+    F_I64(dsp_ble_hist_item_t, at), F_U32(dsp_ble_hist_item_t, volume_ul),
+    F_U32(dsp_ble_hist_item_t, before_ul), F_U32(dsp_ble_hist_item_t, after_ul),
+    F_U32(dsp_ble_hist_item_t, capacity_ul), F_STR(dsp_ble_hist_item_t, schedule_id, DSP_BLES_ID, 0, 64),
+};
+LAYOUT(HIST_ITEM_L, HIST_ITEM_F);
+static const dsp_ble_field_t HIST_REQ_F[] = {
+    F_U32(dsp_ble_get_history_req_t, before_seq), F_ENUM(dsp_ble_get_history_req_t, max, 1, 4),
+};
+LAYOUT(HIST_REQ_L, HIST_REQ_F);
+static const dsp_ble_field_t HIST_RSP_F[] = {
+    F_U32(dsp_ble_get_history_rsp_t, newest_seq), F_U32(dsp_ble_get_history_rsp_t, oldest_seq),
+    F_MASK8(dsp_ble_get_history_rsp_t, flags, DSP_BLE_HISTORY_F_FAULTS),
+    F_LIST(dsp_ble_get_history_rsp_t, items, dsp_ble_hist_list_t, dsp_ble_hist_item_t, HIST_ITEM_L),
+};
+LAYOUT(HIST_RSP_L, HIST_RSP_F);
+
 typedef struct {
     uint8_t type;
     uint8_t cls;
@@ -248,6 +267,7 @@ static const type_entry_t TYPES[] = {
     {DSP_BLE_T_RECOVERY_CANCEL, EN, &EMPTY_L, &EMPTY_L, NULL},
     {DSP_BLE_T_FACTORY_RESET, EN, &FACTORY_L, &EMPTY_L, NULL},
     {DSP_BLE_T_END_SESSION, DSP_BLE_CLASS_EITHER, &EMPTY_L, &EMPTY_L, NULL},
+    {DSP_BLE_T_GET_HISTORY, EN, &HIST_REQ_L, &HIST_RSP_L, NULL},
     {DSP_BLE_T_EV_SESSION_CLOSING, EN, NULL, NULL, &EV_CLOSING_L},
     {DSP_BLE_T_EV_SUSPENDING_FOR_DOSE, EN, NULL, NULL, &EV_SUSPEND_L},
     {DSP_BLE_T_EV_BUSY, PL, NULL, NULL, &EMPTY_L},

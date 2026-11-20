@@ -75,6 +75,7 @@ typedef enum {
     DSP_BLE_T_RECOVERY_CANCEL = 0x74,
     DSP_BLE_T_FACTORY_RESET = 0x7D,
     DSP_BLE_T_END_SESSION = 0x7E,
+    DSP_BLE_T_GET_HISTORY = 0x90, /* Phase C: first type of the journal range 0x90-0x9F */
     DSP_BLE_T_EV_SESSION_CLOSING = 0x80,
     DSP_BLE_T_EV_SUSPENDING_FOR_DOSE = 0x81,
     DSP_BLE_T_EV_BUSY = 0x82,
@@ -291,6 +292,21 @@ typedef struct { uint8_t reason; uint16_t seconds_left; } dsp_ble_ev_session_clo
 typedef struct { uint16_t seconds_until; } dsp_ble_ev_suspending_t;
 typedef struct { uint8_t action, seconds; } dsp_ble_ev_confirm_t;
 typedef struct { uint8_t code; uint32_t detail, aux; } dsp_ble_error_body_t;
+typedef struct { uint32_t before_seq; uint8_t max; } dsp_ble_get_history_req_t;
+typedef struct {
+    uint32_t seq;
+    uint8_t type, result, flags;
+    int64_t at;
+    uint32_t volume_ul, before_ul, after_ul, capacity_ul;
+    dsp_ble_str_t schedule_id;
+} dsp_ble_hist_item_t;
+typedef struct { uint8_t n; dsp_ble_hist_item_t items[DSP_BLE_LIST_MAX]; } dsp_ble_hist_list_t;
+typedef struct {
+    uint32_t newest_seq, oldest_seq;
+    uint8_t flags; /* bit 0 FAULTS */
+    dsp_ble_hist_list_t items;
+} dsp_ble_get_history_rsp_t;
+#define DSP_BLE_HISTORY_F_FAULTS 0x01u
 
 typedef union {
     dsp_ble_hello_req_t hello_req;
@@ -328,6 +344,8 @@ typedef union {
     dsp_ble_ev_session_closing_t ev_session_closing;
     dsp_ble_ev_suspending_t ev_suspending;
     dsp_ble_ev_confirm_t ev_confirm;
+    dsp_ble_get_history_req_t get_history_req;
+    dsp_ble_get_history_rsp_t get_history_rsp;
     dsp_ble_error_body_t error;
 } dsp_ble_body_t;
 

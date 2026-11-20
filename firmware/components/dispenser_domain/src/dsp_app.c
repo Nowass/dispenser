@@ -89,6 +89,8 @@ static bool dose_due_now(dsp_app_t *app)
 static bool load(dsp_app_t *app)
 {
     const dsp_app_config_t *cfg = app->cfg;
+    /* Phase C: the event history is independent of the layout (never fails the load). */
+    (void)dsp_evlog_open(&app->evlog, cfg->kv);
     app->rep.open_status = dsp_storage_open(&app->st, cfg->kv, cfg->tz, true);
     if (app->rep.open_status != DSP_STORAGE_OK) {
         return false;
@@ -115,6 +117,8 @@ static bool load(dsp_app_t *app)
         return false;
     }
     dsp_dosing_set_admission_limit(&app->dosing, cfg->manual_decisions_per_day);
+    dsp_dosing_set_event_log(&app->dosing, app->evlog.open ? &app->evlog : NULL,
+                             cfg->event_pump_flags);
     dsp_time_service_t svc = {&app->tk, cfg->wifi, cfg->ntp, cfg->clock, &app->st, cfg->sntp_timeout_ms};
     app->time_svc = svc;
     dsp_connectivity_t conn = {&app->time_svc, &app->notify, cfg->https, &app->retained.conn,
@@ -318,7 +322,7 @@ static void link_snapshot(dsp_app_t *app, dsp_app_link_t *snap)
 
 /* ---- Frames and connections (M1.10c.1) ------------------------------------------------------ */
 
-#define DSP_APP_CAPS 0x02u /* PHONE_TIME; Wi-Fi provisioning, history, priming, viewer: not yet */
+#define DSP_APP_CAPS 0x06u /* PHONE_TIME, HISTORY (Phase C); Wi-Fi provisioning, priming, viewer: not yet */
 
 static void conn_end(dsp_app_t *app)
 {
@@ -948,6 +952,12 @@ dsp_app_op_result_t dsp_app_set_config(dsp_app_t *app, const dsp_app_auth_t *aut
          * ever cleared by a refill. */
         (void)dsp_dosing_observe_reservoir(&app->dosing, notify_clock(app));
     }
+    if (cur.reservoir_capacity_ul != next.reservoir_capacity_ul ||
+        cur.reservoir_remaining_ul != next.reservoir_remaining_ul) {
+        /* Phase C: after the durable save; the revision makes the key unique. */
+        dsp_dosing_log_reservoir(&app->dosing, &cur, &next, DSP_EVKEY_CONFIG | next.revision,
+                                 notify_clock(app));
+    }
     if (new_revision != NULL) {
         *new_revision = next.revision;
     }
@@ -1019,6 +1029,28 @@ dsp_app_op_result_t dsp_app_list_schedules(dsp_app_t *app, const dsp_app_auth_t 
         out->items[out->n].revision = set->schedules[i].revision;
         out->n++;
     }
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_get_history(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                        uint32_t before_seq, uint8_t max,
+                                        dsp_app_history_page_t *out)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL || max < 1 || max > DSP_APP_HISTORY_PAGE) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    memset(out, 0, sizeof *out);
+    if (!app->evlog.open) {
+        return op(DSP_OP_DEGRADED, 0, 0);
+    }
+    out->n = (uint8_t)dsp_evlog_read(&app->evlog, before_seq, out->items, max);
+    out->newest_seq = dsp_evlog_newest(&app->evlog);
+    out->oldest_seq = dsp_evlog_oldest(&app->evlog);
+    out->faults = app->evlog.faults != 0;
     return done(app, op(DSP_OP_OK, 0, 0));
 }
 

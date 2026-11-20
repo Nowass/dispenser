@@ -95,6 +95,54 @@ static bool report(dsp_dosing_t *d, uint16_t code, bool manual, uint32_t volume,
     return true;
 }
 
+/* ---- Phase C event history (informational; see dsp_evlog.h) ----------------------------- */
+
+void dsp_dosing_set_event_log(dsp_dosing_t *d, dsp_evlog_t *log, uint8_t pump_flags)
+{
+    if (d != NULL) {
+        d->log = log;
+        d->ev_pump_flags = (uint8_t)(pump_flags & (DSP_EVF_PUMP_SIMULATED | DSP_EVF_PUMP_BENCH_GPIO));
+    }
+}
+
+/* Appends a dose event AFTER its durable transition. The result is deliberately ignored: a
+ * failed append is counted by the log and must not influence any dosing decision. before/after
+ * NULL = reservoir values unknown. */
+static void log_dose(dsp_dosing_t *d, bool manual, uint8_t result, dsp_utc_t at, bool trusted,
+                     uint32_t volume, const uint32_t *before, const uint32_t *after,
+                     uint32_t capacity, uint64_t key, const char *schedule_id)
+{
+    if (d->log == NULL) {
+        return;
+    }
+    dsp_event_t e;
+    memset(&e, 0, sizeof e);
+    e.type = manual ? DSP_EV_DOSE_MANUAL : DSP_EV_DOSE_SCHEDULED;
+    e.result = result;
+    e.flags = d->ev_pump_flags | (trusted ? DSP_EVF_CLOCK_TRUSTED : 0u);
+    e.at = at;
+    e.volume_ul = volume;
+    if (before != NULL && after != NULL) {
+        e.before_ul = *before;
+        e.after_ul = *after;
+    } else {
+        e.flags |= DSP_EVF_RESERVOIR_UNKNOWN;
+    }
+    e.capacity_ul = capacity;
+    e.key = key;
+    if (!manual && schedule_id != NULL) {
+        memcpy(e.schedule_id, schedule_id, sizeof e.schedule_id);
+        e.schedule_id[sizeof e.schedule_id - 1] = '\0';
+    }
+    (void)dsp_evlog_append(d->log, &e, NULL);
+}
+
+static uint8_t pump_result(dsp_pump_result_t p)
+{
+    return p == DSP_PUMP_OK ? DSP_EVR_OK
+                            : p == DSP_PUMP_START_FAILED ? DSP_EVR_START_FAILED : DSP_EVR_PUMP_FAILED;
+}
+
 /* Gates that need neither the clock nor the configuration. */
 static uint32_t state_gates(const dsp_dosing_t *d)
 {
@@ -359,28 +407,41 @@ dsp_dosing_result_t dsp_dosing_run_automatic(dsp_dosing_t *d, const dsp_schedule
     next.ledger_date = ledger_date;
     next.ledger_sum_ul = ledger_sum;
     next.last_start_utc = clock.now;
+    uint32_t before = cfg.reservoir_remaining_ul;
     if (!save_state(d, &next)) {
-        if (report(d, DSP_DOSEERR_STORAGE, false, volume, key, nc)) {
-            (void)dsp_exec_finish(d->ex, &token, DSP_HISTORY_FAILED);
+        if (report(d, DSP_DOSEERR_STORAGE, false, volume, key, nc) &&
+            dsp_exec_finish(d->ex, &token, DSP_HISTORY_FAILED) == DSP_EXEC_OK) {
+            /* nothing consumed: the estimate is unchanged */
+            log_dose(d, false, DSP_EVR_ABORTED, clock.now, clock.valid, volume, &before, &before,
+                     cfg.reservoir_capacity_ul, key, schedule->id);
         } /* else: stays STARTED, the durable source for boot recovery */
         r.status = DSP_DOSING_ERR_STORAGE;
         return r;
     }
     /* 3. Durable consumption -> single-use permit (enables). */
     dsp_dose_permit_t permit;
-    if (dsp_reservoir_consume(d->st, volume, DSP_DOSE_AUTOMATIC, NULL, &permit) != DSP_STORAGE_OK) {
+    dsp_config_t after_cfg;
+    if (dsp_reservoir_consume(d->st, volume, DSP_DOSE_AUTOMATIC, &after_cfg, &permit) !=
+        DSP_STORAGE_OK) {
         d->degraded = true;
-        if (report(d, DSP_DOSEERR_STORAGE, false, volume, key, nc)) {
-            (void)dsp_exec_finish(d->ex, &token, DSP_HISTORY_FAILED);
+        if (report(d, DSP_DOSEERR_STORAGE, false, volume, key, nc) &&
+            dsp_exec_finish(d->ex, &token, DSP_HISTORY_FAILED) == DSP_EXEC_OK) {
+            /* the consumption may or may not have landed: reservoir unknown */
+            log_dose(d, false, DSP_EVR_ABORTED, clock.now, clock.valid, volume, NULL, NULL,
+                     cfg.reservoir_capacity_ul, key, schedule->id);
         } /* else: stays STARTED */
         r.status = DSP_DOSING_ERR_STORAGE;
         return r;
     }
+    uint32_t after = after_cfg.reservoir_remaining_ul;
     /* 4. Redeem the permit, then (and only then) the pump. */
     uint32_t permitted = 0;
     if (!dsp_dose_permit_take(&permit, &permitted) || permitted != volume) {
         d->degraded = true; /* cannot happen; never actuate on an inconsistent permit */
-        (void)dsp_exec_finish(d->ex, &token, DSP_HISTORY_FAILED);
+        if (dsp_exec_finish(d->ex, &token, DSP_HISTORY_FAILED) == DSP_EXEC_OK) {
+            log_dose(d, false, DSP_EVR_ABORTED, clock.now, clock.valid, volume, &before, &after,
+                     cfg.reservoir_capacity_ul, key, schedule->id);
+        }
         r.status = DSP_DOSING_ERR_STORAGE;
         return r;
     }
@@ -401,6 +462,9 @@ dsp_dosing_result_t dsp_dosing_run_automatic(dsp_dosing_t *d, const dsp_schedule
                                                                   : DSP_HISTORY_FAILED);
         if (fs != DSP_EXEC_OK) {
             d->degraded = true; /* stays STARTED: reported as interrupted at the next boot */
+        } else {
+            log_dose(d, false, pump_result(r.pump), clock.now, clock.valid, volume, &before, &after,
+                     cfg.reservoir_capacity_ul, key, schedule->id);
         }
     } /* else: the fault report is not durable; the record stays STARTED for recovery */
     (void)dsp_dosing_observe_reservoir(d, nc);
@@ -560,7 +624,9 @@ static dsp_dosing_result_t manual_execute(dsp_dosing_t *d, uint8_t slot, uint64_
     uint64_t key = dsp_dosing_key_manual(seq, clock.now, volume_ul);
     /* 2. Durable consumption -> permit. */
     dsp_dose_permit_t permit;
-    if (dsp_reservoir_consume(d->st, volume_ul, DSP_DOSE_MANUAL, NULL, &permit) != DSP_STORAGE_OK) {
+    dsp_config_t after_cfg;
+    if (dsp_reservoir_consume(d->st, volume_ul, DSP_DOSE_MANUAL, &after_cfg, &permit) !=
+        DSP_STORAGE_OK) {
         d->degraded = true;
         (void)report(d, DSP_DOSEERR_STORAGE, true, volume_ul, key, nc);
         (void)dsp_exec_finish(d->ex, &token, DSP_HISTORY_FAILED);
@@ -587,9 +653,14 @@ static dsp_dosing_result_t manual_execute(dsp_dosing_t *d, uint8_t slot, uint64_
      *    keyed; the request stays decided through manual_hw). */
     next = d->s; /* reused for write 3 (one state copy on the stack) */
     clear_marker(&next, r.pump == DSP_PUMP_OK ? DSP_MRES_DONE : DSP_MRES_FAILED);
-    if (reported) {
-        (void)save_state(d, &next);
-    } /* else: the fault report is not durable; the marker stays for recovery */
+    if (reported && save_state(d, &next)) {
+        /* Coverage was checked before the decision (remaining >= volume), so the consumption
+         * did not saturate and before = after + volume exactly. */
+        uint32_t after = after_cfg.reservoir_remaining_ul;
+        uint32_t before = after <= UINT32_MAX - volume_ul ? after + volume_ul : UINT32_MAX;
+        log_dose(d, true, pump_result(r.pump), clock.now, clock.valid, volume_ul, &before, &after,
+                 after_cfg.reservoir_capacity_ul, key, NULL);
+    } /* else: the fault report or write 3 is not durable; the marker stays for recovery */
     (void)dsp_exec_finish(d->ex, &token,
                           r.pump == DSP_PUMP_OK ? DSP_HISTORY_COMPLETED : DSP_HISTORY_FAILED);
     (void)dsp_dosing_observe_reservoir(d, nc);
@@ -727,6 +798,41 @@ dsp_manual_outcome_t dsp_dosing_manual_request(dsp_dosing_t *d, uint8_t slot, ui
 }
 
 /* R2..R4 of the refill (idempotent; dosing stays disabled until R4). */
+/* Phase C: the reservoir event of a completed refill, classified from the estimate before it
+ * (before == NULL: R3 had already landed before a power cut, so the old values are unknown). */
+void dsp_dosing_log_reservoir(dsp_dosing_t *d, const dsp_config_t *before,
+                              const dsp_config_t *target, uint64_t key, dsp_notify_clock_t clock)
+{
+    if (d == NULL || target == NULL) {
+        return;
+    }
+    if (d->log == NULL) {
+        return;
+    }
+    dsp_event_t e;
+    memset(&e, 0, sizeof e);
+    e.result = DSP_EVR_OK;
+    e.flags = clock.trusted ? DSP_EVF_CLOCK_TRUSTED : 0u;
+    e.at = clock.now >= DSP_UTC_MIN && clock.now <= DSP_UTC_MAX ? clock.now : 0; /* untrusted: flag clear */
+    e.capacity_ul = target->reservoir_capacity_ul;
+    e.after_ul = target->reservoir_remaining_ul;
+    if (before == NULL) {
+        e.type = DSP_EV_RESERVOIR_REFILL;
+        e.flags |= DSP_EVF_RESERVOIR_UNKNOWN;
+        e.after_ul = 0;
+    } else {
+        e.before_ul = before->reservoir_remaining_ul;
+        e.type = before->reservoir_capacity_ul == 0 ? DSP_EV_RESERVOIR_INIT
+                 : before->reservoir_capacity_ul != target->reservoir_capacity_ul
+                     ? DSP_EV_RESERVOIR_ADJUST
+                 : target->reservoir_remaining_ul > before->reservoir_remaining_ul
+                     ? DSP_EV_RESERVOIR_REFILL
+                     : DSP_EV_RESERVOIR_ADJUST;
+    }
+    e.key = key;
+    (void)dsp_evlog_append(d->log, &e, NULL);
+}
+
 static dsp_dosing_status_t roll_forward_refill(dsp_dosing_t *d, dsp_notify_clock_t clock)
 {
     dsp_config_t cfg;
@@ -734,6 +840,7 @@ static dsp_dosing_status_t roll_forward_refill(dsp_dosing_t *d, dsp_notify_clock
         d->degraded = true;
         return DSP_DOSING_ERR_STORAGE;
     }
+    const uint32_t refill_seq = d->s.refill_seq;
     dsp_config_t target = cfg;
     target.reservoir_capacity_ul = d->s.refill_capacity_ul;
     target.reservoir_remaining_ul = d->s.refill_remaining_ul;
@@ -743,8 +850,9 @@ static dsp_dosing_status_t roll_forward_refill(dsp_dosing_t *d, dsp_notify_clock
         return DSP_DOSING_ERR_STORAGE;
     }
     /* R3: the estimate (skipped if a previous attempt already stored it). */
-    if (cfg.reservoir_capacity_ul != target.reservoir_capacity_ul ||
-        cfg.reservoir_remaining_ul != target.reservoir_remaining_ul) {
+    const bool before_known = cfg.reservoir_capacity_ul != target.reservoir_capacity_ul ||
+                              cfg.reservoir_remaining_ul != target.reservoir_remaining_ul;
+    if (before_known) {
         if (dsp_reservoir_refill(d->st, target.reservoir_capacity_ul, target.reservoir_remaining_ul,
                                  NULL) != DSP_STORAGE_OK) {
             d->degraded = true;
@@ -757,7 +865,14 @@ static dsp_dosing_status_t roll_forward_refill(dsp_dosing_t *d, dsp_notify_clock
     next.refill_capacity_ul = 0;
     next.refill_remaining_ul = 0;
     next.refill_seq = 0;
-    return save_state(d, &next) ? DSP_DOSING_OK : DSP_DOSING_ERR_STORAGE;
+    if (!save_state(d, &next)) {
+        return DSP_DOSING_ERR_STORAGE;
+    }
+    /* After R4 (durable): the refill can no longer be rolled forward again, so it is logged
+     * exactly once (a power cut before this append loses the event, never duplicates it). */
+    dsp_dosing_log_reservoir(d, before_known ? &cfg : NULL, &target,
+                             DSP_EVKEY_REFILL | refill_seq, clock); /* refill intent seq: unique */
+    return DSP_DOSING_OK;
 }
 
 dsp_dosing_status_t dsp_dosing_refill(dsp_dosing_t *d, uint32_t capacity_ul,
@@ -830,6 +945,9 @@ dsp_dosing_status_t dsp_dosing_recover(dsp_dosing_t *d, dsp_notify_clock_t clock
             st = DSP_DOSING_ERR_STORAGE;
             goto done;
         }
+        /* Claimed with a trusted clock; whether the consumption landed is unknown. */
+        log_dose(d, false, DSP_EVR_INTERRUPTED, hr.claimed_at, true, hr.volume_ul, NULL, NULL, 0,
+                 dsp_dosing_key_automatic(&hr), hr.schedule_id);
         rec.automatic++;
         rec.duplicates += dup;
     }
@@ -847,10 +965,13 @@ dsp_dosing_status_t dsp_dosing_recover(dsp_dosing_t *d, dsp_notify_clock_t clock
         }
         dsp_dosing_state_t next = d->s;
         clear_marker(&next, DSP_MRES_INTERRUPTED); /* same write: ring entry INTERRUPTED */
+        const dsp_utc_t started = d->s.manual_started_at;
+        const uint32_t mvol = d->s.manual_volume_ul;
         if (!save_state(d, &next)) {
             st = DSP_DOSING_ERR_STORAGE;
             goto done;
         }
+        log_dose(d, true, DSP_EVR_INTERRUPTED, started, true, mvol, NULL, NULL, 0, key, NULL);
         rec.manual = 1;
         rec.duplicates += dup;
     }

@@ -221,6 +221,35 @@ void dsp_dispatch(dsp_app_t *app, const dsp_app_auth_t *auth, const dsp_ble_msg_
         }
         break;
     }
+    case DSP_BLE_T_GET_HISTORY: {
+        /* Phase C: read-only event history (the domain owns the page; the deduplication key
+         * stays on the device). */
+        dsp_app_history_page_t pg;
+        memset(&pg, 0, sizeof pg);
+        if (ok_or_error(rsp, dsp_app_get_history(app, auth, in->get_history_req.before_seq,
+                                                 in->get_history_req.max, &pg))) {
+            dsp_ble_get_history_rsp_t *h = &out->get_history_rsp;
+            h->newest_seq = pg.newest_seq;
+            h->oldest_seq = pg.oldest_seq;
+            h->flags = pg.faults ? DSP_BLE_HISTORY_F_FAULTS : 0u;
+            h->items.n = pg.n <= DSP_BLE_LIST_MAX ? pg.n : DSP_BLE_LIST_MAX;
+            for (uint8_t k = 0; k < h->items.n; k++) {
+                const dsp_event_t *e = &pg.items[k];
+                dsp_ble_hist_item_t *o = &h->items.items[k];
+                o->seq = e->seq;
+                o->type = e->type;
+                o->result = e->result;
+                o->flags = e->flags;
+                o->at = e->at;
+                o->volume_ul = e->volume_ul;
+                o->before_ul = e->before_ul;
+                o->after_ul = e->after_ul;
+                o->capacity_ul = e->capacity_ul;
+                str_out(&o->schedule_id, e->schedule_id, DSP_SCHEDULE_ID_MAX_LEN);
+            }
+        }
+        break;
+    }
     case DSP_BLE_T_GET_SCHEDULE: {
         char id[DSP_SCHEDULE_ID_MAX_LEN + 1];
         dsp_schedule_t s;

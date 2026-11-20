@@ -347,6 +347,7 @@ static void fs_gp_boot(void)
     dsp_pump_gpio_init(&fs_gp_drv, &FS_GP_HW, true, 60000u);
     dsp_pump_gpio_port(&fs_gp_drv, &fs_gp_drv_port);
     CFG.pump = &FS_GP_PUMP;
+    CFG.event_pump_flags = DSP_EVF_PUMP_BENCH_GPIO; /* the GPIO bench build's history marking */
 }
 
 static void *fs_app_task(void *arg)

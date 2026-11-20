@@ -41,6 +41,11 @@ SCHEDULE = [("id", "str", (1, 64, "id")), ("revision", "u32", None), ("enabled",
             ("weekday_mask", "mask8", 0x7F), ("has_end", "bool", None), ("end_date", "date", None),
             ("name", "str", (0, 32, "text"))]
 ERROR = [("code", "enum", tuple(range(1, 21))), ("detail", "u32", None), ("aux", "u32", None)]
+# GET_HISTORY event (section 7.6, Phase C)
+HIST_EVENT = [("seq", "u32", None), ("type", "enum", (1, 2, 3, 4, 5)), ("result", "enum", (0, 1, 2, 3, 4)),
+              ("flags", "mask8", 0x0F), ("at", "i64", None), ("volume_ul", "u32", None),
+              ("before_ul", "u32", None), ("after_ul", "u32", None), ("capacity_ul", "u32", None),
+              ("schedule_id", "str", (0, 64, "id"))]
 
 # type: (name, request_fields or None, response_fields or None, event_fields or None)
 TYPES = {
@@ -86,6 +91,9 @@ TYPES = {
     0x74: ("RECOVERY_CANCEL", [], [], None),
     0x7D: ("FACTORY_RESET", [("confirm", "const", 0x54455352)], [], None),
     0x7E: ("END_SESSION", [], [], None),
+    0x90: ("GET_HISTORY", [("before_seq", "u32", None), ("max", "enum", (1, 2, 3, 4))],
+           [("newest_seq", "u32", None), ("oldest_seq", "u32", None), ("flags", "mask8", 0x01),
+            ("items", "list", (4, HIST_EVENT))], None),
     0x80: ("EV_SESSION_CLOSING", None, None, [("reason", "enum", (1, 2, 3, 4)), ("seconds_left", "u16", None)]),
     0x81: ("EV_SUSPENDING_FOR_DOSE", None, None, [("seconds_until", "u16", None)]),
     0x82: ("EV_BUSY", None, None, []),
@@ -258,6 +266,19 @@ MSGS = [
     ("factory_reset_request", 0x7D, 0, 33, dict(confirm=0x54455352)),
     ("end_session_request", 0x7E, 0, 34, dict()),
     ("end_session_response", 0x7E, RESPONSE, 34, dict()),
+    ("get_history_request_newest", 0x90, 0, 35, dict(before_seq=0, max=4)),
+    ("get_history_request_page", 0x90, 0, 36, dict(before_seq=4294967295, max=1)),
+    ("get_history_response", 0x90, RESPONSE, 35, dict(newest_seq=137, oldest_seq=74, flags=0, items=[
+        dict(seq=137, type=1, result=0, flags=0x09, at=1795158000, volume_ul=5000, before_ul=100000,
+             after_ul=95000, capacity_ul=100000, schedule_id=b("3f2b8c1e-9d4a-4f6b-8e21-7a5c0d9e1f42")),
+        dict(seq=136, type=4, result=0, flags=0x00, at=1795100000, volume_ul=0, before_ul=20000,
+             after_ul=100000, capacity_ul=100000, schedule_id=[]),
+        dict(seq=135, type=2, result=3, flags=0x07, at=-1, volume_ul=4294967295, before_ul=0,
+             after_ul=0, capacity_ul=4294967295, schedule_id=[]),
+        dict(seq=4294967295, type=1, result=4, flags=0x05, at=0, volume_ul=1, before_ul=4294967295,
+             after_ul=4294967295, capacity_ul=0, schedule_id=b("x" * 64))])),
+    ("get_history_response_empty_faults", 0x90, RESPONSE, 37, dict(newest_seq=0, oldest_seq=0, flags=1, items=[])),
+    ("error_unavailable_history", 0x90, RESPONSE | ERRORF, 38, dict(code=20, detail=0, aux=0)),
     ("error_unauthenticated", 0x10, RESPONSE | ERRORF, 8, dict(code=4, detail=0, aux=0)),
     ("error_refused_gates", 0x40, RESPONSE | ERRORF, 12, dict(code=7, detail=0x0C, aux=0x10)),
     ("error_unsupported_version", 0x01, RESPONSE | ERRORF, 1, dict(code=2, detail=0x0101, aux=0)),
@@ -343,7 +364,19 @@ def bad_vectors():
     out.append(("event_with_response", frame(0x80, EVENT | RESPONSE, 0, b"\x02\x1e\x00").hex(), "bad_flags"))
     out.append(("event_flag_on_request_type", frame(0x10, EVENT, 0, b"").hex(), "bad_flags"))
     out.append(("unknown_type", frame(0x05, 0, 1, b"").hex(), "unknown_type"))
-    out.append(("reserved_journal_type", frame(0x90, 0, 1, b"").hex(), "unknown_type"))
+    out.append(("reserved_journal_type", frame(0x91, 0, 1, b"").hex(), "unknown_type"))
+    out.append(("history_max_0", frame(0x90, 0, 35, struct.pack("<IB", 0, 0)).hex(), "bad_enum"))
+    out.append(("history_max_5", frame(0x90, 0, 35, struct.pack("<IB", 0, 5)).hex(), "bad_enum"))
+    out.append(("history_request_truncated", frame(0x90, 0, 35, struct.pack("<I", 0)).hex(), "truncated"))
+    hist_ev = struct.pack("<IBBBqIIIIB", 1, 1, 0, 1, 1795158000, 5000, 1, 1, 1, 1) + b"a"
+    hist_head = struct.pack("<IIB", 1, 1, 0)
+    out.append(("history_type_0", frame(0x90, RESPONSE, 35, hist_head + b"\x01" + hist_ev[:4] + b"\x00" + hist_ev[5:]).hex(), "bad_enum"))
+    out.append(("history_type_6", frame(0x90, RESPONSE, 35, hist_head + b"\x01" + hist_ev[:4] + b"\x06" + hist_ev[5:]).hex(), "bad_enum"))
+    out.append(("history_result_5", frame(0x90, RESPONSE, 35, hist_head + b"\x01" + hist_ev[:5] + b"\x05" + hist_ev[6:]).hex(), "bad_enum"))
+    out.append(("history_event_flag_bit4", frame(0x90, RESPONSE, 35, hist_head + b"\x01" + hist_ev[:6] + b"\x10" + hist_ev[7:]).hex(), "bad_enum"))
+    out.append(("history_page_flag_bit1", frame(0x90, RESPONSE, 35, struct.pack("<IIB", 1, 1, 2) + b"\x01" + hist_ev).hex(), "bad_enum"))
+    out.append(("history_five_items", frame(0x90, RESPONSE, 35, hist_head + b"\x05" + hist_ev * 5).hex(), "bad_enum"))
+    out.append(("history_bad_schedule_id", frame(0x90, RESPONSE, 35, hist_head + b"\x01" + hist_ev[:-1] + b"/").hex(), "bad_string"))
     out.append(("event_type_as_request", frame(0x80, 0, 1, b"\x02\x1e\x00").hex(), "not_a_request"))
     out.append(("enroll_result_as_request", frame(0x08, 0, 1, b"\x00").hex(), "not_a_request"))
     out.append(("request_type_as_event", frame(0x10, EVENT, 0, sv).hex(), "bad_flags"))

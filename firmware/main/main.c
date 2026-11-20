@@ -320,8 +320,10 @@ static void app_runtime(void)
     s_cfg.pump = pump;
 #if CONFIG_DSP_PUMP_GPIO
     s_cfg.hw_max_runtime_ms = (uint32_t)CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS;
+    s_cfg.event_pump_flags = DSP_EVF_PUMP_BENCH_GPIO; /* history: control signal only, no liquid verified */
 #else
     s_cfg.hw_max_runtime_ms = (uint32_t)CONFIG_DSP_APP_SIM_HW_MAX_RUNTIME_MS;
+    s_cfg.event_pump_flags = DSP_EVF_PUMP_SIMULATED; /* history: nothing was actuated */
 #endif
     s_cfg.power = &s_power;
     s_cfg.clock = &s_clock;
