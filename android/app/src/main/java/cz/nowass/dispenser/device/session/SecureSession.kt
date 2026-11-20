@@ -521,7 +521,8 @@ class SecureSession private constructor(
             authenticated = true
             return slot
         } catch (e: StepFailed) {
-            if (!pending.staged) store.abort(pending)
+            // staged: the record stays for confirm/discard, but the in-memory key is wiped now
+            if (!pending.staged) store.abort(pending) else store.release(pending)
             throw e
         } catch (e: Exception) {
             if (!pending.staged) store.abort(pending) else store.release(pending)

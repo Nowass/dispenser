@@ -10,6 +10,13 @@ the phone or files) or **[WRITE]** (changes the phone, the board or creates secr
 any **STOP** condition and keep the evidence. Never print, paste, photograph or commit the setup
 label, `bench-secrets.json` or the `nvs_sec` images.
 
+**Flash images are secret.** Every image read from or written to the board (`nvs-*.bin`,
+`nvs_sec-*.bin`, `nvs_sec.bin`, readbacks) may hold the setup code, the device identity key or
+ownership and anti-replay state. Never upload them, or their contents or hex dumps, to GitHub
+(commits, issues, pull requests, gists, release assets, CI artifacts), public logs, pastebins,
+chats or cloud folders, and never attach them to a review package. Only their SHA-256 values may
+be shared.
+
 ## 0. State before starting [READ-ONLY]
 
 | Item | Expected |
@@ -97,7 +104,8 @@ python -m esptool --chip esp32c3 -p /dev/ttyACM0 read-flash 0x28000 0x6000  "$E/
 (cd "$E" && sha256sum *.bin > SHA256SUMS-before.txt && chmod 400 *.bin SHA256SUMS-before.txt)
 ```
 Expected: two files of 81,920 and 24,576 bytes. `nvs-before-claim.bin` holds the UNCLAIMED
-storage and allows restoring exactly this state later (section 10).
+storage and allows restoring exactly this state later (section 10). Both stay in `$E` (mode 700,
+files 400) on this PC only: **never** upload them to GitHub or any public log (see the top).
 
 ## 4. Write only `nvs_sec` [WRITE, board]
 
@@ -170,11 +178,22 @@ Expected: the enrollment finishes and the app switches to DEVICE mode.
 Into `$E` (owner-only): app screenshots of the steps and results, `serial.log`, `notes.txt` with the
 hashes from step 5, nRF Connect screenshots of the CLAIMED advertising, optionally
 `adb logcat -d --pid=$(adb shell pidof cz.nowass.dispenser.debug)` after checking it contains no
-label text. **Never** the label, `bench-secrets.json` or the `nvs_sec` images.
+label text. **Never** the label, `bench-secrets.json` or any flash image. When evidence is shared
+(for example with a reviewer), share only the screenshots, logs and notes after checking them, and
+the SHA-256 of the images, never the `.bin` files themselves.
 
 Only after the CLAIM **and** a SESSION have succeeded: `shred -u ~/.config/dispenser-device/bench/nvs_sec.bin ~/.config/dispenser-device/bench/nvs_sec.readback.bin`
 (the unencrypted images). Keep `bench-secrets.json` and `label.txt` owner-only until the bench work
 is finished: they are needed to CLAIM again after a recovery (section 10).
+
+**Limits of `shred`.** `shred` overwrites the file in place, which does not guarantee erasure on an
+SSD or other flash storage (wear levelling and over-provisioning keep old blocks), on journaling or
+copy-on-write filesystems (ext4 journal, btrfs, ZFS), or where snapshots, backups (Timeshift, Déjà
+Dup), swap or sync clients hold copies. Treat it as best effort only. The actual protections are:
+the credentials are synthetic and bench-only, the files live only in owner-only folders on an
+encrypted disk, and those folders are excluded from backups and sync. If the PC or its disk leaves
+the owner's control, treat the setup code as exposed and provision a new one before any further
+use of the board.
 
 ## 10. Recovery
 
@@ -182,8 +201,17 @@ is finished: they are needed to CLAIM again after a recovery (section 10).
   nothing (the key is created only after the HELLO checks) or reports a staged key; retry after
   RESET or confirm the staged key.
 - **Lost enrollment result (staged key on the phone):** RESET, confirm in the app. The phone stores
-  the key durably **before** sending message 3, so a device that accepted message 3 can always be
-  confirmed. Discard only if the confirmation reports NOTHING_STAGED.
+  the key durably **before** sending message 3, so a device that accepted message 3 can be
+  confirmed **as long as the staged record stays readable**. Discard only if the confirmation
+  reports NOTHING_STAGED.
+- **Staged recovery is not guaranteed after a storage or Keystore failure.** If staging itself
+  fails (storage full, write error, Keystore error), message 3 is never sent and the device stores
+  nothing: retry after RESET. If the staged record is lost or unreadable later (the Keystore key is
+  invalidated or deleted, app data are cleared or the app is uninstalled, a write is lost on power
+  failure, or the app reports the credential as lost or unreadable), the staged key **cannot** be
+  confirmed even though the device may have stored it. One new CLAIM attempt after RESET shows
+  which case applies: if it succeeds, the device had not stored the key; if the app reports that
+  the device is no longer unclaimed, continue with the next item.
 - **Board CLAIMED, phone without a credential** (Keystore failure after the CLAIM, app data cleared,
   or "Zapomenout zařízení", which is local only): RECOVERY is **not available on this board** (it
   needs the button driver, milestone M10; `recovery_hold_ms` is never set). Owner-approved bench

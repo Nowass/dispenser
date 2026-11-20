@@ -62,6 +62,8 @@ class SecureSessionTest {
 
     enum class Mode { NORMAL, PLAIN_AFTER_AUTH, TAMPER, DUPLICATE, SILENT, REQUEST_FROM_DEVICE }
     private var mode = Mode.NORMAL
+    /** PHONES_LIST reports the caller in this slot (confirming a staged enrollment); null: empty list. */
+    private var selfSlot: Int? = null
     private var helloError: Int? = null
     private var helloHash: ByteArray? = null
     private var hs: HandshakeInitiator? = null
@@ -99,7 +101,10 @@ class SecureSessionTest {
                 val plain = ciphers!!.decrypt(frame.copyOf(8), frame.copyOfRange(8, frame.size))
                 requests += t to plain.copyOf()
                 val type = f.header.type
-                val body = if (type == 0x70) byteArrayOf(0) else ByteArray(0) // PHONES_LIST: 0 items; others empty
+                val body = if (type == 0x70) {
+                    selfSlot?.let { BleProtocol.encodeBody(0x70, BleProtocol.F_RESPONSE, mapOf("items" to listOf(mapOf("slot" to it.toLong(),
+                        "name" to "P".toByteArray(), "enrolled_at" to 0L, "last_seen" to 0L, "is_self" to true)))) } ?: byteArrayOf(0)
+                } else ByteArray(0) // PHONES_LIST: 0 items unless [selfSlot]; others empty
                 when (mode) {
                     Mode.NORMAL -> listOf(enc(type, BleProtocol.F_RESPONSE, t, body))
                     Mode.DUPLICATE -> listOf(enc(type, BleProtocol.F_RESPONSE, t, body), enc(type, BleProtocol.F_RESPONSE, t, body))
@@ -411,5 +416,81 @@ class SecureSessionTest {
         assertEquals(1, hsMessages) // message 3 (which would enroll) was never sent
         assertEquals(cz.nowass.dispenser.crypto.credentials.CredentialState.Absent, store.loadPending(id))
         assertEquals(cz.nowass.dispenser.crypto.credentials.CredentialState.Absent, store.load(id))
+    }
+    // ---- staged CLAIM ended by an unexpected answer to message 3 ---------------------------------
+
+    /** Delegates to the real provider and keeps every phone key pair the store generates. */
+    private class RecordingNoise(private val d: NativeNoiseProvider) : cz.nowass.dispenser.crypto.NoiseProvider by d {
+        val generated = mutableListOf<cz.nowass.dispenser.crypto.StaticKeyPair>()
+        override fun generateStaticKeyPair() = d.generateStaticKeyPair().also { generated += it }
+    }
+
+    /** Unclaimed device for XXpsk3 CLAIM that answers message 3 with an encrypted frame of the wrong type. */
+    private fun claimPeerWrongResult(frame: ByteArray): List<ByteArray> {
+        val f = BleProtocol.decode(frame)
+        val t = f.header.txn
+        val unclaimed = SessionDerivation.unclaimedDeviceIdHash(ByteArray(6) { id.substring(2 * it, 2 * it + 2).toInt(16).toByte() })
+        return when (f.header.type) {
+            0x01 -> listOf(BleProtocol.encode(0x01, BleProtocol.F_RESPONSE, t, mapOf("proto" to 1, "claim_state" to 0, "flags" to 0,
+                "caps" to 0, "session_id" to sessionId, "device_id_hash" to unclaimed)))
+            0x02 -> when ((f.fields!!["msg_index"] as Number).toInt()) {
+                0 -> {
+                    hsMessages++
+                    val pro = SessionDerivation.prologue(1, 0, Purpose.CLAIM, unclaimed, sessionId)
+                    val psk = cz.nowass.dispenser.crypto.SecretBytes.wrap(setup.copyOf()).use { sc -> noise.derivePsk(Purpose.CLAIM, sc, null).use { it.copyBytes() } }
+                    val r = NativeNoiseTestHooks.handshake(true, false, pro, devPriv, null, psk, null)
+                    r.readMessage(f.fields!!["noise"] as ByteArray)
+                    hs = r
+                    listOf(BleProtocol.encode(0x02, BleProtocol.F_RESPONSE, t, mapOf("msg_index" to 1, "noise" to r.writeMessage())))
+                }
+                else -> {
+                    hsMessages++
+                    hs!!.readMessage(f.fields!!["noise"] as ByteArray)
+                    ciphers = hs!!.split()
+                    hs!!.close()
+                    hs = null
+                    // authenticated, well formed and on the right txn, but not ENROLL_RESULT (PHONES_LIST, 0 items)
+                    listOf(enc(0x70, BleProtocol.F_RESPONSE, t, byteArrayOf(0)))
+                }
+            }
+            else -> emptyList()
+        }
+    }
+
+    /**
+     * After staging, an encrypted answer to message 3 that is not ENROLL_RESULT fails the CLAIM with a
+     * protocol error. The in-memory phone private key is wiped, the staged record stays valid (the
+     * device may have stored the enrollment), and the staged enrollment can still be confirmed later.
+     */
+    @Test
+    fun unexpected_answer_to_message_3_after_staging_wipes_the_key_and_keeps_the_staged_record() = runTest {
+        val rec = RecordingNoise(noise)
+        val store = CredentialStore(tmp.newFolder(), FakeKeyWrapper(), rec)
+        val m = DeviceSessionManager(GattTransportFactory(fake, { BluetoothReadiness.Ready }, backgroundScope), noise, store, backgroundScope)
+        fake.device = ::claimPeerWrongResult
+        val label = (cz.nowass.dispenser.crypto.SetupLabel.parse(cz.nowass.dispenser.crypto.SetupLabel.format(id, setup))
+            as cz.nowass.dispenser.crypto.SetupLabel.Result.Ok).label
+        val r = label.use { m.open("A0:B1:C2:D3:E4:F5", OpenRequest.Claim(it, "P")) }
+        assertEquals(OpenResult.Failed(SessionFailure.ProtocolError("expected ENROLL_RESULT")), r)
+        assertEquals(2, hsMessages) // message 3 was sent: the key had been staged
+        val key = rec.generated.single()
+        assertTrue("phone private key still in memory", key.privateKey.isClosed)
+        // staged record intact: the same phone key and the device's static key, not confirmed
+        assertEquals(cz.nowass.dispenser.crypto.credentials.CredentialState.Absent, store.load(id))
+        val staged = store.loadPending(id) as cz.nowass.dispenser.crypto.credentials.CredentialState.Present
+        staged.credential.use {
+            assertTrue(it.phoneStaticPublic.contentEquals(key.publicKey))
+            assertTrue(it.deviceStaticPublic.contentEquals(device.publicKey))
+        }
+        assertEquals(listOf(id), store.stagedDevices())
+        // later: the device (now claimed) accepts the staged key over IK and confirmPending() commits it
+        fake.device = ::peer
+        selfSlot = 0
+        val c = m.open("A0:B1:C2:D3:E4:F5", OpenRequest.ConfirmStaged(id))
+        assertTrue("confirm: $c", c is OpenResult.Opened)
+        assertEquals(0, (c as OpenResult.Opened).enrolledSlot)
+        assertEquals(cz.nowass.dispenser.crypto.credentials.CredentialState.Absent, store.loadPending(id))
+        (store.load(id) as cz.nowass.dispenser.crypto.credentials.CredentialState.Present).credential.use { assertEquals(0, it.slot) }
+        (c.session).close("done")
     }
 }
