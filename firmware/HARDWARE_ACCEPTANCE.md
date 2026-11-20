@@ -484,7 +484,7 @@ matching debug APK:
 
 | # | Check | Expected | Result |
 |---|---|---|---|
-| E1 | First boot of the new image on the existing NVS | storage opens as layout v5 (no migration), schedules, ownership, reservoir and readiness unchanged; History tab: empty ("starší dávky se nezobrazují"), no invented events | |
+| E1 | First boot of the new image on the existing NVS | storage opens as layout v5 (no migration), schedules, ownership, reservoir and readiness unchanged; History tab shows exactly the events already in NVS (none invented) | **PASSED (owner-reported, 2026-11-20, firmware 0cbb830):** the owner reports the app connected and showing everything as expected. Not verified by the operator: the phone was not connected to the PC, so the installed APK's identity (expected `a3d5f790…afead`) and the screens were not checked independently. Expected content, decoded from the pre-flash `nvs` backup: NOT READY (SERVICE_REQUIRED); reservoir 487/500 ml; 10 schedules (enabled: Denni 10:17 daily, Nuli 17:17 daily, Bar 17:20 once); history seq 1 refill 17:14:55 (417 → 500 ml), seq 2 Nuli 8 ml 17:20:21 OK BENCH (500 → 492), seq 3 Bar 5 ml 17:20:29 OK BENCH (492 → 487); next seq ≥ 4 (`evhw` = 3) |
 | E2 | Refill / set capacity in the app (NOT READY) | one RESERVOIR_REFILL / INIT / ADJUST event with before → after | |
 | E3 | One new scheduled 5 ml dose (GPIO only, no load) | one 5 s pulse; one DOSE_SCHEDULED OK event tagged "BENCH: jen signál GPIO", estimate before → after − 5 ml | |
 | E4 | Reconnect, then a RESET of the board | the same events with the same order after both | |
