@@ -323,6 +323,10 @@ class AppContainer(private val context: Context) {
         phonesFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->
             { PhonesViewModel.factory { PhonesController(deviceUi(id).device) } }
         },
+        // BENCH ONLY: debug builds (bench_tools_enabled), DEVICE mode
+        benchPumpFactory = (mode as? ResolvedMode.Device)?.deviceId?.takeIf { DeviceFeatures.benchTools(context) }?.let { id ->
+            { cz.nowass.dispenser.ui.devices.BenchPumpViewModel.factory { cz.nowass.dispenser.data.onboarding.BenchPumpController(deviceUi(id).device) } }
+        },
     )
 
     /** Public GitHub Releases source (owner/repo from gradle.properties via resources; no credentials). */

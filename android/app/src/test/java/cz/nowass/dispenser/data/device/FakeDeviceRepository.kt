@@ -70,17 +70,25 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
     }
 
     private fun no(): Nothing = throw UnsupportedOperationException("not used by the shared-screen adapter")
-    override suspend fun refreshStatus(): OpResult<StatusRecord> = no()
+    // bench pump controller (debug tools): scripted outcomes, recorded calls
+    var statusOutcome: OpResult<StatusRecord>? = null
+    var configOutcome: OpResult<ConfigRecord>? = null
+    var setConfigOutcome: OpResult<Long> = OpResult.NotSent("not connected")
+    var readinessOutcome: OpResult<StatusRecord> = OpResult.NotSent("not connected")
+    var lastConfig: ConfigRecord? = null
+    override suspend fun refreshStatus(): OpResult<StatusRecord> = statusOutcome ?: no()
     override suspend fun refreshDiagnostics(): OpResult<DiagnosticsRecord> = no()
     override suspend fun ackRejections(): OpResult<Unit> = no()
-    override suspend fun refreshConfig(): OpResult<ConfigRecord> = no()
-    override suspend fun setConfig(expectedRevision: Long, mask: Int, values: ConfigRecord): OpResult<Long> = no()
+    override suspend fun refreshConfig(): OpResult<ConfigRecord> = configOutcome ?: no()
+    override suspend fun setConfig(expectedRevision: Long, mask: Int, values: ConfigRecord): OpResult<Long> {
+        calls += "setConfig $expectedRevision 0x${mask.toString(16)}"; lastConfig = values; return setConfigOutcome
+    }
     override suspend fun refreshSchedules(): OpResult<DeviceSchedules> = no()
     override suspend fun manualDose(volumeUl: Long): OpResult<ManualDoseRecord> = no()
     override suspend fun resendManualDose(journalId: Long): OpResult<ManualDoseRecord> = no()
     override suspend fun discardManualDose(journalId: Long): OpResult<Unit> = no()
     override suspend fun acknowledge(journalId: Long): OpResult<Unit> = no()
-    override suspend fun setReadiness(readiness: Readiness): OpResult<StatusRecord> = no()
+    override suspend fun setReadiness(readiness: Readiness): OpResult<StatusRecord> { calls += "readiness $readiness"; return readinessOutcome }
     override suspend fun setTime(): OpResult<TimeDecisionRecord> = no()
     override suspend fun refreshPhones(): OpResult<List<PhoneRecord>> = phonesOutcome
     override suspend fun removePhone(slot: Int): OpResult<Unit> { calls += "remove $slot"; return removeOutcome }

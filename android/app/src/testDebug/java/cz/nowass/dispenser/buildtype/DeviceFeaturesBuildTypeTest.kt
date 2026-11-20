@@ -16,4 +16,9 @@ class DeviceFeaturesBuildTypeTest {
     fun device_features_flag_of_this_build_type() {
         assertTrue("debug builds offer the BLE device features", DeviceFeatures.enabled(ApplicationProvider.getApplicationContext()))
     }
+
+    @Test
+    fun bench_tools_in_debug() {
+        assertTrue("debug builds offer the BENCH ONLY pump configuration", DeviceFeatures.benchTools(ApplicationProvider.getApplicationContext()))
+    }
 }

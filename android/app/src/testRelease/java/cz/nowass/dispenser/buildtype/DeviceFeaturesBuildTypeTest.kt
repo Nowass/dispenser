@@ -16,4 +16,9 @@ class DeviceFeaturesBuildTypeTest {
     fun device_features_flag_of_this_build_type() {
         assertFalse("release builds hide the BLE device features (v0.5.0-beta.2 decision A1)", DeviceFeatures.enabled(ApplicationProvider.getApplicationContext()))
     }
+
+    @Test
+    fun bench_tools_never_in_release() {
+        assertFalse("BENCH ONLY pump configuration is a debug-build tool", DeviceFeatures.benchTools(ApplicationProvider.getApplicationContext()))
+    }
 }

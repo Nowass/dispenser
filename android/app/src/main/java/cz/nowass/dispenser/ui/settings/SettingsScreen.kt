@@ -120,6 +120,8 @@ data class SettingsDeviceAdmin(
     /** DEVICE: the device's phone list / an invitation for another phone (null hides them). */
     val onPhones: (() -> Unit)? = null,
     val onInvite: (() -> Unit)? = null,
+    /** BENCH ONLY (debug builds): pump configuration and readiness (null hides it). */
+    val onBenchPump: (() -> Unit)? = null,
     /** The last "Forget device" outcome that needs attention (shown in either mode). */
     val forgetNotice: ForgetNotice? = null,
     val onDismissForgetNotice: () -> Unit = {},
@@ -350,6 +352,7 @@ fun SettingsScreen(
                             } else {
                                 deviceAdmin.onPhones?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_phones)) } }
                                 deviceAdmin.onInvite?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_invite)) } }
+                                deviceAdmin.onBenchPump?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_bench_pump)) } }
                             }
                             OutlinedButton(onClick = deviceAdmin.onSwitchToDemo, modifier = Modifier.fillMaxWidth()) {
                                 Text(stringResource(R.string.settings_device_switch_to_demo))

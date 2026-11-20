@@ -1457,6 +1457,20 @@ existing REFILL (`capacity_ul`, `remaining_ul`), with no protocol or firmware ch
   value; accepting 0 (and what it means for the BLOCKED latch) is a later firmware decision.
 - Not part of Phase A: pump configuration and readiness (Phase B), history readout (Phase C).
 
+## 16b. BENCH ONLY pump configuration (debug builds, 2026-11-20)
+
+For the bench bring-up of the GPIO pump control signal (firmware `CONFIG_DSP_PUMP_GPIO`), debug builds
+(`bench_tools_enabled`, false in release; tested per build type) offer Settings → "BENCH: nastavení
+pumpy" in DEVICE mode (`BenchPumpController`, `BenchPumpViewModel`):
+- reads Config and Status live; edits flow (µl/s), max dose and daily limit (µl), max runtime (ms,
+  ≤ the device's `hw_max_runtime_ms`), minimum interval (s) with local range checks (integers 1..u32,
+  daily ≥ dose); calibrated_at = the phone's time only with the explicit "bench calibration" box;
+- SET_CONFIG only in SERVICE_REQUIRED (refused locally while READY; the firmware refuses as well);
+- READY only through a confirmation dialog, never automatically (loading or saving never touch it);
+  a refusal shows the firmware's closed gates and pump problems (detail/aux of REFUSED); NOT READY
+  is one button;
+- existing journaling, uncertainty and read-back of SET_CONFIG / SET_READINESS unchanged.
+
 ## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
 
 Implemented and tested, uncommitted, awaiting the onboarding/security review. QR scanning and

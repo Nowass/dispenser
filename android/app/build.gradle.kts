@@ -133,9 +133,12 @@ android {
             // BLE device features (pairing, invitations, phones): debug only until hardware acceptance
             // (v0.5.0-beta.2 decision A1). Off: Settings keeps the disabled "coming later" placeholder.
             resValue("bool", "device_features_enabled", "true")
+            // BENCH ONLY tools (pump configuration and readiness for the GPIO bring-up): debug builds only.
+            resValue("bool", "bench_tools_enabled", "true")
         }
         release {
             resValue("bool", "device_features_enabled", "false")
+            resValue("bool", "bench_tools_enabled", "false")
             if (releaseSigning != null) signingConfig = signingConfigs.getByName("release")
             optimization {
                 enable = true

@@ -10,4 +10,7 @@ import android.content.Context
  */
 object DeviceFeatures {
     fun enabled(context: Context): Boolean = context.resources.getBoolean(R.bool.device_features_enabled)
+
+    /** BENCH ONLY tools (pump configuration/readiness for the GPIO bring-up): debug builds only, never release. */
+    fun benchTools(context: Context): Boolean = context.resources.getBoolean(R.bool.bench_tools_enabled)
 }
