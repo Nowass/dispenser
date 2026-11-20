@@ -285,6 +285,11 @@ dsp_dosing_status_t dsp_dosing_refill(dsp_dosing_t *d, uint32_t capacity_ul,
 dsp_dosing_status_t dsp_dosing_set_readiness(dsp_dosing_t *d, dsp_readiness_t readiness,
                                              uint32_t *gates, uint32_t *pump_problems);
 
+/* The gates (and pump problems) that would refuse READY now, as dsp_dosing_set_readiness() checks
+ * them (every gate except NOT_READY; the clock counts as trusted). 0 = READY would be accepted.
+ * Read-only (lets the Application Service persist the READY dosing floor only when needed). */
+uint32_t dsp_dosing_ready_gates(dsp_dosing_t *d, uint32_t *pump_problems);
+
 /* Re-observes the reservoir for the notification engine with the BLOCKED latch. */
 dsp_notify_status_t dsp_dosing_observe_reservoir(dsp_dosing_t *d, dsp_notify_clock_t clock);
 

@@ -1604,6 +1604,37 @@ dsp_app_op_result_t dsp_app_refill(dsp_app_t *app, const dsp_app_auth_t *auth,
     return done(app, r);
 }
 
+/*
+ * READY dosing floor (incident 2026-11-20, F1): entering READY must not release occurrences that
+ * fell due while the device was NOT READY (they are still inside their 10-minute due window and
+ * would run at once). Before READY is stored, the timekeeper's durable dosing floor
+ * (time.not_before_utc, the same floor a large forward clock step raises) becomes the transition
+ * instant + 1 s: every occurrence scheduled at or before the transition, including one in the same
+ * second or minute, is MISSED; later occurrences (also later the same day, and every following day)
+ * are unaffected. The floor is written, committed and read back BEFORE the readiness write, so a
+ * power loss can only leave NOT READY with a raised floor (harmless), never READY with an older
+ * floor. Without a trusted time no floor is needed: no automatic dose runs before the first
+ * trusted time, and that first trust raises the floor to the sync instant + 1 s. Manual doses and
+ * the per-schedule edit floors are not involved.
+ */
+static dsp_app_op_result_t ready_floor(dsp_app_t *app)
+{
+    dsp_utc_t base = floor_base(app);
+    if (base == 0 || base + 1 <= app->tk.meta.not_before_utc) {
+        return op(DSP_OP_OK, 0, 0);
+    }
+    dsp_time_meta_t m = app->tk.meta;
+    m.not_before_utc = base + 1; /* monotonic: never lowered */
+    write_used(app); /* a durable write of its own (the budget was checked by the caller) */
+    if (dsp_storage_save_time(&app->st, &m) != DSP_STORAGE_OK) {
+        storage_failed(app);
+        return op(DSP_OP_STORAGE, 0, 0); /* READY is not entered */
+    }
+    app->tk.meta = m; /* any pending timekeeper change was persisted with it */
+    app->tk.meta_dirty = false;
+    return op(DSP_OP_OK, 0, 0);
+}
+
 dsp_app_op_result_t dsp_app_set_readiness(dsp_app_t *app, const dsp_app_auth_t *auth,
                                           uint8_t readiness, dsp_ble_status_rec_t *status)
 {
@@ -1626,6 +1657,16 @@ dsp_app_op_result_t dsp_app_set_readiness(dsp_app_t *app, const dsp_app_auth_t *
     }
     uint32_t gates = 0, problems = 0;
     bool attempt = cur->readiness != readiness;
+    if (attempt && readiness == DSP_READINESS_READY &&
+        dsp_dosing_ready_gates(&app->dosing, &problems) == 0) {
+        dsp_app_op_result_t f = ready_floor(app);
+        if (f.status != DSP_OP_OK) {
+            if (status != NULL) {
+                build_status(app, auth->slot, status);
+            }
+            return done(app, f);
+        }
+    }
     dsp_dosing_status_t ds = dsp_dosing_set_readiness(&app->dosing, (dsp_readiness_t)readiness,
                                                       &gates, &problems);
     if (attempt && ds != DSP_DOSING_REFUSED) {

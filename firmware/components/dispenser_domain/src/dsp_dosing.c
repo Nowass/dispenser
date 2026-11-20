@@ -984,6 +984,11 @@ done:
     return st;
 }
 
+uint32_t dsp_dosing_ready_gates(dsp_dosing_t *d, uint32_t *pump_problems)
+{
+    return dsp_dosing_gates(d, true, pump_problems) & ~(uint32_t)DSP_DOSING_G_NOT_READY;
+}
+
 dsp_dosing_status_t dsp_dosing_set_readiness(dsp_dosing_t *d, dsp_readiness_t readiness,
                                              uint32_t *gates, uint32_t *pump_problems)
 {
@@ -999,7 +1004,7 @@ dsp_dosing_status_t dsp_dosing_set_readiness(dsp_dosing_t *d, dsp_readiness_t re
     }
     if (readiness == DSP_READINESS_READY) {
         /* Every gate except the clock (READY is a configuration state, not a time state). */
-        uint32_t g = dsp_dosing_gates(d, true, pump_problems) & ~(uint32_t)DSP_DOSING_G_NOT_READY;
+        uint32_t g = dsp_dosing_ready_gates(d, pump_problems);
         if (gates != NULL) {
             *gates = g;
         }
