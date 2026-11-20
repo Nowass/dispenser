@@ -1495,6 +1495,10 @@ claimed) are not events (they never started); see "Secondary diagnostics" below 
   events with an equal `seq` never hide each other) and resets its list when the device's newest
   `seq` drops below what it shows, so no event can disappear from the app; device-side paging stays
   consistent because the device never holds two events with the same `seq`.
+  **Decision (owner, 2026-11-20): R1 is ACCEPTED FOR BENCH TESTING ONLY** and remains an open
+  production-design consideration (options: a second copy of the bound, a log epoch in a later
+  protocol minor). The history is a best-effort user-facing record, not a complete audit trail;
+  the dosing anti-replay protection stays independent of it and unchanged.
 - **Persistence order (as implemented):** the transition (automatic: `dsp_exec_finish`; manual: the
   completion write that clears the marker; recovery: `dsp_exec_mark_interrupted` / the marker clear;
   refill: R4; SET_CONFIG: the config save) is durable first, then the reservation, then the event.
@@ -1533,12 +1537,25 @@ constant, `seq` strictly increasing across every reopen, 0.071 page erases per a
 (per page max 110). A full partition refuses only the write that does not fit; dosing safety does
 not depend on the log (see above). Not yet measured on the device's flash.
 
-Wear estimate (from those rates): a dose writes claim, dosing state, configuration and finish
-(about 23 NVS entries, ≈ 740 B); its event adds reservation + event (9 entries, ≈ 290 B), about
-+40 % flash bytes per dose (the earlier "under 10 %" estimate was wrong). At 3 doses and a reservoir
-change per day: ≈ 4 KB/day, about one page erase per day spread over 20 pages, i.e. ≈ 0.05 erases per
-page per day against the ESP32-C3 flash's 100,000-cycle rating: no practical endurance limit even
-with a 10× concentration. Retention: 64 events ≈ 3 weeks at three doses a day.
+Wear estimate. Measured: 0.071 page erases per history append (reservation + maximum-size event,
+check 2b), spread with a worst/mean page ratio of 1.54 (110 vs 71.4 erases). Estimated, not measured:
+the safety writes of one dose (claim, dosing state, configuration, finish: about 23 NVS entries,
+≈ 740 B) cost about 0.18 erases by the same bytes-per-erase rate, so a dose with its event ≈ 0.25
+erases, of which the history is ≈ 29 % (≈ +40 % flash bytes per dose; an earlier "under 10 %" was
+wrong). The partition has 20 pages; ESP32-C3 flash is rated for 100,000 erase cycles per sector.
+
+| Events per day (each a dose) | History only: erases/day (per page, worst page) | Dose + history: erases/day (per page, worst page) | Worst page per year (dose + history) |
+|---|---|---|---|
+| 1 | 0.071 (0.0035, 0.0055) | 0.25 (0.013, 0.019) | ≈ 7 |
+| 3 | 0.21 (0.011, 0.016) | 0.76 (0.038, 0.058) | ≈ 21 |
+| 10 | 0.71 (0.036, 0.055) | 2.5 (0.13, 0.19) | ≈ 71 |
+
+The earlier single figure "≈ 0.05 erases per page per day" assumed 3 doses and 1 reservoir change per
+day, counted dose and history writes together, and was the mean over the pages (3 × 0.25 + ≈ 0.15 ≈
+0.9 erases/day ÷ 20 pages). Not counted: wake writes outside doses (time metadata, notification state
+after a sync), which the history does not change. Even 10 doses a day leave the worst page at ≈ 71
+cycles per year (> 1,000 years to the rating): no material endurance concern.
+Retention: 64 events ≈ 3 weeks at three doses a day.
 
 ### Tests
 

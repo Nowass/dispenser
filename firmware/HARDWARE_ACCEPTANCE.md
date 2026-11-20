@@ -491,6 +491,48 @@ matching debug APK:
 | E5 | RESET during a pulse (same as G6) | after the reboot exactly one DOSE INTERRUPTED event, reservoir unknown; never repeated by further resets | |
 | E6 | "Načíst starší" after more than 12 events | older events appended, no duplicates, the end marker after the oldest | |
 
+**Decisions recorded 2026-11-20 (owner):** residual R1 of the event identity (all 64 event keys and
+`evhw` lost together → the log restarts at seq 1; firmware README "Event history (Phase C)") is
+ACCEPTED FOR BENCH TESTING ONLY and stays open for production. The history is a best-effort record,
+not an audit trail. The dosing anti-replay protection stays independent and unchanged. R5 stays NOT
+ACCEPTED (bench-only security deviation, 8a.2). This is not an authorization to flash or install.
+
+#### 8d.1 Proposed deployment procedure (requires separate approval; nothing done yet)
+
+Artifacts (source commit `ca282f1fca83e1aef1e34e45ebb3c56669e0b6b5`):
+`~/dispenser-hw-builds/ble-wifitime-gpio-phasec-ca282f1/dispenser.bin` 1,211,456 B, SHA-256
+`84d79e04e6fc1618386ba8cbed14a47b7f3e3e3e5b3f53ef4fcbc94b3c4fc2f3`;
+`~/dispenser-hw-builds/apk-debug-phasec-ca282f1/app-debug.apk` 18,143,267 B, SHA-256
+`4a2891b9a44bcf0280b0dc2863370f23388c6bbd070f0c421b1f53244f2e0f9f`.
+
+1. Preconditions: no pump, MOSFET or load on GPIO10 (analyzer optional); `pgrep -a openocd` empty;
+   no VS Code flash/debug session; `fuser /dev/ttyACM0` empty; the board currently runs 54a7925.
+2. Offline checks: `sha256sum -c IMAGES.sha256` in the build directory; `FIRMWARE-commit.txt` =
+   ca282f1; sdkconfig has GPIO10, 10,000 ms, ISR timer dispatch, task-watchdog panic;
+   `cmp` of the partition table with 54a7925's (identical).
+3. The owner presses RESET; the script waits for a stable port. Identity with `--after no-reset
+   flash-id`: ESP32-C3 rev v0.4, MAC e0:72:a1:1e:1f:34, 4 MB; stop on any difference.
+4. `verify-flash` that the board holds the db7e593 bootloader at 0x0, the partition table at 0x10000
+   and the 54a7925 application at 0x30000; stop otherwise.
+5. Private backups (owner-only directory `~/.config/dispenser-device/bench/backup-<date>-phasec/`,
+   mode 0400, SHA256SUMS): `nvs` 0x11000+0x14000, `nvs_sec` 0x28000+0x6000, `otadata` 0x25000+0x2000;
+   `nvs_sec` must equal the provisioned image. Never copied into the repository.
+6. The only write: `write-flash 0x30000 dispenser.bin` (`--after no-reset`); expect the erase range
+   0x00030000..0x00157fff and "Hash of data verified".
+7. Before the firmware runs: `verify-flash` of 0x30000; bootloader and table unchanged; `otadata`,
+   `nvs`, `nvs_sec` read back and byte-identical to the backups.
+8. Boot with a console capture (RTS pulse, 60 min); raw log private (contains the SSID), redacted
+   copy to `~/dispenser-hw-evidence/phasec-<date>/`. Expect the driver line of G7, layout v5 opened
+   without migration, no panic or watchdog line.
+9. APK: verify the SHA-256, then `adb install -r` (keeps the app data and the pairing; never
+   uninstall or clear data). If Android refuses for a signature mismatch: stop and report.
+10. Run E1–E6 (E3/E5: one new 5 ml schedule, READY set by the owner in the bench screen; E5 also is
+    G6). After the tests: NOT READY again in the bench screen.
+
+Rollback (also separately approved): write the 54a7925 application back at 0x30000 only, with the
+same verification. The new keys `ev00`…`ev63`/`evhw` stay in `nvs` and are ignored by 54a7925; no
+NVS write or erase is part of the rollback.
+
 ## 9. Configuration limits and storage (M1.10b.1)
 
 The firmware accepts every representable value of the calibration and safety fields (only
