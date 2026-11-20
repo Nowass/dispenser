@@ -31,7 +31,7 @@ class BenchPumpControllerTest {
     private val now = 1_795_200_000L
     private val cfg = ConfigRecord(7, 500_000, 300_000, 20, 24, 0, 0, 0, 0, 0, 0, 0, hwMaxRuntimeMs = 10_000)
     private val notReady = FakeDeviceRepository.status().copy(readiness = Readiness.SERVICE_REQUIRED, gates = (1L shl 2) or (1L shl 7), pumpProblems = 0x7F)
-    private val valid = BenchPumpForm("1000", "15000", "60000", "10000", "60", calibrateNow = true)
+    private val valid = BenchPumpForm("1000", "15", "60", "10000", "60", calibrateNow = true)
 
     private fun repo() = FakeDeviceRepository().apply {
         connectOutcome = ConnectOutcome.Connected(generation = 1, unresolved = 0)
@@ -45,13 +45,17 @@ class BenchPumpControllerTest {
         assertTrue(c.validate(valid, 10_000).isEmpty())
         assertEquals(BenchFieldError.ABOVE_HW_MAX, c.validate(valid.copy(maxRuntimeMs = "10001"), 10_000)[BenchField.MAX_RUNTIME])
         assertEquals(BenchFieldError.NO_HW_MAX, c.validate(valid, 0)[BenchField.MAX_RUNTIME]) // simulated pump at 0: nothing can run
-        assertEquals(BenchFieldError.DAILY_BELOW_DOSE, c.validate(valid.copy(maxDailyUl = "14999"), 10_000)[BenchField.MAX_DAILY])
+        assertEquals(BenchFieldError.DAILY_BELOW_DOSE, c.validate(valid.copy(maxDailyMl = "14,999"), 10_000)[BenchField.MAX_DAILY])
         assertEquals(BenchFieldError.NOT_POSITIVE, c.validate(valid.copy(flowUlPerS = "0"), 10_000)[BenchField.FLOW])
         assertEquals(BenchFieldError.MISSING, c.validate(valid.copy(minIntervalS = " "), 10_000)[BenchField.MIN_INTERVAL])
-        assertEquals(BenchFieldError.NOT_A_NUMBER, c.validate(valid.copy(maxDoseUl = "15,5"), 10_000)[BenchField.MAX_DOSE])
-        assertEquals(BenchFieldError.NOT_A_NUMBER, c.validate(valid.copy(maxDoseUl = "-1"), 10_000)[BenchField.MAX_DOSE])
+        assertTrue("ml with a decimal comma", c.validate(valid.copy(maxDoseMl = "15,5"), 10_000).isEmpty())
+        assertEquals(BenchFieldError.NOT_A_NUMBER, c.validate(valid.copy(maxDoseMl = "-1"), 10_000)[BenchField.MAX_DOSE])
+        assertEquals(BenchFieldError.NOT_A_NUMBER, c.validate(valid.copy(maxDoseMl = "15 ml"), 10_000)[BenchField.MAX_DOSE])
+        assertEquals(BenchFieldError.TOO_PRECISE, c.validate(valid.copy(maxDoseMl = "1,0005"), 10_000)[BenchField.MAX_DOSE])
+        assertEquals(BenchFieldError.NOT_POSITIVE, c.validate(valid.copy(maxDoseMl = "0"), 10_000)[BenchField.MAX_DOSE])
+        assertEquals(BenchFieldError.TOO_LARGE, c.validate(valid.copy(maxDailyMl = "4294968"), 10_000)[BenchField.MAX_DAILY]) // > u32 µl
         assertEquals(BenchFieldError.TOO_LARGE, c.validate(valid.copy(minIntervalS = "4294967296"), 10_000)[BenchField.MIN_INTERVAL])
-        assertTrue(c.validate(valid.copy(minIntervalS = "4294967295", maxDailyUl = "4294967295"), 10_000).isEmpty())
+        assertTrue(c.validate(valid.copy(minIntervalS = "4294967295", maxDailyMl = "4294967,295"), 10_000).isEmpty())
     }
 
     @Test
@@ -65,7 +69,7 @@ class BenchPumpControllerTest {
         assertEquals("setConfig 7 0x${(all or ConfigRecord.F_CALIBRATED_AT).toString(16)}", r.calls.last { it.startsWith("setConfig") })
         val sent = r.lastConfig!!
         assertEquals(1000L, sent.pumpFlowUlPerS)
-        assertEquals(15_000L, sent.maxDoseUl)
+        assertEquals("15 ml typed, 15,000 µl sent", 15_000L, sent.maxDoseUl)
         assertEquals(60_000L, sent.maxDailyUl)
         assertEquals(10_000L, sent.maxRuntimeMs)
         assertEquals(60L, sent.minIntervalS)

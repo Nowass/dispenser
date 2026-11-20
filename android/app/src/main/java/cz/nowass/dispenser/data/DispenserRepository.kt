@@ -111,6 +111,13 @@ sealed interface ScheduleWriteResult {
     /** The device refused the change ([code]: BLE_PROTOCOL.md 10.1); nothing changed. */
     data class DeviceRejected(val code: Int) : ScheduleWriteResult
 
+    /**
+     * The device refused the amount: above its configured maximum dose ([maxDoseUl]; LIMIT with
+     * DSP_DOSING_L_DOSE). Nothing changed. A genuine safety rule (such a dose could never run), shown
+     * with its reason instead of the generic refusal.
+     */
+    data class AboveMaxDose(val maxDoseUl: Long) : ScheduleWriteResult
+
     /** A device limit the phone checks before sending (name length, timezone, ranges); nothing was sent. */
     data class DeviceLimit(val problems: Set<String>) : ScheduleWriteResult
 }

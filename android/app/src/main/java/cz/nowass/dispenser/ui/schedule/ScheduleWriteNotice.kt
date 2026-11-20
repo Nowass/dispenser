@@ -15,6 +15,7 @@ enum class ScheduleWriteNotice(@param:StringRes val text: Int) {
     AWAITING_VERIFICATION(R.string.schedule_write_awaiting_verification),
     REJECTED(R.string.schedule_write_rejected),
     DEVICE_LIMIT(R.string.schedule_write_device_limit),
+    ABOVE_MAX_DOSE(R.string.schedule_write_above_max_dose),
     ;
 
     companion object {
@@ -25,6 +26,7 @@ enum class ScheduleWriteNotice(@param:StringRes val text: Int) {
             ScheduleWriteResult.AwaitingVerification -> AWAITING_VERIFICATION
             is ScheduleWriteResult.DeviceRejected -> REJECTED
             is ScheduleWriteResult.DeviceLimit -> DEVICE_LIMIT
+            is ScheduleWriteResult.AboveMaxDose -> ABOVE_MAX_DOSE
             is ScheduleWriteResult.Success, is ScheduleWriteResult.Invalid, ScheduleWriteResult.Conflict, ScheduleWriteResult.NotFound -> null
         }
     }

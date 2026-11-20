@@ -1462,14 +1462,23 @@ existing REFILL (`capacity_ul`, `remaining_ul`), with no protocol or firmware ch
 For the bench bring-up of the GPIO pump control signal (firmware `CONFIG_DSP_PUMP_GPIO`), debug builds
 (`bench_tools_enabled`, false in release; tested per build type) offer Settings → "BENCH: nastavení
 pumpy" in DEVICE mode (`BenchPumpController`, `BenchPumpViewModel`):
-- reads Config and Status live; edits flow (µl/s), max dose and daily limit (µl), max runtime (ms,
+- reads Config and Status live; edits flow (µl/s), max dose and daily limit (ml, ≤ 3 decimals; µl in
+  the first version invited a 1000× mistake, see below), max runtime (ms,
   ≤ the device's `hw_max_runtime_ms`), minimum interval (s) with local range checks (integers 1..u32,
   daily ≥ dose); calibrated_at = the phone's time only with the explicit "bench calibration" box;
 - SET_CONFIG only in SERVICE_REQUIRED (refused locally while READY; the firmware refuses as well);
 - READY only through a confirmation dialog, never automatically (loading or saving never touch it);
   a refusal shows the firmware's closed gates and pump problems (detail/aux of REFUSED); NOT READY
   is one button;
-- existing journaling, uncertainty and read-back of SET_CONFIG / SET_READINESS unchanged.
+- existing journaling, uncertainty and read-back of SET_CONFIG / SET_READINESS unchanged;
+- after a save, a warning counts the device schedules (as last read) above the new max dose.
+
+Schedule writes and the pump configuration (first GPIO bench session, 2026-11-20): NOT READY and an
+incomplete pump configuration never block CREATE/UPDATE_SCHEDULE (the firmware's schedule validation
+does not look at readiness, calibration or the hardware maximum). Its only pump-configuration rule is
+amount <= max_dose_ul when a max dose is set (LIMIT, detail DSP_DOSING_L_DOSE, aux = max dose): such a
+dose could never run. The app now shows that reason ("Množství je větší než maximální dávka…",
+`ScheduleWriteResult.AboveMaxDose`) instead of the generic "Zařízení změnu odmítlo".
 
 ## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
 

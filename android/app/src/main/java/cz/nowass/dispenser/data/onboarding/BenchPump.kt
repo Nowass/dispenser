@@ -9,6 +9,8 @@ import cz.nowass.dispenser.device.ops.LocalRefusal
 import cz.nowass.dispenser.device.ops.OpResult
 import cz.nowass.dispenser.device.ops.Readiness
 import cz.nowass.dispenser.device.ops.StatusRecord
+import cz.nowass.dispenser.domain.Volume
+import kotlinx.coroutines.flow.first
 
 /**
  * BENCH ONLY (debug builds): pump configuration and readiness of the connected device, for the
@@ -38,11 +40,11 @@ enum class BenchPumpProblem(val bit: Int) {
     }
 }
 
-/** Form fields, as typed (integers: µl/s, µl, ms, s). */
+/** Form fields, as typed: flow in µl/s, dose and daily limit in ml (≤ 3 decimals), runtime in ms, interval in s. */
 data class BenchPumpForm(
     val flowUlPerS: String,
-    val maxDoseUl: String,
-    val maxDailyUl: String,
+    val maxDoseMl: String,
+    val maxDailyMl: String,
     val maxRuntimeMs: String,
     val minIntervalS: String,
     /** Explicit bench calibration: sets calibrated_at to the phone's time now. */
@@ -51,7 +53,7 @@ data class BenchPumpForm(
 
 enum class BenchField { FLOW, MAX_DOSE, MAX_DAILY, MAX_RUNTIME, MIN_INTERVAL }
 
-enum class BenchFieldError { MISSING, NOT_A_NUMBER, NOT_POSITIVE, TOO_LARGE, ABOVE_HW_MAX, NO_HW_MAX, DAILY_BELOW_DOSE }
+enum class BenchFieldError { MISSING, NOT_A_NUMBER, NOT_POSITIVE, TOO_PRECISE, TOO_LARGE, ABOVE_HW_MAX, NO_HW_MAX, DAILY_BELOW_DOSE }
 
 data class BenchSnapshot(val config: ConfigRecord, val status: StatusRecord) {
     val ready: Boolean get() = status.readiness == Readiness.READY
@@ -60,7 +62,8 @@ data class BenchSnapshot(val config: ConfigRecord, val status: StatusRecord) {
 }
 
 sealed interface BenchOutcome {
-    data class Loaded(val snapshot: BenchSnapshot) : BenchOutcome
+    /** [schedulesAboveMaxDose]: device schedules (as last read) whose amount the max dose now refuses. */
+    data class Loaded(val snapshot: BenchSnapshot, val schedulesAboveMaxDose: Int = 0) : BenchOutcome
     /** Not connected / not reachable (nothing changed). */
     data object NotConnected : BenchOutcome
     /** Local validation failed: nothing sent. */
@@ -76,6 +79,8 @@ sealed interface BenchOutcome {
     /** An earlier change of the same kind awaits verification: nothing sent. */
     data object AwaitingVerification : BenchOutcome
 }
+
+private val ML = Regex("^[0-9]+([.,][0-9]+)?$")
 
 class BenchPumpController(private val repo: DeviceRepository, private val nowUtc: () -> Long = { System.currentTimeMillis() / 1000 }) {
 
@@ -99,9 +104,20 @@ class BenchPumpController(private val repo: DeviceRepository, private val nowUtc
             if (v > DeviceScheduleMapping.U32_MAX.toBigInteger()) { e[f] = BenchFieldError.TOO_LARGE; return null }
             return v.toLong()
         }
+        fun ml(f: BenchField, text: String): Long? {
+            val t = text.trim()
+            if (t.isEmpty()) { e[f] = BenchFieldError.MISSING; return null }
+            if (!ML.matches(t)) { e[f] = BenchFieldError.NOT_A_NUMBER; return null }
+            return when (val c = Volume.mlToMicrolitres(t.replace(',', '.').toDouble())) {
+                is Volume.Conversion.Ok -> if (c.microlitres > DeviceScheduleMapping.U32_MAX) { e[f] = BenchFieldError.TOO_LARGE; null } else c.microlitres
+                Volume.Conversion.NotPositive -> { e[f] = BenchFieldError.NOT_POSITIVE; null }
+                Volume.Conversion.TooPrecise -> { e[f] = BenchFieldError.TOO_PRECISE; null }
+                Volume.Conversion.NotFinite, Volume.Conversion.OutOfRange -> { e[f] = BenchFieldError.TOO_LARGE; null }
+            }
+        }
         num(BenchField.FLOW, form.flowUlPerS)
-        val dose = num(BenchField.MAX_DOSE, form.maxDoseUl)
-        val daily = num(BenchField.MAX_DAILY, form.maxDailyUl)
+        val dose = ml(BenchField.MAX_DOSE, form.maxDoseMl)
+        val daily = ml(BenchField.MAX_DAILY, form.maxDailyMl)
         val runtime = num(BenchField.MAX_RUNTIME, form.maxRuntimeMs)
         num(BenchField.MIN_INTERVAL, form.minIntervalS)
         if (runtime != null) {
@@ -125,17 +141,24 @@ class BenchPumpController(private val repo: DeviceRepository, private val nowUtc
         if (form.calibrateNow) mask = mask or ConfigRecord.F_CALIBRATED_AT
         val values = snapshot.config.copy(
             pumpFlowUlPerS = form.flowUlPerS.trim().toLong(),
-            maxDoseUl = form.maxDoseUl.trim().toLong(),
-            maxDailyUl = form.maxDailyUl.trim().toLong(),
+            maxDoseUl = microlitres(form.maxDoseMl),
+            maxDailyUl = microlitres(form.maxDailyMl),
             maxRuntimeMs = form.maxRuntimeMs.trim().toLong(),
             minIntervalS = form.minIntervalS.trim().toLong(),
             calibratedAt = if (form.calibrateNow) nowUtc() else snapshot.config.calibratedAt,
         )
         return when (val r = repo.setConfig(snapshot.config.revision, mask, values)) {
-            is OpResult.Ok -> load()
+            is OpResult.Ok -> when (val l = load()) {
+                // schedules the device keeps but now refuses at execution (amount > max dose): warn
+                is BenchOutcome.Loaded -> l.copy(schedulesAboveMaxDose = repo.schedules().first().valueOrNull
+                    ?.schedules?.count { it.record.amountUl > values.maxDoseUl } ?: 0)
+                else -> l
+            }
             else -> failure(r)
         }
     }
+
+    private fun microlitres(ml: String): Long = (Volume.mlToMicrolitres(ml.trim().replace(',', '.').toDouble()) as Volume.Conversion.Ok).microlitres
 
     /** READY / NOT READY, only on the user's explicit request; a refusal reports the closed gates. */
     suspend fun setReady(ready: Boolean): BenchOutcome =

@@ -147,6 +147,15 @@ class DeviceModeViewModelsTest {
         vm.save()
         assertEquals(ScheduleWriteNotice.AWAITING_VERIFICATION, (vm.uiState.value as ScheduleEditorUiState.Editing).notice)
 
+        // The device refuses the amount (LIMIT, DSP_DOSING_L_DOSE, aux = max dose): the specific reason,
+        // not the generic refusal; any other LIMIT stays the generic refusal.
+        fake.writeOutcome = OpResult.Rejected(cz.nowass.dispenser.device.ops.DeviceError(cz.nowass.dispenser.device.ops.DeviceErrorCode.LIMIT, 1, 15))
+        vm.save()
+        assertEquals(ScheduleWriteNotice.ABOVE_MAX_DOSE, (vm.uiState.value as ScheduleEditorUiState.Editing).notice)
+        fake.writeOutcome = OpResult.Rejected(cz.nowass.dispenser.device.ops.DeviceError(cz.nowass.dispenser.device.ops.DeviceErrorCode.LIMIT, 2, 0))
+        vm.save()
+        assertEquals(ScheduleWriteNotice.REJECTED, (vm.uiState.value as ScheduleEditorUiState.Editing).notice)
+
         // Uncertain: not a failure, not a conflict; the editor closes with the "verified later" result.
         fake.writeOutcome = OpResult.Uncertain("lost reply", journalId = 4)
         vm.save()

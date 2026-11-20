@@ -281,7 +281,7 @@ class ScheduleEditorViewModel(
             }
             // DEVICE mode, nothing changed on the device: the edit stays open with the reason.
             ScheduleWriteResult.NotSent, ScheduleWriteResult.AwaitingVerification,
-            is ScheduleWriteResult.DeviceRejected, is ScheduleWriteResult.DeviceLimit ->
+            is ScheduleWriteResult.DeviceRejected, is ScheduleWriteResult.DeviceLimit, is ScheduleWriteResult.AboveMaxDose ->
                 meta.update { it.copy(isSaving = false, notice = ScheduleWriteNotice.of(result)) }
         }
     }

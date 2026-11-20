@@ -130,8 +130,9 @@ class BenchPumpViewModel(private val controller: BenchPumpController) : ViewMode
         /** Current device values as the form's start (0 = unset is shown empty). */
         fun formOf(s: BenchSnapshot): BenchPumpForm {
             fun t(v: Long) = if (v > 0) v.toString() else ""
+            fun ml(v: Long) = if (v > 0) cz.nowass.dispenser.ui.Format.mlInput(cz.nowass.dispenser.domain.Volume.microlitresToMl(v)) else ""
             val c = s.config
-            return BenchPumpForm(t(c.pumpFlowUlPerS), t(c.maxDoseUl), t(c.maxDailyUl), t(c.maxRuntimeMs), t(c.minIntervalS), calibrateNow = false)
+            return BenchPumpForm(t(c.pumpFlowUlPerS), ml(c.maxDoseUl), ml(c.maxDailyUl), t(c.maxRuntimeMs), t(c.minIntervalS), calibrateNow = false)
         }
 
         fun factory(controller: () -> BenchPumpController): ViewModelProvider.Factory = viewModelFactory {
@@ -211,8 +212,8 @@ private fun FormCard(state: BenchPumpUiState, vm: BenchPumpViewModel) = Card(Mod
     val snap = state.snapshot!!
     Column(Modifier.padding(Spacing.m), verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
         BenchNumberField(stringResource(R.string.bench_flow), f.flowUlPerS, state.errors[BenchField.FLOW], snap) { vm.edit(f.copy(flowUlPerS = it)) }
-        BenchNumberField(stringResource(R.string.bench_max_dose), f.maxDoseUl, state.errors[BenchField.MAX_DOSE], snap) { vm.edit(f.copy(maxDoseUl = it)) }
-        BenchNumberField(stringResource(R.string.bench_max_daily), f.maxDailyUl, state.errors[BenchField.MAX_DAILY], snap) { vm.edit(f.copy(maxDailyUl = it)) }
+        BenchNumberField(stringResource(R.string.bench_max_dose), f.maxDoseMl, state.errors[BenchField.MAX_DOSE], snap, decimal = true) { vm.edit(f.copy(maxDoseMl = it)) }
+        BenchNumberField(stringResource(R.string.bench_max_daily), f.maxDailyMl, state.errors[BenchField.MAX_DAILY], snap, decimal = true) { vm.edit(f.copy(maxDailyMl = it)) }
         BenchNumberField(stringResource(R.string.bench_max_runtime), f.maxRuntimeMs, state.errors[BenchField.MAX_RUNTIME], snap) { vm.edit(f.copy(maxRuntimeMs = it)) }
         BenchNumberField(stringResource(R.string.bench_min_interval), f.minIntervalS, state.errors[BenchField.MIN_INTERVAL], snap) { vm.edit(f.copy(minIntervalS = it)) }
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -229,7 +230,7 @@ private fun FormCard(state: BenchPumpUiState, vm: BenchPumpViewModel) = Card(Mod
 }
 
 @Composable
-private fun BenchNumberField(label: String, value: String, error: BenchFieldError?, snap: BenchSnapshot, onChange: (String) -> Unit) {
+private fun BenchNumberField(label: String, value: String, error: BenchFieldError?, snap: BenchSnapshot, decimal: Boolean = false, onChange: (String) -> Unit) {
     var touched by remember { mutableStateOf(false) }
     OutlinedTextField(
         value = value,
@@ -238,7 +239,7 @@ private fun BenchNumberField(label: String, value: String, error: BenchFieldErro
         singleLine = true,
         isError = error != null && (touched || value.isNotEmpty()),
         supportingText = error?.let { e -> { Text(fieldError(e, snap.config.hwMaxRuntimeMs)) } },
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        keyboardOptions = KeyboardOptions(keyboardType = if (decimal) KeyboardType.Decimal else KeyboardType.Number),
         modifier = Modifier.fillMaxWidth(),
     )
 }
@@ -248,6 +249,7 @@ private fun fieldError(e: BenchFieldError, hwMax: Long): String = when (e) {
     BenchFieldError.MISSING -> stringResource(R.string.bench_err_missing)
     BenchFieldError.NOT_A_NUMBER -> stringResource(R.string.bench_err_number)
     BenchFieldError.NOT_POSITIVE -> stringResource(R.string.bench_err_positive)
+    BenchFieldError.TOO_PRECISE -> stringResource(R.string.editor_err_amount_precision)
     BenchFieldError.TOO_LARGE -> stringResource(R.string.bench_err_too_large)
     BenchFieldError.ABOVE_HW_MAX -> stringResource(R.string.bench_err_above_hw, hwMax)
     BenchFieldError.NO_HW_MAX -> stringResource(R.string.bench_err_no_hw)
@@ -286,7 +288,8 @@ private fun problemText(p: BenchPumpProblem): String = stringResource(
 @Composable
 private fun outcomeText(o: BenchOutcome?): String? = when (o) {
     null -> null
-    is BenchOutcome.Loaded -> stringResource(R.string.bench_out_done)
+    is BenchOutcome.Loaded -> stringResource(R.string.bench_out_done) +
+        (if (o.schedulesAboveMaxDose > 0) "\n" + stringResource(R.string.bench_out_schedules_above_max_dose, o.schedulesAboveMaxDose) else "")
     BenchOutcome.NotConnected -> stringResource(R.string.bench_not_connected)
     is BenchOutcome.Invalid -> stringResource(R.string.bench_out_invalid)
     BenchOutcome.MustBeNotReady -> stringResource(R.string.bench_save_needs_not_ready)

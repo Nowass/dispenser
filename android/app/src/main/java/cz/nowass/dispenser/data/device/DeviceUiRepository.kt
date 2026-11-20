@@ -181,6 +181,9 @@ class DeviceUiRepository(
         is OpResult.Rejected -> when (r.error.code) {
             DeviceErrorCode.CONFLICT -> ScheduleWriteResult.Conflict
             DeviceErrorCode.NOT_FOUND -> ScheduleWriteResult.NotFound
+            // LIMIT with DSP_DOSING_L_DOSE (bit 0): amount above the device's max_dose_ul (aux)
+            DeviceErrorCode.LIMIT -> if (r.error.detail and 1L != 0L) ScheduleWriteResult.AboveMaxDose(r.error.aux)
+                else ScheduleWriteResult.DeviceRejected(r.error.code.wire)
             else -> ScheduleWriteResult.DeviceRejected(r.error.code.wire)
         }
         is OpResult.Refused -> when (val reason = r.reason) {

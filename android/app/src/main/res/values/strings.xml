@@ -481,9 +481,9 @@
     <string name="bench_hw_max">Hardwarový limit doby běhu: %1$d ms</string>
     <string name="bench_gates_open">Všechny brány kromě hodin jsou otevřené.</string>
     <string name="bench_gates_closed">Brány, které brání dávkování:</string>
-    <string name="bench_flow">Průtok (µl/s)</string>
-    <string name="bench_max_dose">Max. dávka (µl)</string>
-    <string name="bench_max_daily">Denní limit (µl)</string>
+    <string name="bench_flow">Průtok (µl/s; 1000 = 1 ml/s)</string>
+    <string name="bench_max_dose">Max. dávka (ml)</string>
+    <string name="bench_max_daily">Denní limit (ml)</string>
     <string name="bench_max_runtime">Max. doba běhu (ms)</string>
     <string name="bench_min_interval">Min. interval mezi dávkami (s)</string>
     <string name="bench_calibrate_now">Bench kalibrace: označit jako kalibrováno nyní</string>
@@ -519,6 +519,7 @@
     <string name="bench_problem_min_interval">chybí min. interval</string>
     <string name="bench_problem_hw_limit">max. doba běhu je nad hardwarovým limitem (nebo limit chybí)</string>
     <string name="bench_out_done">Potvrzeno zařízením.</string>
+    <string name="bench_out_schedules_above_max_dose">Pozor – rozvrhy s větším množstvím než nová max. dávka: %1$d. Zařízení je neprovede a jejich úpravy odmítne, dokud max. dávku nezvýšíte nebo množství nesnížíte.</string>
     <string name="bench_out_invalid">Opravte zvýrazněné hodnoty. Nic nebylo odesláno.</string>
     <string name="bench_out_ready_refused">Zařízení READY odmítlo:</string>
     <string name="bench_out_rejected">Zařízení odmítlo (kód %1$d, detail %2$d). Nic se nezměnilo.</string>
@@ -530,6 +531,7 @@
     <string name="schedule_write_uncertain">Nepodařilo se ověřit, zda zařízení změnu přijalo. Ověří se při příštím připojení – změnu neopakujte.</string>
     <string name="schedule_write_awaiting_verification">Předchozí změna tohoto rozvrhu se ještě zpracovává nebo čeká na ověření. Nic nebylo odesláno.</string>
     <string name="schedule_write_rejected">Zařízení změnu odmítlo. Nic se nezměnilo.</string>
+    <string name="schedule_write_above_max_dose">Množství je větší než maximální dávka nastavená v zařízení. Snižte množství, nebo zvyšte max. dávku (BENCH nastavení pumpy). Nic se nezměnilo.</string>
     <string name="schedule_write_device_limit">Rozvrh překračuje limity zařízení (název, časové pásmo nebo rozsah). Nic nebylo odesláno.</string>
     <string name="editor_needs_connection">Uložení vyžaduje připojené zařízení</string>
     <string name="editor_saved_device_snackbar">Uloženo a potvrzeno zařízením</string>

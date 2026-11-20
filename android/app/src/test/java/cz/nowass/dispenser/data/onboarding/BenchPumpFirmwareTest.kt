@@ -88,7 +88,7 @@ class BenchPumpFirmwareTest {
         assertTrue("claim: $r", r is OpenResult.Opened)
     }
 
-    private val form = BenchPumpForm("1000", "15000", "60000", "20000", "60", calibrateNow = true)
+    private val form = BenchPumpForm("1000", "15", "60", "20000", "60", calibrateNow = true)
 
     @Test
     fun configure_then_ready_then_locked_then_not_ready() = runBlocking {
@@ -130,6 +130,48 @@ class BenchPumpFirmwareTest {
 
         snap = (c.setReady(false) as BenchOutcome.Loaded).snapshot
         assertEquals(Readiness.SERVICE_REQUIRED, snap.status.readiness)
+    }
+
+    /**
+     * Regression of the first GPIO bench session (2026-11-20): schedules could be created and edited
+     * before the bench pump configuration, and were refused afterwards with the generic "Zařízení změnu
+     * odmítlo". NOT READY and an incomplete pump configuration never block schedule writes; the only
+     * pump-configuration rule in schedule validation is amount <= max_dose_ul (firmware check_input,
+     * LIMIT, detail = DSP_DOSING_L_DOSE, aux = max_dose_ul). A max dose typed as "15" in the µl field
+     * (meant: 15 ml) refuses every schedule above 15 µl.
+     */
+    @Test
+    fun schedule_writes_in_not_ready_and_the_max_dose_rule() = runBlocking {
+        claimed()
+        val c = BenchPumpController(repo) { now }
+        var snap = (c.load() as BenchOutcome.Loaded).snapshot
+        if (snap.ready) snap = (c.setReady(false) as BenchOutcome.Loaded).snapshot
+        val draft = cz.nowass.dispenser.domain.ScheduleDraft("Ranní", 15.0, java.time.LocalDate.of(2027, 1, 4),
+            java.time.LocalTime.of(8, 0), cz.nowass.dispenser.domain.RecurrenceKind.DAILY)
+        // NOT READY, pump configuration incomplete: schedules are configurable
+        val created = repo.createSchedule(draft)
+        assertTrue("$created", created is OpResult.Ok)
+        val id = (created as OpResult.Ok).value.id
+        val rev = created.value.revision!!
+        assertTrue(repo.refreshSchedules() is OpResult.Ok) // the schedule list the warning is based on
+        // max dose 15 µl (the unit mistake of the session; the form now takes ml: 0,015 ml): saved with
+        // a warning that the existing 15 ml schedule is now refused ...
+        val saved = c.save(snap, form.copy(maxDoseMl = "0,015", maxDailyMl = "0,06")) as BenchOutcome.Loaded
+        snap = saved.snapshot
+        assertEquals(15L, snap.config.maxDoseUl)
+        assertEquals(1, saved.schedulesAboveMaxDose)
+        val again = repo.createSchedule(draft.copy(name = "Druhý"))
+        assertTrue("$again", again is OpResult.Rejected && again.error.code == DeviceErrorCode.LIMIT &&
+            again.error.detail == 1L && again.error.aux == 15L)
+        val edit = repo.updateSchedule(id, rev, draft.copy(amountMl = 16.0))
+        assertTrue("$edit", edit is OpResult.Rejected && edit.error.code == DeviceErrorCode.LIMIT)
+        // ... and the screens show the reason, not the generic refusal
+        val ui = cz.nowass.dispenser.data.device.DeviceUiRepository(repo, java.time.Clock.systemUTC(), clockTick = null)
+        assertEquals(cz.nowass.dispenser.data.ScheduleWriteResult.AboveMaxDose(15), ui.createSchedule(draft.copy(name = "Čtvrtý")))
+        // max dose 15 ml (15,000 µl): the 15 ml schedule is accepted (amount <= max dose)
+        snap = (c.save(snap, form.copy(maxDoseMl = "15", maxDailyMl = "60")) as BenchOutcome.Loaded).snapshot
+        assertTrue(repo.createSchedule(draft.copy(name = "Třetí")) is OpResult.Ok)
+        assertEquals("never READY", Readiness.SERVICE_REQUIRED, snap.status.readiness)
     }
 
     @Test
