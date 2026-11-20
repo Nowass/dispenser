@@ -63,6 +63,8 @@ import kotlinx.coroutines.launch
 const val BENCH_PUMP_SAVE_TEST_TAG = "bench_pump_save"
 const val BENCH_PUMP_READY_TEST_TAG = "bench_pump_ready"
 const val BENCH_PUMP_NOT_READY_TEST_TAG = "bench_pump_not_ready"
+const val BENCH_PUMP_READINESS_TEST_TAG = "bench_pump_readiness"
+const val BENCH_PUMP_CONNECTION_TEST_TAG = "bench_pump_connection"
 
 data class BenchPumpUiState(
     val loading: Boolean = true,
@@ -74,6 +76,14 @@ data class BenchPumpUiState(
     val busy: Boolean = false,
     /** The READY confirmation dialog is shown (READY is never sent without it). */
     val confirmReady: Boolean = false,
+    /**
+     * The last readiness change got no verifiable answer (Uncertain): the readiness shown in the
+     * snapshot is NOT verified. Resolved by reading the device status at the next authenticated
+     * connection (never by repeating the command).
+     */
+    val readinessUnverified: Boolean = false,
+    /** An authenticated session with this device is up (shown apart from the readiness). */
+    val connected: Boolean = false,
 )
 
 /** BENCH ONLY (debug builds): pump configuration and readiness; see [BenchPumpController]. */
@@ -81,7 +91,18 @@ class BenchPumpViewModel(private val controller: BenchPumpController) : ViewMode
     private val _state = MutableStateFlow(BenchPumpUiState())
     val state: StateFlow<BenchPumpUiState> = _state.asStateFlow()
 
-    init { load() }
+    init {
+        load()
+        viewModelScope.launch {
+            var was = false
+            controller.connected.collect { up ->
+                _state.update { it.copy(connected = up) }
+                // a new authenticated connection resolves an unverified readiness by a READ (status)
+                if (up && !was && _state.value.readinessUnverified && !_state.value.busy) load()
+                was = up
+            }
+        }
+    }
 
     fun load() = act { controller.load() }
 
@@ -101,10 +122,10 @@ class BenchPumpViewModel(private val controller: BenchPumpController) : ViewMode
     fun cancelReady() = _state.update { it.copy(confirmReady = false) }
     fun confirmReady() {
         _state.update { it.copy(confirmReady = false) }
-        act { controller.setReady(true) }
+        act { controller.setReady(true, _state.value.snapshot) }
     }
 
-    fun setNotReady() = act { controller.setReady(false) }
+    fun setNotReady() = act { controller.setReady(false, _state.value.snapshot) }
 
     private fun act(block: suspend () -> BenchOutcome) {
         _state.update { it.copy(busy = true) }
@@ -115,12 +136,16 @@ class BenchPumpViewModel(private val controller: BenchPumpController) : ViewMode
                     is BenchOutcome.Loaded -> {
                         val first = s.snapshot == null
                         val form = if (first) formOf(r.snapshot) else s.form
+                        // a device-confirmed status (read, or carried by the answer) is verified
                         s.copy(loading = false, busy = false, snapshot = r.snapshot, form = form,
                             errors = controller.validate(form, r.snapshot.config.hwMaxRuntimeMs),
-                            outcome = if (first) null else r)
+                            outcome = if (first && !r.reloadFailed) null else r, readinessUnverified = false)
                     }
+                    is BenchOutcome.ReadinessConfirmedOnly -> s.copy(loading = false, busy = false, outcome = r,
+                        snapshot = s.snapshot?.let { BenchSnapshot(it.config, r.status) }, readinessUnverified = false)
                     else -> s.copy(loading = false, busy = false, outcome = r,
-                        errors = if (r is BenchOutcome.Invalid) r.errors else s.errors)
+                        errors = if (r is BenchOutcome.Invalid) r.errors else s.errors,
+                        readinessUnverified = s.readinessUnverified || r == BenchOutcome.Uncertain)
                 }
             }
         }
@@ -163,9 +188,9 @@ fun BenchPumpRoute(viewModel: BenchPumpViewModel, onBack: () -> Unit) {
                 Text(outcomeText(state.outcome) ?: stringResource(R.string.bench_not_connected))
                 OutlinedButton(onClick = viewModel::load, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.bench_reload)) }
             } else {
-                StatusCard(snap)
+                StatusCard(snap, state)
                 FormCard(state, viewModel)
-                if (snap.ready) {
+                if (snap.ready || state.readinessUnverified) { // unverified: only the safe direction
                     OutlinedButton(onClick = viewModel::setNotReady, enabled = !state.busy, modifier = Modifier.fillMaxWidth().testTag(BENCH_PUMP_NOT_READY_TEST_TAG)) {
                         Text(stringResource(R.string.bench_set_not_ready))
                     }
@@ -191,9 +216,23 @@ fun BenchPumpRoute(viewModel: BenchPumpViewModel, onBack: () -> Unit) {
 }
 
 @Composable
-private fun StatusCard(s: BenchSnapshot) = Card(Modifier.fillMaxWidth()) {
+private fun StatusCard(s: BenchSnapshot, state: BenchPumpUiState) = Card(Modifier.fillMaxWidth()) {
     Column(Modifier.padding(Spacing.m), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-        Text(stringResource(if (s.ready) R.string.bench_state_ready else R.string.bench_state_not_ready), style = MaterialTheme.typography.titleMedium)
+        Text(
+            stringResource(
+                when {
+                    state.readinessUnverified -> R.string.bench_state_unverified
+                    s.ready -> R.string.bench_state_ready
+                    else -> R.string.bench_state_not_ready
+                },
+            ),
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.testTag(BENCH_PUMP_READINESS_TEST_TAG),
+        )
+        Text(
+            stringResource(if (state.connected) R.string.bench_conn_up else R.string.bench_conn_down),
+            modifier = Modifier.testTag(BENCH_PUMP_CONNECTION_TEST_TAG),
+        )
         Text(stringResource(R.string.bench_hw_max, s.config.hwMaxRuntimeMs))
         val gates = s.gates.filter { it != BenchGate.NOT_READY }
         if (gates.isEmpty() && s.problems.isEmpty()) {
@@ -216,6 +255,7 @@ private fun FormCard(state: BenchPumpUiState, vm: BenchPumpViewModel) = Card(Mod
         BenchNumberField(stringResource(R.string.bench_max_daily), f.maxDailyMl, state.errors[BenchField.MAX_DAILY], snap, decimal = true) { vm.edit(f.copy(maxDailyMl = it)) }
         BenchNumberField(stringResource(R.string.bench_max_runtime), f.maxRuntimeMs, state.errors[BenchField.MAX_RUNTIME], snap) { vm.edit(f.copy(maxRuntimeMs = it)) }
         BenchNumberField(stringResource(R.string.bench_min_interval), f.minIntervalS, state.errors[BenchField.MIN_INTERVAL], snap) { vm.edit(f.copy(minIntervalS = it)) }
+        Text(stringResource(R.string.bench_min_interval_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = f.calibrateNow, onCheckedChange = { vm.edit(f.copy(calibrateNow = it)) })
             Text(stringResource(if (snap.config.calibratedAt > 0) R.string.bench_calibrate_again else R.string.bench_calibrate_now))
@@ -288,7 +328,7 @@ private fun problemText(p: BenchPumpProblem): String = stringResource(
 @Composable
 private fun outcomeText(o: BenchOutcome?): String? = when (o) {
     null -> null
-    is BenchOutcome.Loaded -> stringResource(R.string.bench_out_done) +
+    is BenchOutcome.Loaded -> stringResource(if (o.reloadFailed) R.string.bench_out_done_disconnected else R.string.bench_out_done) +
         (if (o.schedulesAboveMaxDose > 0) "\n" + stringResource(R.string.bench_out_schedules_above_max_dose, o.schedulesAboveMaxDose) else "")
     BenchOutcome.NotConnected -> stringResource(R.string.bench_not_connected)
     is BenchOutcome.Invalid -> stringResource(R.string.bench_out_invalid)
@@ -298,4 +338,5 @@ private fun outcomeText(o: BenchOutcome?): String? = when (o) {
     is BenchOutcome.Rejected -> stringResource(R.string.bench_out_rejected, o.code, o.detail)
     BenchOutcome.Uncertain -> stringResource(R.string.bench_out_uncertain)
     BenchOutcome.AwaitingVerification -> stringResource(R.string.bench_out_awaiting)
+    is BenchOutcome.ReadinessConfirmedOnly -> stringResource(R.string.bench_out_done_disconnected)
 }

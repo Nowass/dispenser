@@ -507,6 +507,10 @@
     <string name="bench_reload">Načíst znovu ze zařízení</string>
     <string name="bench_state_ready">Stav: READY (plánované dávky povoleny)</string>
     <string name="bench_state_not_ready">Stav: NOT READY (SERVICE_REQUIRED)</string>
+    <string name="bench_state_unverified">Stav: NEOVĚŘENO – výsledek posledního přepnutí zařízení nepotvrdilo. Ověří se čtením při příštím připojení; příkaz se neopakuje. Zařízení může být READY.</string>
+    <string name="bench_conn_up">Spojení: připojeno</string>
+    <string name="bench_conn_down">Spojení: nepřipojeno (zařízení může dávkovat s pozastaveným BLE nebo spát)</string>
+    <string name="bench_out_done_disconnected">Potvrzeno zařízením. Spojení se poté ukončilo (zařízení mohlo pozastavit BLE kvůli dávce); zobrazený stav je ten potvrzený.</string>
     <string name="bench_hw_max">Hardwarový limit doby běhu: %1$d ms</string>
     <string name="bench_gates_open">Všechny brány kromě hodin jsou otevřené.</string>
     <string name="bench_gates_closed">Brány, které brání dávkování:</string>
@@ -514,7 +518,8 @@
     <string name="bench_max_dose">Max. dávka (ml)</string>
     <string name="bench_max_daily">Denní limit (ml)</string>
     <string name="bench_max_runtime">Max. doba běhu (ms)</string>
-    <string name="bench_min_interval">Min. interval mezi dávkami (s)</string>
+    <string name="bench_min_interval">Min. interval mezi starty dávek (s)</string>
+    <string name="bench_min_interval_note">Měří se od začátku předchozí dávky, ne od jejího konce: s hodnotou menší než doba běhu může další dávka začít hned po skončení předchozí.</string>
     <string name="bench_calibrate_now">Bench kalibrace: označit jako kalibrováno nyní</string>
     <string name="bench_calibrate_again">Bench kalibrace: obnovit datum kalibrace na nyní</string>
     <string name="bench_save">Uložit konfiguraci</string>
@@ -552,7 +557,7 @@
     <string name="bench_out_invalid">Opravte zvýrazněné hodnoty. Nic nebylo odesláno.</string>
     <string name="bench_out_ready_refused">Zařízení READY odmítlo:</string>
     <string name="bench_out_rejected">Zařízení odmítlo (kód %1$d, detail %2$d). Nic se nezměnilo.</string>
-    <string name="bench_out_uncertain">Nepodařilo se ověřit výsledek. Ověří se při příštím připojení – neopakujte.</string>
+    <string name="bench_out_uncertain">Nepodařilo se ověřit výsledek – zařízení mohlo změnu provést. Ověří se čtením při příštím připojení; neopakujte.</string>
     <string name="bench_out_awaiting">Předchozí změna čeká na ověření. Nic nebylo odesláno.</string>
     <string name="schedules_from_device">Rozvrhy ze zařízení · %1$s</string>
     <string name="schedules_need_connection">Změny rozvrhů vyžadují připojené zařízení.</string>

@@ -79,6 +79,67 @@ class BenchPumpFirmwareTest {
         DeviceDispenserRepository(deviceId, { address }, ManagerSessionPort(manager), InMemoryPendingOpsJournal(),
             InMemoryDeviceCacheStore(), CredentialSeqAllocator(store), UnavailablePhoneTimeSource, scope)
     }
+    /** A repository whose phone time is trusted (test source only), for schedules on the device clock. */
+    private val timedRepo by lazy {
+        DeviceDispenserRepository(deviceId, { address }, ManagerSessionPort(manager), InMemoryPendingOpsJournal(),
+            InMemoryDeviceCacheStore(), CredentialSeqAllocator(store),
+            cz.nowass.dispenser.data.device.PhoneTimeSource { cz.nowass.dispenser.data.device.PhoneTime(System.currentTimeMillis(), 100) }, scope)
+    }
+
+    private suspend fun deviceNow(): Long = (timedRepo.refreshStatus() as OpResult.Ok).value.deviceUtc
+
+    private fun draftAt(name: String, ml: Double, utc: Long): cz.nowass.dispenser.domain.ScheduleDraft {
+        val local = java.time.Instant.ofEpochSecond(utc).atZone(java.time.ZoneId.of("Europe/Prague"))
+        return cz.nowass.dispenser.domain.ScheduleDraft(name, ml, local.toLocalDate(), local.toLocalTime(), cz.nowass.dispenser.domain.RecurrenceKind.ONCE)
+    }
+
+    /** Lets the device's application task run and its clock pass [utc] (virtual jump + reads). */
+    private suspend fun advanceDeviceTo(utc: Long) {
+        val now = deviceNow()
+        if (utc > now) FirmwareSim.advance((utc - now) * 1000)
+        repeat(50) { if (deviceNow() >= utc) return; Thread.sleep(20) }
+        error("device clock did not reach $utc")
+    }
+
+    /**
+     * Incident 2026-11-20, firmware in the loop (F1 + F2): "Nuli" and "Bar" fall due while NOT READY;
+     * READY afterwards is confirmed, keeps the session, and releases neither of them; a later
+     * occurrence still runs (BLE suspended for it), and the confirmed READY outlives that suspension.
+     */
+    @Test
+    fun ready_after_missed_due_times_releases_nothing_and_later_doses_run() = runBlocking {
+        claimed()
+        val c = BenchPumpController(timedRepo) { now }
+        assertTrue("time: ${timedRepo.setTime()}", (timedRepo.setTime() as OpResult.Ok).value.decision in setOf(0, 3))
+        var snap = (c.load() as BenchOutcome.Loaded).snapshot
+        if (snap.ready) snap = (c.setReady(false, snap) as BenchOutcome.Loaded).snapshot
+        val hw = snap.config.hwMaxRuntimeMs
+        snap = (c.save(snap, form.copy(maxRuntimeMs = minOf(20_000L, hw).toString(), minIntervalS = "1")) as BenchOutcome.Loaded).snapshot
+        assertTrue("refill", timedRepo.refill(100_000, 200_000) is OpResult.Ok)
+        snap = (c.load() as BenchOutcome.Loaded).snapshot
+        val t0 = deviceNow()
+        val nuli = (t0 / 60 + 2) * 60
+        val bar = nuli + 180
+        assertTrue(timedRepo.createSchedule(draftAt("Nuli", 8.0, nuli)) is OpResult.Ok)
+        assertTrue(timedRepo.createSchedule(draftAt("Bar", 5.0, bar)) is OpResult.Ok)
+        advanceDeviceTo(bar + 22) // both due times pass while NOT READY
+        val pumps = FirmwareSim.pumpRuns()
+        val r = c.setReady(true, snap)
+        assertTrue("$r", r is BenchOutcome.Loaded && !r.reloadFailed && r.snapshot.ready)
+        advanceDeviceTo(deviceNow() + 30)
+        assertEquals("no overdue dose after READY", pumps, FirmwareSim.pumpRuns())
+        // a later occurrence runs; BLE is suspended for it
+        val later = (deviceNow() / 60 + 2) * 60
+        assertTrue(timedRepo.createSchedule(draftAt("later", 1.0, later)) is OpResult.Ok)
+        val before = FirmwareSim.diagnostics()
+        val nowDev = deviceNow()
+        FirmwareSim.advance((later + 2 - nowDev) * 1000)
+        repeat(250) { if (FirmwareSim.pumpRuns() > pumps) return@repeat; Thread.sleep(20) }
+        assertEquals("the later occurrence ran once", pumps + 1, FirmwareSim.pumpRuns())
+        assertTrue(before.isNotEmpty())
+        val again = c.load() // the session ended with the suspension: reconnect, read back READY
+        assertTrue("$again", again is BenchOutcome.Loaded && again.snapshot.ready)
+    }
 
     private suspend fun claimed() {
         assertTrue(FirmwareSim.buttonWake(false))

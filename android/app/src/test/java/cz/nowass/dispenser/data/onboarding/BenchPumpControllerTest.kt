@@ -105,6 +105,64 @@ class BenchPumpControllerTest {
         assertEquals("readiness SERVICE_REQUIRED", r.calls.last())
     }
 
+    /** Incident 2026-11-20 (F2): READY confirmed, then BLE suspended for a dose -> the reload fails. */
+    @Test
+    fun a_confirmed_readiness_survives_a_failed_reload() = runBlocking {
+        val r = repo()
+        val c = BenchPumpController(r) { now }
+        val snap = (c.load() as BenchOutcome.Loaded).snapshot
+        r.readinessOutcome = OpResult.Ok(notReady.copy(readiness = Readiness.READY, gates = 0))
+        r.connectOutcome = ConnectOutcome.NoAddress // the session is gone right after the answer
+        val res = c.setReady(true, snap) as BenchOutcome.Loaded
+        assertTrue(res.reloadFailed)
+        assertTrue("the confirmed READY, not the old NOT READY", res.snapshot.ready)
+        assertEquals(snap.config, res.snapshot.config)
+        assertEquals(1, r.calls.count { it == "readiness READY" })
+        // without an earlier snapshot the confirmation is still reported, never "not connected"
+        assertTrue(c.setReady(true) is BenchOutcome.ReadinessConfirmedOnly)
+    }
+
+    @Test
+    fun ready_and_connection_are_shown_apart() = runTest {
+        val r = repo()
+        r.authenticated(1)
+        val vm = BenchPumpViewModel(BenchPumpController(r) { now })
+        assertTrue(vm.state.value.connected)
+        r.readinessOutcome = OpResult.Ok(notReady.copy(readiness = Readiness.READY, gates = 0))
+        r.connectOutcome = ConnectOutcome.NoAddress
+        vm.requestReady()
+        vm.confirmReady()
+        r.connection.value = cz.nowass.dispenser.device.session.SessionState.Idle // BLE suspended for the dose
+        val s = vm.state.value
+        assertTrue(s.snapshot!!.ready) // confirmed READY ...
+        assertFalse(s.connected) // ... while BLE is down
+        assertFalse(s.readinessUnverified)
+        assertTrue((s.outcome as BenchOutcome.Loaded).reloadFailed)
+    }
+
+    @Test
+    fun an_uncertain_readiness_is_unverified_and_resolved_by_a_read_never_resent() = runTest {
+        val r = repo()
+        r.authenticated(1)
+        val vm = BenchPumpViewModel(BenchPumpController(r) { now })
+        r.readinessOutcome = OpResult.Uncertain("lost", 9)
+        vm.requestReady()
+        vm.confirmReady()
+        var s = vm.state.value
+        assertTrue(s.readinessUnverified) // the old NOT READY is not shown as verified
+        assertEquals(BenchOutcome.Uncertain, s.outcome)
+        // the session drops and comes back: the status is READ (it shows the device's actual READY)
+        r.connection.value = cz.nowass.dispenser.device.session.SessionState.Idle
+        r.statusOutcome = OpResult.Ok(notReady.copy(readiness = Readiness.READY, gates = 0))
+        val reads = r.calls.count { it.startsWith("status") || it == "connect" }
+        r.authenticated(2)
+        s = vm.state.value
+        assertFalse(s.readinessUnverified)
+        assertTrue(s.snapshot!!.ready)
+        assertEquals("never repeated", 1, r.calls.count { it.startsWith("readiness") })
+        assertTrue(r.calls.count { it.startsWith("status") || it == "connect" } >= reads)
+    }
+
     @Test
     fun the_view_model_never_sends_ready_without_confirmation() = runTest {
         val r = repo()

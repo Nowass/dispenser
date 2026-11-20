@@ -10,7 +10,9 @@ import cz.nowass.dispenser.device.ops.OpResult
 import cz.nowass.dispenser.device.ops.Readiness
 import cz.nowass.dispenser.device.ops.StatusRecord
 import cz.nowass.dispenser.domain.Volume
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 
 /**
  * BENCH ONLY (debug builds): pump configuration and readiness of the connected device, for the
@@ -62,8 +64,13 @@ data class BenchSnapshot(val config: ConfigRecord, val status: StatusRecord) {
 }
 
 sealed interface BenchOutcome {
-    /** [schedulesAboveMaxDose]: device schedules (as last read) whose amount the max dose now refuses. */
-    data class Loaded(val snapshot: BenchSnapshot, val schedulesAboveMaxDose: Int = 0) : BenchOutcome
+    /**
+     * [schedulesAboveMaxDose]: device schedules (as last read) whose amount the max dose now refuses.
+     * [reloadFailed]: the change was CONFIRMED by the device (the snapshot's status is the one its
+     * response carried) but the read that followed failed, e.g. because the device suspended BLE
+     * for a dose right after answering. The readiness shown is confirmed; the connection is not.
+     */
+    data class Loaded(val snapshot: BenchSnapshot, val schedulesAboveMaxDose: Int = 0, val reloadFailed: Boolean = false) : BenchOutcome
     /** Not connected / not reachable (nothing changed). */
     data object NotConnected : BenchOutcome
     /** Local validation failed: nothing sent. */
@@ -76,6 +83,8 @@ sealed interface BenchOutcome {
     data class Rejected(val code: Int, val detail: Long) : BenchOutcome
     /** The answer was lost: verified at the next connection; not repeated automatically. */
     data object Uncertain : BenchOutcome
+    /** The device confirmed the readiness ([status]) but nothing else could be read (no earlier snapshot). */
+    data class ReadinessConfirmedOnly(val status: StatusRecord) : BenchOutcome
     /** An earlier change of the same kind awaits verification: nothing sent. */
     data object AwaitingVerification : BenchOutcome
 }
@@ -160,10 +169,31 @@ class BenchPumpController(private val repo: DeviceRepository, private val nowUtc
 
     private fun microlitres(ml: String): Long = (Volume.mlToMicrolitres(ml.trim().replace(',', '.').toDouble()) as Volume.Conversion.Ok).microlitres
 
-    /** READY / NOT READY, only on the user's explicit request; a refusal reports the closed gates. */
-    suspend fun setReady(ready: Boolean): BenchOutcome =
+    /**
+     * True while an authenticated session with this device is up; shown apart from the readiness (a
+     * confirmed READY says nothing about BLE).
+     */
+    val connected: kotlinx.coroutines.flow.Flow<Boolean> = repo.connection.map { st ->
+        st is cz.nowass.dispenser.device.session.SessionState.Authenticated && st.deviceIdHex == repo.deviceId
+    }.distinctUntilChanged()
+
+    /**
+     * READY / NOT READY, only on the user's explicit request; a refusal reports the closed gates. A
+     * confirmed answer is kept even if the reload after it fails (incident 2026-11-20: the device
+     * suspended BLE for a dose right after answering READY, and the failed reload was reported as
+     * "not connected"). [previous]: the snapshot the request was made from (its configuration is
+     * unchanged by a readiness change). An Uncertain answer is never repeated here.
+     */
+    suspend fun setReady(ready: Boolean, previous: BenchSnapshot? = null): BenchOutcome =
         when (val r = repo.setReadiness(if (ready) Readiness.READY else Readiness.SERVICE_REQUIRED)) {
-            is OpResult.Ok -> load()
+            is OpResult.Ok -> when (val l = load()) {
+                is BenchOutcome.Loaded -> l
+                else -> if (previous != null) {
+                    BenchOutcome.Loaded(BenchSnapshot(previous.config, r.value), reloadFailed = true)
+                } else {
+                    BenchOutcome.ReadinessConfirmedOnly(r.value)
+                }
+            }
             is OpResult.Rejected ->
                 if (ready && r.error.code == DeviceErrorCode.REFUSED) BenchOutcome.ReadyRefused(BenchGate.of(r.error.detail), BenchPumpProblem.of(r.error.aux))
                 else BenchOutcome.Rejected(r.error.code.wire, r.error.detail)
