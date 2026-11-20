@@ -421,7 +421,9 @@ Test-environment observations:
 ### 8c. Bench GPIO pump control signal (planned, not run)
 
 Firmware with `sdkconfig.pumpgpio.defaults` (README "GPIO pump control signal"). **No pump, MOSFET
-or other load connected.** Probe GPIO10 (XIAO D10) against GND with a logic analyzer or scope
+or other load connected.** Before every run: no debugger (`pgrep -a openocd` empty, no VS Code debug
+session) and no other process on the serial port (`fuser /dev/ttyACM0`); a halted CPU would keep the
+output at its level. Probe GPIO10 (XIAO D10) against GND with a logic analyzer or scope
 (≥ 1 kHz sampling), or a current-limited LED (≥ 1 kΩ in series, ≤ 3 mA) to GND.
 
 | # | Check | Expected | Result |
@@ -432,6 +434,7 @@ or other load connected.** Probe GPIO10 (XIAO D10) against GND with a logic anal
 | G4 | Same schedule with one gate closed (e.g. SERVICE_REQUIRED) | no pulse | |
 | G5 | Through deep sleep after the dose | low (held) | |
 | G6 | RESET during a pulse | the pulse ends at the reset; low afterwards; the occurrence is not repeated (history INTERRUPTED) | |
+| G7 | Boot log of the GPIO image | `dsp_pump_gpio: BENCH pump control signal on GPIO10, active-high, max 10000 ms per run`; no task-watchdog or panic lines during a 10 s pulse | |
 
 ## 9. Configuration limits and storage (M1.10b.1)
 

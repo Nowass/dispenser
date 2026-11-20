@@ -2003,7 +2003,34 @@ stage verifies the control signal and the real scheduling path.
 | Pin | XIAO ESP32-C3 **D10 = GPIO10** (`CONFIG_DSP_PUMP_GPIO_NUM`). Not a strapping pin (GPIO2/8/9), not SPI flash (GPIO11–17), not USB (GPIO18/19), not UART0 (GPIO20/21); the build refuses those and the button-wake pin |
 | Polarity | **active high** (`CONFIG_DSP_PUMP_GPIO_ACTIVE_HIGH`): intended for a low-side N-channel logic-level MOSFET, gate driven from GPIO10 through a series resistor (≈ 100–220 Ω) with a **gate-to-source pull-down (≈ 47–100 kΩ)**, a flyback diode across the motor |
 | Maximum per run | `CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS` = **10,000 ms** (bench): the hardware runtime maximum of the build (pump configuration with a larger `max_runtime_ms` keeps the PUMP_CONFIG gate closed) and the driver's own limit |
-| Independent cutoff | `esp_timer` one-shot at runtime + 100 ms, dispatched by the esp_timer task (above the application task): **at most 10.1 s active per run** even if the application task stalls; a stopped CPU is reset by the interrupt (300 ms) / task (5 s) watchdogs |
+| Independent cutoff | `esp_timer` one-shot at runtime + 100 ms with **ISR dispatch**: the callback runs in the timer interrupt from IRAM (one GPIO register write, one flag), independent of every task and of the flash cache. The build refuses the GPIO pump without ISR dispatch, the interrupt watchdog, a panicking task watchdog and panic = reboot without OCD awareness (all set by `sdkconfig.pumpgpio.defaults`) |
+
+Bounds on the active time (software only; reviewed 2026-11-20):
+- Normal path: exactly the calculated runtime (FreeRTOS tick 10 ms, rounded up), ≤ 10,000 ms.
+- Application task stalls or the scheduler is starved: the interrupt cutoff ends the pulse at
+  runtime + 100 ms (≤ 10.1 s). A scheduler starved for 5 s also panics through the task watchdog.
+- Interrupts disabled (or the timer interrupt cannot run): the interrupt watchdog panics after
+  300 ms; the panic handler prints the crash (≈ 0.1–0.5 s over the console) and resets; the pad is
+  then unconfigured and the pull-down ends the pulse. Worst case ≈ runtime + 100 ms + 300 ms +
+  panic output, i.e. **about 11 s for a 10 s run**.
+- **Not covered by software**: a hung clock or watchdog hardware, or a CPU halted by a debugger
+  (OpenOCD halts the CPU and disables the watchdogs while halted). Only a CPU-independent hardware
+  cutoff in the driver circuit (e.g. a monostable or an RC-limited gate) bounds those; it is required
+  before a real pump is connected. **Never attach a debugger while a load is connected.**
+- Earlier statement "at most 10.1 s absolute" (task dispatch, task watchdog without panic, OCD-aware
+  panic) was not justified and is withdrawn.
+
+Watchdogs in the bench GPIO build: interrupt watchdog 300 ms (panic); task watchdog 5 s on the idle
+task (panic, `CONFIG_ESP_TASK_WDT_PANIC`); panic = print and reboot, reboot delay 0, OCD awareness off
+(an attached JTAG debugger cannot turn a panic into a halt); the bootloader's RTC watchdog (9 s) runs
+only until the app starts. A pump run blocks the application task in `vTaskDelay`, so the idle task
+keeps running and the task watchdog stays quiet during a normal 10 s run.
+
+Hold across deep sleep and wake (ESP32-C3, ESP-IDF v6.1 `gpio_hold_en` documentation): a digital pad
+keeps a held level through deep sleep only with `gpio_deep_sleep_hold_en()` (the driver calls both
+after driving the pad inactive). On wake the chip resets: the hold is released and the pad returns to
+its default unconfigured state until SAFE_OFF configures it again (the pull-down covers this interval).
+The driver releases the hold (`gpio_hold_dis`) before every level change and holds again afterwards.
 
 Activation path: a dose becomes due → every existing gate and limit (trusted clock, reservoir
 configured and covering, calibration and limits, READY, max dose/runtime/daily, minimum interval,

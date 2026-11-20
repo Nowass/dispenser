@@ -9,13 +9,30 @@
  * other configuration contains no pump GPIO code at all. Pin, polarity and the electrical
  * requirements: firmware/README.md "GPIO pump control signal".
  *
- * Cutoff: an esp_timer one-shot (dispatched by the esp_timer task, priority above the application
- * task) drives the pad inactive at runtime + 100 ms even if the application task stalls. If the
- * whole CPU stops, the interrupt/task watchdogs reset the chip; after a reset the pad is an input
- * again and only the external resistor of the driver keeps the gate inactive.
+ * Cutoff: an esp_timer one-shot with ISR dispatch: the callback runs in the timer interrupt (IRAM,
+ * register write only), so it does not depend on any task being scheduled and still runs while the
+ * flash cache is disabled. It drives the pad inactive at runtime + 100 ms. If interrupts stay
+ * disabled, the interrupt watchdog (300 ms) panics; a starved scheduler trips the task watchdog
+ * (5 s, panic enabled); the panic handler resets the chip (OCD-aware mode off, so an attached
+ * debugger cannot turn a panic into a halt). After a reset the pad is an input again and only the
+ * external resistor of the driver keeps the gate inactive. The build refuses the GPIO pump without
+ * these settings (sdkconfig.pumpgpio.defaults sets them).
  */
 
+#if !CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD || !CONFIG_ESP_TIMER_IN_IRAM
+#error "CONFIG_DSP_PUMP_GPIO needs the IRAM esp_timer ISR dispatch (CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD)"
+#endif
+#if !CONFIG_ESP_INT_WDT || !CONFIG_ESP_TASK_WDT_PANIC
+#error "CONFIG_DSP_PUMP_GPIO needs the interrupt watchdog and a panicking task watchdog (CONFIG_ESP_TASK_WDT_PANIC)"
+#endif
+#if CONFIG_ESP_DEBUG_OCDAWARE || !CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT
+#error "CONFIG_DSP_PUMP_GPIO needs panic = print and reboot without OCD awareness (a debugger must not halt a panic)"
+#endif
+
 #include "driver/gpio.h"
+#include "esp_attr.h"
+#include "hal/gpio_ll.h"
+#include "soc/gpio_struct.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -41,11 +58,6 @@ static dsp_pump_gpio_t s_drv;
 static dsp_pump_port_t s_port;
 static esp_timer_handle_t s_cutoff;
 static bool s_inited;
-
-static int inactive_level(void)
-{
-    return ACTIVE_HIGH ? 0 : 1;
-}
 
 static bool hw_configure(void *ctx, int level)
 {
@@ -86,18 +98,19 @@ static void hw_hold(void *ctx, bool on)
     }
 }
 
-static void cutoff_cb(void *arg)
+/* Timer interrupt context (IRAM): one register write and one flag, no function calls into flash. */
+static void IRAM_ATTR cutoff_cb(void *arg)
 {
     (void)arg;
-    (void)gpio_set_level(PIN, inactive_level()); /* independent of the application task */
-    dsp_pump_gpio_cutoff_fired(&s_drv);
+    gpio_ll_set_level(&GPIO, PIN, ACTIVE_HIGH ? 0u : 1u);
+    s_drv.cutoff_fired = true; /* what dsp_pump_gpio_cutoff_fired() does, without the call */
 }
 
 static bool hw_cutoff_arm(void *ctx, uint32_t ms)
 {
     (void)ctx;
     if (s_cutoff == NULL) {
-        esp_timer_create_args_t a = {.callback = cutoff_cb, .dispatch_method = ESP_TIMER_TASK,
+        esp_timer_create_args_t a = {.callback = cutoff_cb, .dispatch_method = ESP_TIMER_ISR,
                                      .name = "dsp_pump_cutoff"};
         if (esp_timer_create(&a, &s_cutoff) != ESP_OK) {
             s_cutoff = NULL;

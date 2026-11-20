@@ -7,3 +7,10 @@ CONFIG_DSP_PUMP_GPIO=y
 CONFIG_DSP_PUMP_GPIO_NUM=10
 CONFIG_DSP_PUMP_GPIO_ACTIVE_HIGH=y
 CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS=10000
+# Cutoff and reset guarantees required by the GPIO pump (the build refuses it otherwise):
+# the cutoff runs in the timer interrupt (IRAM), a starved scheduler panics (task watchdog 5 s),
+# and a panic always resets the chip, also with a debugger attached.
+CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD=y
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_DEBUG_OCDAWARE=n
+CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
