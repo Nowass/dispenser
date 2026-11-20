@@ -2157,6 +2157,78 @@ static void test_schedule_edit_never_resurrects_claimed_occurrence(void)
     invariants();
 }
 
+/* Owner bench observation (2026-11-20): re-timing an executed ONE-SHOT schedule to a later time
+ * of the same day produces no second dose, while a NEW schedule does. Intended: the anti-replay
+ * watermark is per schedule ID and local date (dsp_history.h), so a schedule doses at most once
+ * per local date whatever its edits; moving its date to a later day makes a new occurrence. */
+static void test_once_schedule_retimed_after_execution(void)
+{
+    provision(true);
+    clear_script();
+    dsp_schedule_t once = sched("one-shot", 8, 0, 1000);
+    once.kind = DSP_REC_ONCE;
+    once.start_date = date_of(T0);
+    step(g_true, op_create(once));
+    DSP_CHECK(session());
+    run_until(T0 + 5 * MINUTE);
+    char occ[96];
+    occ_id(occ, sizeof occ, "one-shot", T0);
+    DSP_CHECK_EQ_INT(1, runs_of(occ));
+    DSP_CHECK_EQ_INT(1, pump.calls);
+    /* 08:10: move it to 08:20 the same day (accepted, but no second dose today) and create a
+     * new schedule for 08:30 (doses). */
+    advance(T0 + 10 * MINUTE);
+    clear_script();
+    once.hour = 8;
+    once.minute = 20;
+    int u = step(g_true, op_update_cur(once));
+    dsp_schedule_t fresh_s = sched("fresh", 8, 30, 1000);
+    fresh_s.kind = DSP_REC_ONCE;
+    fresh_s.start_date = date_of(T0);
+    int c = step(g_true, op_create(fresh_s));
+    DSP_CHECK(session());
+    DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[u].r.status);
+    DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[c].r.status);
+    run_until(T0 + HOUR);
+    DSP_CHECK_EQ_INT(1, runs_of(occ)); /* still once on that date */
+    char fresh[96];
+    occ_id(fresh, sizeof fresh, "fresh", T0);
+    DSP_CHECK_EQ_INT(1, runs_of(fresh));
+    DSP_CHECK_EQ_INT(2, pump.calls);
+    /* The durable record still blocks that date (state COMPLETED, watermark = today). */
+    side_open();
+    dsp_history_store_t hs;
+    dsp_storage_history_store(&side, &hs);
+    dsp_history_scan_t scan;
+    DSP_CHECK_EQ_INT(DSP_EXEC_OK, dsp_history_scan(&hs, "one-shot", INT32_MIN, &scan));
+    DSP_CHECK(scan.found);
+    DSP_CHECK_EQ_INT(DSP_HISTORY_COMPLETED, scan.found_record.state);
+    DSP_CHECK_EQ_INT(0, dsp_date_compare(scan.found_record.local_date, date_of(T0)));
+    /* Moving the one-shot to the next day makes a new occurrence: it doses once there. */
+    clear_script();
+    once.start_date = date_of(T0 + DAY);
+    once.minute = 20;
+    u = step(g_true, op_update_cur(once));
+    DSP_CHECK(session());
+    DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[u].r.status);
+    run_until(T0 + DAY + HOUR);
+    char occ2[96];
+    occ_id(occ2, sizeof occ2, "one-shot", T0 + DAY);
+    DSP_CHECK_EQ_INT(1, runs_of(occ2));
+    DSP_CHECK_EQ_INT(local(date_of(T0 + DAY), 8, 20), pump.at[pump.calls - 1]);
+    /* Each later date is a new occurrence (the watermark only moves forward). */
+    clear_script();
+    once.start_date = date_of(T0 + 2 * DAY);
+    once.minute = 0;
+    step(g_true, op_update_cur(once));
+    DSP_CHECK(session());
+    run_until(T0 + 2 * DAY + HOUR);
+    char occ3[96];
+    occ_id(occ3, sizeof occ3, "one-shot", T0 + 2 * DAY);
+    DSP_CHECK_EQ_INT(1, runs_of(occ3));
+    invariants();
+}
+
 /* Edits near the due window never create a catch-up dose. */
 static void test_schedule_edits_near_due_window(void)
 {
@@ -2472,6 +2544,7 @@ int main(void)
     DSP_RUN(test_schedule_capacity_and_paging);
     DSP_RUN(test_schedule_edit_never_resurrects_claimed_occurrence);
     DSP_RUN(test_schedule_edits_near_due_window);
+    DSP_RUN(test_once_schedule_retimed_after_execution);
     DSP_RUN(test_schedule_delete_recreate_same_time);
     DSP_RUN(test_schedule_edits_across_dst);
     DSP_RUN(test_schedule_plan_follows_changes);

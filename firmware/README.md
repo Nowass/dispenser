@@ -660,6 +660,33 @@ without any reference to detect it. That is a hardware fault outside the trust m
 then, the M1.4 randomized test confirms that the same occurrence identity never repeats.
 `test_limitation_backward_clock_after_recycling` still pins the M1.2-level behavior.
 
+### Re-timing an executed schedule (analysis 2026-11-20)
+
+Bench observation (2026-11-20, GPIO-only test): moving an already executed schedule to a later
+time **of the same day** did not produce another pulse, while new schedules did. This is the
+approved at-most-once rule, not a defect:
+
+- The identity of an automatic occurrence is `<scheduleId>@<localDate>`; the durable record is a
+  per-schedule watermark (last claimed local date). A record in any state (STARTED, COMPLETED,
+  FAILED, INTERRUPTED) blocks every occurrence of that schedule on that date or earlier
+  (`ALREADY_CLAIMED`). Edits never clear or lower the watermark, so **a schedule doses at most
+  once per local date**, whatever its time, volume or enabled state is changed to.
+- Independently, the edit floor (`not_before` = trusted edit time + 1 s) makes every occurrence
+  scheduled before an edit of the timing `MISSED`: a time moved to the past or to "now" never
+  creates a catch-up dose.
+- What does dose again: the same schedule on a **later date** (a DAILY/WEEKLY schedule the next
+  day at its new time; a ONCE schedule whose date is moved to a later day), or a **new** schedule
+  (new ID) whose time is after its creation. Deleting and re-creating under a new ID on the same
+  day is a new identity (approved, see "Schedule IDs").
+
+Why it seemed unreliable on the bench: an edit within the same day is accepted (the schedule is
+stored and listed with its new time) but has no visible effect until the next date. Regression
+tests: `test_once_schedule_retimed_after_execution` (ONCE: same day blocked, later date doses
+once, a new schedule doses), `test_schedule_edit_never_resurrects_claimed_occurrence` (DAILY),
+`test_schedule_edits_near_due_window` (edit floor). The Android schedule editor explains the rule
+when an executed schedule is edited (docs/ANDROID_BLE_DESIGN.md §16b). The anti-replay records
+are never cleared to get another dose; a bench pulse needs a new schedule.
+
 ### Schedule IDs (invariant from M1.1, approved 2026-11-15)
 
 Schedule IDs must be unique within the device and **never reused**. Preferred for the
