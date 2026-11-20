@@ -5,7 +5,8 @@ ESP32-C3 is available, record the results (date, firmware commit, board, measure
 the "Result" column, and keep the safety rules below. Run so far (2026-11-19): checks 1.1–1.3 and
 the RNG-gate items R1, R2, R3, R5, R6 of section 8a (R5 statistically NOT ACCEPTED; bench-only
 deviation, see 8a.2) and a first bench BLE advertising/GATT bring-up (parts of 8b H1 and H2, see
-8b.1). Everything else is still OPEN.
+8b.1); 2026-11-20: GPIO-only pump control signal G3 (owner-reported) and part of G7, see 8c.1.
+Everything else is still OPEN.
 
 ## Verification levels
 
@@ -418,7 +419,7 @@ Test-environment observations:
   capture did not cover the phone test (00:13–00:14), and this build logs neither connections nor
   disconnects.
 
-### 8c. Bench GPIO pump control signal (planned, not run)
+### 8c. Bench GPIO pump control signal (G3 passed, G7 partly; the rest OPEN)
 
 Firmware with `sdkconfig.pumpgpio.defaults` (README "GPIO pump control signal"). **No pump, MOSFET
 or other load connected.** Before every run: no debugger (`pgrep -a openocd` empty, no VS Code debug
@@ -435,6 +436,44 @@ output at its level. Probe GPIO10 (XIAO D10) against GND with a logic analyzer o
 | G5 | Through deep sleep after the dose | low (held) | |
 | G6 | RESET during a pulse | the pulse ends at the reset; low afterwards; the occurrence is not repeated (history INTERRUPTED) | |
 | G7 | Boot log of the GPIO image | `dsp_pump_gpio: BENCH pump control signal on GPIO10, active-high, max 10000 ms per run`; no task-watchdog or panic lines during a 10 s pulse | |
+
+#### 8c.1 First GPIO bench run (2026-11-20, owner-reported)
+
+Firmware `54a7925` (`ble-wifitime-gpio-54a7925`, application at 0x30000 only; bootloader, partition
+table, otadata, `nvs` and `nvs_sec` verified unchanged before the first boot). **GPIO only: no pump,
+MOSFET or other load was connected; no liquid was moved or measured.** On this firmware a dose
+result `COMPLETED` means: the control signal was driven active for the runtime calculated from the
+configured flow, and nothing more.
+
+Owner-reported observations (logic analyzer on GPIO10; the captures stay with the owner and are not
+in the repository):
+
+- Bench configuration through the debug-only bench screen: pump flow **1,000 µl/s**; readiness set
+  to READY by the owner.
+- Three newly created schedules of **5 ml** each produced **three separate GPIO10 pulses**, each
+  **5 s** wide (5,000 µl at 1,000 µl/s = 5,000 ms: the calculated runtime).
+- The reservoir estimate in the app decreased after the doses as expected. (A suspected
+  non-update was reported first and then explicitly retracted by the owner; no defect.)
+- Changing the time of an already executed schedule did not reliably produce another pulse, new
+  schedules did. This is the intended at-most-once rule per schedule and local date, not a GPIO
+  fault: see firmware/README.md "Re-timing an executed schedule" (analysis 2026-11-20).
+
+Serial capture of the same firmware before the pulse test (12:17–13:17, redacted copy outside the
+repository): 5 boots, each with the driver line of G7, no `GPIO10 ACTIVE` line (READY was off), no
+panic, task-watchdog or error line.
+
+| # | Result (2026-11-20) |
+|---|---|
+| G1 | OPEN (not recorded) |
+| G2 | OPEN (not recorded) |
+| G3 | **PASSED (owner-reported):** 3 of 3 scheduled 5 ml doses → one pulse each, width 5 s = calculated runtime. Pulse-width precision (± 10 ms) not reported; serial log of the pulses not captured. |
+| G4 | OPEN (not recorded) |
+| G5 | OPEN (not recorded) |
+| G6 | OPEN (not run) |
+| G7 | **PARTLY:** driver boot line present in 5 of 5 boots, no panic/watchdog lines in 60 min idle; a 10 s pulse was not run (pulses were 5 s), so "no watchdog during a 10 s pulse" is OPEN. |
+
+Not covered by this run and still required before any real pump: G1/G2/G4–G6, a CPU-independent
+hardware cutoff, the external pull-down check, and every measurement of real flow (calibration).
 
 ## 9. Configuration limits and storage (M1.10b.1)
 
