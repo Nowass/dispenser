@@ -452,7 +452,7 @@
     <string name="reservoir_device_not_read">Stav zásobníku zatím nebyl ze zařízení načten.</string>
     <string name="dashboard_battery_a11y_device">Baterie: %1$d %%</string>
     <string name="history_device_unavailable">Historie dávek se ze zařízení v této verzi protokolu nenačítá.</string>
-    <string name="hist_dev_note">Historie uložená v zařízení (posledních 64 událostí). Objemy jsou vypočtené z doby běhu čerpadla, ne změřené; stav zásobníku je odhad.</string>
+    <string name="hist_dev_note">Historie uložená v zařízení (posledních 64 událostí). Objemy jsou vypočtené z doby běhu čerpadla, ne změřené; stav zásobníku je odhad. Chybějící záznam neznamená, že dávka nebyla naplánována ani že se o ni zařízení nepokusilo: zablokované a vynechané dávky se nezapisují a výpadek napájení může záznam ztratit.</string>
     <string name="hist_dev_empty">Zařízení zatím nezaznamenalo žádnou událost. Starší dávky z doby před aktualizací firmwaru se nezobrazují.</string>
     <string name="hist_dev_not_connected">Zařízení není připojeno. Historii lze načíst jen ze zařízení.</string>
     <string name="hist_dev_unsupported">Firmware zařízení historii neposkytuje (starší verze). Nic se nezobrazuje ani nedopočítává.</string>

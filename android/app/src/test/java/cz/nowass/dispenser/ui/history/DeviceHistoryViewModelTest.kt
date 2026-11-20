@@ -114,6 +114,47 @@ class DeviceHistoryViewModelTest {
     }
 
     @Test
+    fun distinct_events_are_never_hidden_by_an_equal_seq() {
+        val a = listOf(ev(5), ev(4))
+        val other = ev(4, HistoryEventKind.RESERVOIR_REFILL) // a different event presented with seq 4
+        assertEquals(listOf(5L, 4L, 4L), HistoryViewModel.merge(a, listOf(other, ev(4))).map { it.seq })
+    }
+
+    @Test
+    fun a_restarted_device_log_replaces_the_shown_list() = runTest {
+        fake.historyLog = (1L..20L).map { ev(it) }
+        connect()
+        val vm = HistoryViewModel(repo)
+        assertEquals((20L downTo 9L).toList(), seqs(state(vm)))
+        // the device lost its log storage and started again at 1
+        fake.historyLog = (1L..3L).map { ev(it, HistoryEventKind.DOSE_MANUAL) }
+        vm.loadMore()
+        val ui = state(vm)
+        assertEquals(listOf(3L, 2L, 1L), seqs(ui))
+        assertTrue(ui.days.flatMap { it.rows }.all { it.event.kind == HistoryEventKind.DOSE_MANUAL })
+        assertFalse(ui.canLoadMore)
+    }
+
+    @Test
+    fun reconnecting_halfway_continues_below_the_last_event() = runTest {
+        fake.historyLog = (1L..20L).map { ev(it) }
+        connect()
+        val vm = HistoryViewModel(repo)
+        assertEquals(12, seqs(state(vm)).size)
+        fake.connectOutcome = ConnectOutcome.NoAddress // the connection is gone
+        vm.loadMore()
+        assertEquals(DeviceHistoryProblem.NOT_CONNECTED, state(vm).problem)
+        fake.historyLog = fake.historyLog + ev(21) // appended meanwhile
+        connect()
+        vm.loadMore()
+        val ui = state(vm)
+        assertNull(ui.problem)
+        assertEquals((20L downTo 1L).toList(), seqs(ui)) // no gap, no duplicate; 21 comes with a refresh
+        vm.refresh()
+        assertEquals(21L, seqs(state(vm)).first())
+    }
+
+    @Test
     fun results_schedule_names_and_unknown_time() = runTest {
         fake.historyLog = listOf(
             ev(1, HistoryEventKind.RESERVOIR_INIT),

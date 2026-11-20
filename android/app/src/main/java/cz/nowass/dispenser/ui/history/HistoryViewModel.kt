@@ -123,9 +123,14 @@ class HistoryViewModel(private val repository: DispenserRepository) : ViewModel(
             var end = false
             var problem: DeviceHistoryProblem? = null
             var faults = dev.value.faults
+            var restarted = false
+            val shownMax = dev.value.events.maxOfOrNull { it.seq }
             for (i in 0 until BATCH_PAGES) {
                 when (val p = src.page(cursor)) {
                     is DeviceHistoryPage.Loaded -> {
+                        // The device's log restarted (its storage was lost): what is shown belongs to
+                        // the old log and is never merged with the new one.
+                        if (!fromNewest && shownMax != null && p.newestSeq < shownMax) { restarted = true; break }
                         fresh += p.events
                         faults = p.faults
                         end = p.events.isEmpty() || p.events.last().seq <= p.oldestSeq
@@ -137,6 +142,11 @@ class HistoryViewModel(private val repository: DispenserRepository) : ViewModel(
                     is DeviceHistoryPage.Failed -> problem = DeviceHistoryProblem.FAILED
                 }
                 if (problem != null) break
+            }
+            if (restarted) {
+                dev.update { it.copy(events = emptyList(), loading = false, canLoadMore = false) }
+                load(fromNewest = true)
+                return@launch
             }
             val failed = problem
             dev.update { s ->
@@ -173,9 +183,14 @@ class HistoryViewModel(private val repository: DispenserRepository) : ViewModel(
                 .groupBy { it.time.atZone(zone).toLocalDate() }
                 .map { (date, list) -> HistoryDayUi(date, list) }
 
-        /** One row per seq (repeated or overlapping reads never duplicate), newest (highest seq) first. */
+        /**
+         * One row per event, newest (highest seq) first. Repeated or overlapping reads return the same
+         * event (same seq, same content) and collapse into one row; two different events never hide
+         * each other, even if a device ever presented the same seq twice (defense in depth: the
+         * firmware never reuses a seq, BLE_PROTOCOL.md 7.6).
+         */
         internal fun merge(a: List<HistoryEventRecord>, b: List<HistoryEventRecord>): List<HistoryEventRecord> =
-            (a + b).associateBy { it.seq }.values.sortedByDescending { it.seq }
+            (a + b).distinct().sortedByDescending { it.seq }
 
         /**
          * The device's order (seq) is its chronology; consecutive events of the same local date form a
