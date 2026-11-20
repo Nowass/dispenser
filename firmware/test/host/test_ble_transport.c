@@ -807,6 +807,34 @@ static void test_close_after_final_reply(void)
     DSP_CHECK_EQ_INT(1, F.terminates);
 }
 
+/* Incident 2026-11-20 (F3 review): the app suspends BLE for a dose right after replying (here: the
+ * SET_READINESS answer). The suspend path drains the reply first, then terminates; it never waits
+ * longer than the close bound, also when the stack is busy. */
+static void test_suspend_drains_a_just_sent_reply(void)
+{
+    static uint8_t frame[120];
+    fill(frame, sizeof frame, 3);
+    reset_all();
+    uint32_t gen = open_link(8, 23);
+    F.busy_next = 2; /* the stack is busy at first: the reply is retried */
+    DSP_CHECK(P.send_frame(P.ctx, gen, frame, sizeof frame));
+    uint32_t t0 = F.now;
+    P.suspend(P.ctx);
+    DSP_CHECK_EQ_INT(1, F.nframes);    /* the reply left before ... */
+    DSP_CHECK_EQ_INT(1, F.terminates); /* ... the terminate */
+    DSP_CHECK(F.now - t0 <= DSP_BLE_TR_CLOSE_WAIT_MS);
+    DSP_CHECK(!P.connected(P.ctx));
+    /* a stack that never accepts cannot hold the dose back beyond the close bound */
+    reset_all();
+    gen = open_link(8, 23);
+    F.busy_always = true;
+    DSP_CHECK(P.send_frame(P.ctx, gen, frame, sizeof frame));
+    t0 = F.now;
+    P.suspend(P.ctx);
+    DSP_CHECK(F.now - t0 <= DSP_BLE_TR_CLOSE_WAIT_MS);
+    DSP_CHECK(!P.connected(P.ctx));
+}
+
 /* T13: the grace period before the close is best effort only.
  *  (a) a notification the stack accepted but the phone never received is indistinguishable to
  *      the transport: tx_frames counts submissions, and the close proceeds identically;
@@ -1154,6 +1182,7 @@ int main(void)
     DSP_RUN(test_disconnect_during_tx_and_stale);
     DSP_RUN(test_lifecycle);
     DSP_RUN(test_close_after_final_reply);
+    DSP_RUN(test_suspend_drains_a_just_sent_reply);
     DSP_RUN(test_close_grace_semantics);
     DSP_RUN(test_two_threads);
     return dsp_test_finish();
