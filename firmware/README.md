@@ -125,6 +125,9 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
   timekeeper (never creates or lifts a rollback hold); authorization is an explicit input and
   fails closed. `sched` record format 2, no layout change. Domain only, host-tested. See
   [Configuration, schedules and phone time](#configuration-schedules-and-phone-time-m110b1).
+- (Phase C, 2026-11-20) **Event history:** a bounded persistent log of dose outcomes and reservoir
+  changes, separate from the anti-replay records, read by the phone with GET_HISTORY. See
+  [Event history (Phase C)](#event-history-phase-c).
 - Linux host-side test infrastructure (CMake + CTest, warnings as errors, ASan/UBSan).
 - Firmware version identification: `version.txt` → ESP-IDF app descriptor → boot log.
 
@@ -132,7 +135,7 @@ verification so far is Linux host tests and cross-compilation for `esp32c3`.
 
 BLE/NimBLE and GATT, the button and its pin, the real pump GPIO driver with hardware
 cutoff, production credential provisioning (authenticated BLE,
-per-device credentials), battery measurement, MONTHLY recurrence, event journal, BLE, GPIO
+per-device credentials), battery measurement, MONTHLY recurrence, BLE, GPIO
 and motor control, service mode, OTA (update client and rollback; only the partitions
 exist), a storage maintenance/repair tool. The domain code decides and records; nothing
 drives hardware yet.
@@ -775,6 +778,7 @@ dosing service (future) ──► dsp_exec ──► dsp_history_store_t ─┐
 | `notify` | notification state (M1.5): ID epoch and sequence, condition latches, 16-entry queue; since M1.7 (format 2) also the transport diagnostics and the 4-entry rejection log; since M1.9a (format 3) the dose-bound report keys | 794 B (format 2: 758 B, format 1: 682 B) |
 | `dosing` | dosing state (M1.9a, layout v4): readiness, BLOCKED latch, refill intent, manual in-flight marker, daily ledger, last pump start; format 2 since M1.10b.2: per-slot manual-dose high-water marks, the marker's request binding, ring of the last 8 request results ; format 3 since M1.10b.3: the durable manual-dose admission date and count | 212 B (format 2: 206 B, format 1: 52 B) |
 | `auth` | credential record (layout v5, M1.10b.3): claim state, KEY_FAULT flag, ownership epoch, device identity key pair, 4 phone slots (public key, name, enrolled, last seen), recovery and diagnostic counters. **Not** the setup code (only in `nvs_sec`) | 416 B |
+| `ev00` … `ev63` | **not part of the layout** (Phase C): user-visible event history, one event per slot (`dsp_evlog`); a missing key is an empty slot, never corruption; no marker change, ignored by older firmware. See "Event history (Phase C)" | 41 … 105 B each |
 
 **Explicit presence (approved):** on first boot every key is written with its
 provisioning value (EMPTY slots, empty set, default configuration), then the marker.
@@ -1444,6 +1448,86 @@ coordinator reports it as `MISSED` permanently: never dosed later, never caught 
 same after restarts (tested). M1.9a writes no record for a missed occurrence; MISSED is
 derived from the occurrence time. A durable missed-occurrence event belongs to the event
 journal (Q10).
+
+## Event history (Phase C)
+
+User-visible chronological history of what the device did (`dsp_evlog`, keys `ev00`…`ev63`), read
+with GET_HISTORY (docs/BLE_PROTOCOL.md 7.6, 10.7). It is **informational** and kept apart from every
+safety record: the anti-replay history `h00`…`h31` (one watermark per schedule, see "Execution
+history and deduplication") is untouched, and nothing in the dosing path reads the log.
+
+### Events
+
+| Type | When (appended only after the transition is durable) | Data |
+|---|---|---|
+| DOSE_SCHEDULED | `dsp_exec_finish` stored COMPLETED/FAILED; or boot recovery rewrote a STARTED claim as INTERRUPTED | schedule ID, requested volume, claim time, result, estimate before/after (unknown for INTERRUPTED and a failed consumption) |
+| DOSE_MANUAL | the completion write cleared the manual marker; or recovery cleared it as INTERRUPTED | volume, start time, result, estimate before/after |
+| RESERVOIR_INIT / REFILL / ADJUST | a refill completed (R4 of the roll-forward), or SET_CONFIG saved a new capacity | estimate before/after, capacity; INIT when the capacity was 0, ADJUST when the capacity changed or the remaining amount did not increase, REFILL otherwise; before unknown when a power cut fell between R3 and R4 |
+
+Results: OK (the pump port ran the calculated runtime: no flow sensing, never a measurement),
+PUMP_FAILED, START_FAILED, INTERRUPTED (reset/power loss after the claim), ABORTED (a storage failure
+after the claim; the pump never ran). Flags: trusted clock, reservoir unknown, and the build's pump
+kind: `DSP_EVF_PUMP_SIMULATED` (default build, nothing actuated) or `DSP_EVF_PUMP_BENCH_GPIO`
+(`CONFIG_DSP_PUMP_GPIO`: control signal only, no liquid verified), set by `main.c` through
+`dsp_app_config_t.event_pump_flags`. Refused or skipped doses (gates, limits, missed, already
+claimed) are not events (they never started); see "Secondary diagnostics" below for that gap.
+
+### Storage and safety
+
+- One event per NVS key, slot = `seq % 64`; an append is one `set` + `commit` + read-back compare
+  (single-key atomicity: after a power loss the slot holds the old or the new event, never a mix).
+  No head key: at boot the head is the highest valid `seq`. Wraparound overwrites the oldest event.
+- **Ordering after an append before the event:** the transition (claim finish, marker clear, refill
+  R4, config save) is durable first, so a power cut between them loses the event and never repeats
+  it (recovery does not see a finished transition again). Each event also carries a
+  deduplication key (the dose-bound report key, `RF`|refill intent seq, `CF`|config revision); an
+  append whose key is still in the log is a no-op.
+- **Failures never touch dosing:** an append failure (write, commit, read-back, NVS full) is counted
+  (`faults`, RAM, reported by GET_HISTORY as FAULTS in that wake) and changes nothing else: no gate,
+  no DEGRADED, no decision depends on the log. A corrupt or foreign slot is ignored at open (counted)
+  and the next `seq` skips one ring (`head + 64`) so a `seq` still held by an unreadable slot is never
+  handed out again (gaps are allowed; order is by `seq` only). Known limit: if NVS drops the newest
+  event as corrupt before the first wraparound, its `seq` can be reused once.
+- **No migration:** the keys are outside the layout's explicit-presence rule (missing = empty), so
+  the layout stays v5 and older firmware ignores them. Nothing existing is erased or repurposed.
+  Doses from before this firmware are not reconstructed from the anti-replay records (those hold only
+  the last claim per schedule, and inventing events is not allowed).
+
+### Capacity and wear
+
+An event is 41 + ID bytes (≤ 105 B with a 64-character ID; 77 B with a UUID): at most 6 NVS entries
+(4 data + header + index), so the full log occupies ≤ 384 entries. The partition has 2,520 entries, of
+which the layout uses about 325 and the PHY/Wi-Fi co-tenants about 120 (check 1 of
+`test/nvs_linux`, 1,952 available before the log); the steady state needs about 140 available
+entries for page reclamation (check 4). 64 events ≈ 3 weeks at three doses a day. Wear: one small
+blob per event (a few per day) against the existing per-dose writes (claim, ledger, consumption,
+finish: four records per dose), well under 10 % more flash writes per dose; NVS spreads them over all
+pages. Measured with the full log on the real ESP-IDF NVS over the emulated flash (`test/nvs_linux`, check
+1): 708 entries in the namespace (layout 324 + log 384), 1,548 still available against a steady-state
+need of 112; page erases per schedule-set write unchanged (0.818). See "Phase C capacity check" in
+`test/nvs_linux/README.md`. Not yet measured on the device's flash.
+
+### Tests
+
+`test/host/test_evlog.c` (codec golden bytes and malformed records, paging, wraparound, restart,
+duplicates, set/commit/NO_SPACE/read-back failures, power cut, corruption and seq skip, arguments) and
+`test/host/test_history_app.c` (through the Application Service: dose and reservoir events with the
+estimate, pump fault, manual dose, adjustment, persistence across reboots; automatic and manual pump
+power cuts logged once as INTERRUPTED across repeated reboots; a power cut at every write of a dose
+wake never duplicates an event nor logs OK without a pump run; a failing history never blocks a dose
+or makes the wake DEGRADED; GET_HISTORY paging, empty page, FORBIDDEN, invalid `max`). Android: firmware
+in the loop over the simulator (`DeviceRepositoryFirmwareTest`).
+
+### Secondary diagnostics (proposal, not implemented)
+
+The bench session showed that the owner could not tell why a dose did not happen. Already available
+over BLE: device clock and trust (Status `device_utc`, `clock_trust`, `clock_reason`), last
+synchronization (Diagnostics `last_sync_utc`), next due dose (Status `next_due_known/next_due_at`).
+Proposal: (1) show these three in the app's device status screen (Android only, no protocol change);
+(2) a "last skipped dose" record — schedule ID, occurrence, reason (gate bits, limit bits, MISSED,
+ALREADY_CLAIMED, NOT_COVERED) — kept in RAM/RTC per wake and exposed as a new history event type
+(DOSE_SKIPPED, one per occurrence, deduplicated by occurrence identity) in a later minor revision;
+this needs a protocol enumeration extension (`type` 6) and care not to log every re-evaluation.
 
 ## Application and Power Services (M1.9b)
 

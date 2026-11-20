@@ -57,6 +57,7 @@
 
 #include "dsp_codec.h"
 #include "dsp_nvs_kv.h"
+#include "dsp_evlog.h"
 #include "dsp_schedule_repo.h"
 #include "dsp_storage.h"
 
@@ -270,6 +271,28 @@ static dsp_schedule_t sched_max(char c, int i)
 }
 
 /* 16 schedules with 64-character IDs and 32-byte names, 16 tombstones: 3,160 B. */
+/* Phase C: the event history at its maximum (64 events with 64-character schedule IDs). */
+static dsp_evlog_t evlog;
+static void fill_event_log_max(void)
+{
+    CHECK(dsp_evlog_open(&evlog, &kv));
+    for (uint32_t i = 0; i < 2 * DSP_EVLOG_SLOTS; i++) { /* wraps once: every slot rewritten */
+        dsp_event_t e;
+        memset(&e, 0, sizeof e);
+        e.type = DSP_EV_DOSE_SCHEDULED;
+        e.flags = DSP_EVF_CLOCK_TRUSTED | DSP_EVF_PUMP_BENCH_GPIO;
+        e.at = 1795158000 + (dsp_utc_t)i;
+        e.volume_ul = 5000;
+        e.before_ul = 100000;
+        e.after_ul = 95000;
+        e.capacity_ul = 100000;
+        e.key = 0x1000u + i;
+        memset(e.schedule_id, 'a' + (int)(i % 26), DSP_SCHEDULE_ID_MAX_LEN);
+        CHECK(dsp_evlog_append(&evlog, &e, NULL) == DSP_EVLOG_OK);
+    }
+    CHECK(dsp_evlog_newest(&evlog) == 2 * DSP_EVLOG_SLOTS);
+}
+
 static void fill_max(void)
 {
     for (int i = 0; i < 16; i++) {
@@ -539,18 +562,25 @@ static int sections_1_to_5(void)
     CHECK(open_storage() == DSP_STORAGE_OK);
     fill_max();
     CHECK(sched_len() == DSP_SCHEDULE_SET_MAX_BYTES);
+    size_t ours_layout = 0;
     nvs_handle_t h;
+    CHECK(nvs_open_from_partition("nvs", DSP_NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK);
+    CHECK(nvs_get_used_entry_count(h, &ours_layout) == ESP_OK);
+    nvs_close(h);
+    fill_event_log_max(); /* every later check runs with the full history (worst case) */
     size_t ours = 0;
     CHECK(nvs_open_from_partition("nvs", DSP_NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK);
     CHECK(nvs_get_used_entry_count(h, &ours) == ESP_OK);
     nvs_close(h);
     add_cotenants();
     nvs_stats_t s1 = stats();
-    printf("1. max records: schedule set %zu B; dispenser namespace %zu entries; partition "
-           "total %zu, used %zu, free %zu, available %zu (empty: available %zu)\n",
-           sched_len(), ours, s1.total_entries, s1.used_entries, s1.free_entries,
-           s1.available_entries, s0.available_entries);
-    CHECK(ours <= 325); /* documented budget: 309 (M1.10b.2) + 15 for "auth" (layout v5) */
+    printf("1. max records: schedule set %zu B; dispenser namespace %zu entries (layout %zu + "
+           "full event history %zu); partition total %zu, used %zu, free %zu, available %zu "
+           "(empty: available %zu)\n",
+           sched_len(), ours, ours_layout, ours - ours_layout, s1.total_entries, s1.used_entries,
+           s1.free_entries, s1.available_entries, s0.available_entries);
+    CHECK(ours_layout <= 325); /* documented budget: 309 (M1.10b.2) + 15 for "auth" (layout v5) */
+    CHECK(ours - ours_layout <= DSP_EVLOG_SLOTS * 6); /* Phase C: <= 6 entries per event */
     CHECK(s1.available_entries > 4 * 101); /* room for several full-set rewrites */
     power_cycle();
     CHECK(open_storage() == DSP_STORAGE_OK);

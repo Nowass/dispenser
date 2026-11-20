@@ -617,7 +617,7 @@ firmware application and security logic compiled for the host:
 | Refill / readiness | REFILL (absolute capacity/remaining), SET_READINESS | existing reservoir screen; no automatic resend. Phase A: "Nastavit zásobník" when the capacity is unknown, "Změnit kapacitu nebo stav" for a configured reservoir (capacity + current amount → REFILL) |
 | Time | SET_TIME when Status `clock_trust` ≠ SYNCED or after REFUSED detail 3 | uncertainty must be ≤ 2,000 ms; source of phone time and its uncertainty **[E13]** |
 | Notifications / errors | Status `pending_notes`, `highest_severity`; error table 5.2; EV_SESSION_CLOSING countdown | no Android push notifications (e-mail delivery stays in Cloudflare) |
-| History | not in protocol v1 (types 0x90–0x9F reserved) | DEVICE mode shows no device history in v1; simulated history stays DEMO-only |
+| History | GET_HISTORY (0x90, Phase C; was reserved in the original plan) | DEVICE mode pages the device's own log (section 16c); simulated history stays DEMO-only |
 | Wi-Fi provisioning | WIFI_* (`caps` bit 0; current firmware: UNAVAILABLE) | out of scope for M1.10e **[E14]** |
 
 ### 7.1 QR and code formats **[E11: flows approved; invitation layout for final approval]**
@@ -1479,6 +1479,46 @@ does not look at readiness, calibration or the hardware maximum). Its only pump-
 amount <= max_dose_ul when a max dose is set (LIMIT, detail DSP_DOSING_L_DOSE, aux = max dose): such a
 dose could never run. The app now shows that reason ("Množství je větší než maximální dávka…",
 `ScheduleWriteResult.AboveMaxDose`) instead of the generic "Zařízení změnu odmítlo".
+
+Re-timing an executed schedule (bench observation, 2026-11-20): the device doses a schedule at most
+once per local date (anti-replay watermark `<id>@<date>`, firmware README "Re-timing an executed
+schedule"). An edit of a schedule that already dosed today is accepted and listed with its new time
+but takes effect from the next date. The DEVICE-mode editor of an existing schedule says so
+(`showOncePerDayRule`, string `editor_once_per_day_rule`): for another dose today, create a new
+schedule. The app never asks the device to clear anti-replay records.
+
+## 16c. Device event history (Phase C, 2026-11-20)
+
+The DEVICE-mode History tab reads the device's own log with GET_HISTORY (BLE_PROTOCOL.md 7.6, 10.7):
+- `DeviceRepository.history(beforeSeq, max)` (read-only, not journaled, not cached; arguments checked
+  locally: `before_seq` u32, `max` 1–4); `DeviceHistoryLoader` connects through the application-wide
+  session (`connect()` reuses it) and maps outcomes: UNKNOWN_TYPE / UNAVAILABLE → Unsupported
+  (permanent, nothing shown in its place), NotSent / no connection → NotConnected, other refusals and
+  Uncertain → Failed.
+- `HistoryViewModel` (DEVICE branch, `DispenserRepository.deviceHistory`): loads by itself only once a
+  session is up (opening the tab never starts a connection); "Načíst ze zařízení" / "Obnovit" connect
+  explicitly. Each action reads up to 3 pages (12 events); "Načíst starší" continues below the oldest
+  shown `seq`. Rows are merged by `seq` (repeated, overlapping or concurrent reads never duplicate);
+  a failed refresh never clears what is shown; a failed page keeps the list and can be retried.
+- Order is the device's `seq` (its chronology); consecutive events of one local date form a day card
+  (a clock correction never reorders events by time); events without a time are shown in device order
+  under "Neznámý čas".
+- Labels: completed, failed (pump fault / not started), interrupted (outcome unknown) and aborted
+  (storage, pump never ran) doses; reservoir set / refilled / adjusted with the estimate before → after
+  and the capacity. Tags: "BENCH: jen signál GPIO" (bench GPIO build: "dodání kapaliny nebylo
+  ověřeno"), "SIMULACE" (simulated pump), "čas neověřen". The header says volumes are calculated from
+  the runtime and the reservoir is an estimate. Deleted schedules show "Plán (již neexistuje)", never
+  an invented name. The device's FAULTS flag shows a warning that events may be missing.
+- Not kept beyond the screen (no local copy, no merge with DEMO events); DEMO mode is unchanged
+  (simulated events, `observeHistory`). The release feature policy is unchanged (DEVICE mode as
+  before; nothing debug-only was added). Navigating away never disconnects the shared session.
+- Tests: `DeviceHistoryViewModelTest` (empty, paging and end, refresh with a new event, merge by seq,
+  names and unknown time, unsupported firmware, disconnected not contacted until asked, failed pages,
+  faults, loader mapping), `HistoryRecordsTest` (typed records from the shared vector),
+  `DeviceRepositoryFirmwareTest` (firmware in the loop: dose → history → reconnect, new wake, new
+  process → identical history; a pump power cut → exactly one INTERRUPTED across boots; no session →
+  NotSent; invalid arguments never sent), `ModeShellTest` (DEVICE tab, disconnected, no simulation
+  text).
 
 ## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
 

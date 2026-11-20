@@ -15,7 +15,8 @@
  * recycled (retention) that protection is gone for its dates (see firmware/README.md).
  *
  * This history exists for deduplication only. It is not the user-visible event journal
- * (FR-040), which keeps every attempt and outcome and is a separate, later component.
+ * (FR-040): that is dsp_evlog (Phase C), a separate component with its own keys that never
+ * reads or writes these records.
  */
 
 #include <stdbool.h>

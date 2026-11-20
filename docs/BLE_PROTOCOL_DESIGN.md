@@ -761,7 +761,8 @@ length ‖ UTF-8`; booleans 0/1 only; instants `i64` UTC seconds; volumes `u32` 
 | 0x81 | EV_SUSPENDING_FOR_DOSE | event | `seconds_until u16` | | existing |
 | 0x82 | EV_BUSY | event (plain) | queue full | | platform |
 | 0x83 | EV_CONFIRM_ON_DEVICE | event | `action u8, seconds u8` (press the button now) | | M10 |
-| 0x90–0x9F | reserved: journal (M8) | | | | |
+| 0x90 | GET_HISTORY (Phase C, 2026-11-20; normative: BLE_PROTOCOL.md 7.6, 10.7) | | | | |
+| 0x91–0x9F | reserved: journal (M8) | | | | |
 | 0xA0–0xAF | reserved: priming/calibration (M9) | | | | |
 
 Error payload: `code u8, detail u32, aux u32` with the codes of revision 1 (MALFORMED,

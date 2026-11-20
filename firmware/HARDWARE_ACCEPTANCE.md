@@ -475,6 +475,22 @@ panic, task-watchdog or error line.
 Not covered by this run and still required before any real pump: G1/G2/G4–G6, a CPU-independent
 hardware cutoff, the external pull-down check, and every measurement of real flow (calibration).
 
+### 8d. Event history (Phase C; OPEN, needs a new firmware image and app)
+
+Offline only so far (host tests, firmware-in-the-loop, NVS emulation; see firmware README "Event
+history (Phase C)"). On the bench, with the GPIO image built from the Phase C commit (application at
+0x30000 only, after the usual backups and verification; **separate approval required**) and the
+matching debug APK:
+
+| # | Check | Expected | Result |
+|---|---|---|---|
+| E1 | First boot of the new image on the existing NVS | storage opens as layout v5 (no migration), schedules, ownership, reservoir and readiness unchanged; History tab: empty ("starší dávky se nezobrazují"), no invented events | |
+| E2 | Refill / set capacity in the app (NOT READY) | one RESERVOIR_REFILL / INIT / ADJUST event with before → after | |
+| E3 | One new scheduled 5 ml dose (GPIO only, no load) | one 5 s pulse; one DOSE_SCHEDULED OK event tagged "BENCH: jen signál GPIO", estimate before → after − 5 ml | |
+| E4 | Reconnect, then a RESET of the board | the same events with the same order after both | |
+| E5 | RESET during a pulse (same as G6) | after the reboot exactly one DOSE INTERRUPTED event, reservoir unknown; never repeated by further resets | |
+| E6 | "Načíst starší" after more than 12 events | older events appended, no duplicates, the end marker after the oldest | |
+
 ## 9. Configuration limits and storage (M1.10b.1)
 
 The firmware accepts every representable value of the calibration and safety fields (only

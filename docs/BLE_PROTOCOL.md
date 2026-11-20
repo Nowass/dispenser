@@ -137,13 +137,14 @@ notification (device → client).
 | 0x74 | RECOVERY_CANCEL | enc | empty | empty |
 | 0x7D | FACTORY_RESET | enc | `confirm u32` = `0x54455352` ("RSET") | empty |
 | 0x7E | END_SESSION | plain or enc | empty | empty |
+| 0x90 | GET_HISTORY | enc | `before_seq u32, max u8 (1–4)` | `newest_seq u32, oldest_seq u32, flags u8 (bit 0 FAULTS), n u8 (0–4), n × HistoryEvent (7.6)` |
 | 0x80 | EV_SESSION_CLOSING | event, enc | `reason u8, seconds_left u16` | — |
 | 0x81 | EV_SUSPENDING_FOR_DOSE | event, enc | `seconds_until u16` | — |
 | 0x82 | EV_BUSY | event, plain | empty | — (reserved: firmware v1 never sends it, section 3) |
 | 0x83 | EV_CONFIRM_ON_DEVICE | event, enc | `action u8, seconds u8` | — |
 
-Types 0x90–0x9F (journal) and 0xA0–0xAF (priming/calibration) are reserved; all other
-unlisted types are unknown.
+Types 0x91–0x9F (journal; 0x90 is GET_HISTORY since Phase C) and 0xA0–0xAF
+(priming/calibration) are reserved; all other unlisted types are unknown.
 
 Error body (any type, flags `RESPONSE|ERROR`): `code u8, detail u32, aux u32`.
 
@@ -164,6 +165,10 @@ Error body (any type, flags `RESPONSE|ERROR`): `code u8, detail u32, aux u32`.
 | `action` (EV_CONFIRM_ON_DEVICE) | 1 RECOVERY |
 | error `code` | 1 MALFORMED, 2 UNSUPPORTED_VERSION, 3 UNKNOWN_TYPE, 4 UNAUTHENTICATED, 5 FORBIDDEN, 6 BUSY, 7 REFUSED, 8 LIMIT, 9 NOT_COVERED, 10 INVALID, 11 CONFLICT, 12 NOT_FOUND, 13 STORAGE, 14 DEGRADED, 15 PUMP_FAILED, 16 SESSION_EXPIRED, 17 DUPLICATE, 18 HANDSHAKE_FAILED, 19 SLOTS_FULL, 20 UNAVAILABLE (M1.10c.1; section 8.1) |
 | Schedule `kind` | 0 ONCE, 1 DAILY, 2 WEEKLY |
+| HistoryEvent `type` | 1 DOSE_SCHEDULED, 2 DOSE_MANUAL, 3 RESERVOIR_INIT, 4 RESERVOIR_REFILL, 5 RESERVOIR_ADJUST |
+| HistoryEvent `result` | 0 OK, 1 PUMP_FAILED, 2 START_FAILED, 3 INTERRUPTED, 4 ABORTED |
+| HistoryEvent `flags` | bit 0 CLOCK_TRUSTED, bit 1 RESERVOIR_UNKNOWN, bit 2 PUMP_SIMULATED, bit 3 PUMP_BENCH_GPIO; bits 4–7 MUST be 0 |
+| GET_HISTORY response `flags` | bit 0 FAULTS; bits 1–7 MUST be 0 |
 
 Value ranges not listed (gates, limits, masks, revisions, volumes) are carried as-is; their
 meaning and validation belong to the domain.
@@ -228,6 +233,28 @@ Sunday, bit 7 MUST be 0) | has_end bool | end_date date | name str(0..32,text)`.
 
 When `has_end` is 0 the `end_date` bytes MUST be zero.
 
+### 7.6 HistoryEvent (Phase C)
+
+`seq u32 | type u8 | result u8 | flags u8 | at i64 | volume_ul u32 | before_ul u32 | after_ul u32 |
+capacity_ul u32 | schedule_id str(0..64,id)` (32–96 bytes).
+
+- `seq`: the device's event number, from 1, strictly increasing, gaps possible (a lost append or a
+  skipped ring after a damaged slot). It is the only order: newest = highest.
+- `at`: the dose start (claim time) or the time of the reservoir change, in UTC seconds; 0 = the
+  device knew no time. `CLOCK_TRUSTED` clear: the device time was not trusted then.
+- `volume_ul`: the requested (nominal) dose volume; 0 for reservoir events. **No event is a
+  measurement:** `result` 0 OK for a dose means the pump port ran the runtime calculated from the
+  configured flow. `PUMP_SIMULATED`: firmware with the simulated pump (nothing actuated).
+  `PUMP_BENCH_GPIO`: the bench GPIO control-signal build (no liquid delivery verified).
+- `before_ul` / `after_ul`: the reservoir estimate before and after; both 0 with
+  `RESERVOIR_UNKNOWN` (e.g. an interrupted dose, whose consumption may or may not have been
+  stored). `capacity_ul`: the capacity after the event (0 when unknown).
+- `schedule_id`: set for DOSE_SCHEDULED only, else empty.
+- `result` for doses: 1 the pump port reported a fault during the run, 2 it could not start, 3 a
+  reset or power loss after the durable claim (outcome unknown; logged by the next boot's
+  recovery), 4 a storage failure after the claim (the pump never ran). Reservoir events are
+  always 0.
+
 ## 8. Versioning and negotiation
 
 - `major` changes are incompatible. The client sends HELLO with the range of majors it supports;
@@ -240,7 +267,11 @@ When `has_end` is 0 the `end_date` bytes MUST be zero.
   the frame's `minor` is greater than its own; with the same or a lower `minor` trailing bytes
   are malformed. A sender never omits fields of its own minor.
 - `caps` (u32) announces optional features; v1.0 bits: 0 WIFI_PROVISIONING, 1 PHONE_TIME,
-  2 HISTORY, 3 PRIMING, 4 VIEWER_ROLE (all others 0).
+  2 HISTORY, 3 PRIMING, 4 VIEWER_ROLE (all others 0). HISTORY (Phase C): the device answers
+  GET_HISTORY. Firmware without it answers `UNKNOWN_TYPE` (older firmware: 0x90 was a reserved
+  journal type) or `UNAVAILABLE`; a client treats both as "no device history" and shows nothing
+  in its place. Adding GET_HISTORY needs no minor change: the type was reserved for the journal in
+  v1.0 and its capability bit was already defined.
 
 ### 8.1 Unknown versus unavailable operations (M1.10c.1, decision C5)
 
@@ -421,6 +452,31 @@ error on a connection closes it, and an unauthenticated connection is closed aft
 errors carry `detail` 0 (except `UNSUPPORTED_VERSION`, section 8) and never depend on secret state.
 No request in this phase reaches a device operation.
 
+
+### 10.7 Event history (Phase C)
+
+`GET_HISTORY` (owner session, read-only, no write budget, never changes state): up to `max` (1–4)
+events with `seq < before_seq` (`before_seq` 0 = from the newest), newest first. The device stops
+earlier only at the end of its history: a page with fewer events than `max`, or whose last `seq`
+equals `oldest_seq`, is the last one. `newest_seq` / `oldest_seq`: the range the device holds now
+(both 0 = empty). Paging continues with `before_seq` = the last `seq` received.
+
+- **Stable under appends:** new events get higher `seq` values and never appear below a cursor, so a
+  paged read never repeats or reorders an event. A client that wants the newest events reads again
+  from 0 and de-duplicates by `seq`.
+- **Retention:** the device keeps the last 64 events; older ones are overwritten. An event evicted
+  while a client pages is simply absent (its `seq` is below `oldest_seq`).
+- **`FAULTS`:** since its last boot the device found unreadable history slots or could not store an
+  event; some events may be missing. It is not persisted (a failure in an earlier wake is not
+  reported).
+- What is logged: every automatic and manual dose whose claim became durable (OK, PUMP_FAILED,
+  START_FAILED, ABORTED, and INTERRUPTED from the next boot's recovery), and every completed
+  reservoir change (REFILL operation, or a capacity change by SET_CONFIG). An event is stored only
+  after the change it describes is durable; a power loss in between loses the event, never
+  duplicates it. Doses that never started (gates, limits, missed, already claimed) are not events.
+  Events from before the firmware that introduced the log never existed and are never invented.
+- Malformed requests (`max` outside 1–4, wrong length) are rejected by the codec (`MALFORMED`); the
+  history never contains credentials, setup codes, keys or Wi-Fi data, only the fields of 7.6.
 
 ## 11. Session security (M1.10c.2a)
 
