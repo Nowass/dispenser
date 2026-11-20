@@ -44,6 +44,8 @@ sealed interface ReservoirUiState {
         val now: Instant = Instant.EPOCH,
         /** DEVICE mode while not connected: refill needs a live session (E12), so it is not offered. */
         val refillNeedsConnection: Boolean = false,
+        /** DEVICE mode: capacity and current amount can be set (initialization / capacity change). */
+        val configurable: Boolean = false,
     ) : ReservoirUiState
 }
 
@@ -61,7 +63,12 @@ enum class RefillOutcome {
     NOT_ACCEPTED,
 }
 
-enum class RefillError { INVALID, NOT_POSITIVE, TOO_PRECISE, ABOVE_CAPACITY, NOT_ACTIVE }
+enum class RefillError { INVALID, NOT_POSITIVE, TOO_PRECISE, ABOVE_CAPACITY, NOT_ACTIVE, OUT_OF_RANGE }
+
+/** Field errors of the reservoir configuration (capacity + current amount); both null = valid. */
+data class ReservoirConfigErrors(val capacity: RefillError?, val remaining: RefillError?) {
+    val valid: Boolean get() = capacity == null && remaining == null
+}
 
 /** Reservoir detail: presentation mapping only; rules live in the domain (policy, predictor, engine). */
 class ReservoirViewModel(
@@ -85,6 +92,7 @@ class ReservoirViewModel(
             freshness = device.freshness,
             now = device.now,
             refillNeedsConnection = repository.writesRequireConnection && device.connection != ConnectionState.CONNECTED,
+            configurable = device.source == DataSource.DEVICE,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReservoirUiState.Loading)
 
@@ -94,8 +102,13 @@ class ReservoirViewModel(
     private val _refillOutcome = MutableStateFlow<RefillOutcome?>(null)
     val refillOutcome: StateFlow<RefillOutcome?> = _refillOutcome.asStateFlow()
 
+    private val _configured = MutableStateFlow(false)
+    /** The device confirmed a capacity/amount configuration. */
+    val configured: StateFlow<Boolean> = _configured.asStateFlow()
+
     fun consumeRefillDone() {
         _refillDone.value = false
+        _configured.value = false
         _refillOutcome.value = null
     }
 
@@ -115,20 +128,70 @@ class ReservoirViewModel(
         if (validateRefill(text) != null) return
         val ul = (Volume.mlToMicrolitres(AmountInput.parseMl(text)!!) as Volume.Conversion.Ok).microlitres
         viewModelScope.launch {
-            when (repository.refillReservoir(ul)) {
-                is CommandResult.Done -> _refillDone.value = true
-                CommandResult.Uncertain -> _refillOutcome.value = RefillOutcome.UNCERTAIN
-                CommandResult.NotSent -> _refillOutcome.value = RefillOutcome.NOT_SENT
-                CommandResult.AwaitingVerification -> _refillOutcome.value = RefillOutcome.AWAITING_VERIFICATION
-                is CommandResult.DeviceRejected -> _refillOutcome.value = RefillOutcome.REJECTED
-                CommandResult.NotAccepted -> _refillOutcome.value = RefillOutcome.NOT_ACCEPTED
-                // DEMO results other than Done: unchanged behavior (nothing shown).
-                is CommandResult.Rejected, CommandResult.NotActive, CommandResult.AlreadyActive -> Unit
-            }
+            if (outcome(repository.refillReservoir(ul))) _refillDone.value = true
         }
     }
 
+    /**
+     * Validates a capacity and a current amount (ml texts). The firmware requires
+     * 0 < amount <= capacity <= u32 µl: an empty reservoir (0 ml) is refused here and never replaced by
+     * another value (a later firmware may accept it).
+     */
+    fun validateConfigure(capacityText: String, remainingText: String): ReservoirConfigErrors {
+        val capacity = parse(capacityText)
+        val capError = when {
+            capacity == null -> RefillError.INVALID
+            capacity is Volume.Conversion.Ok && capacity.microlitres > CAPACITY_MAX_UL -> RefillError.OUT_OF_RANGE
+            else -> errorOf(capacity)
+        }
+        val remaining = parse(remainingText)
+        val remError = when {
+            remaining == null -> RefillError.INVALID
+            remaining !is Volume.Conversion.Ok -> errorOf(remaining)
+            capacity is Volume.Conversion.Ok && capError == null && remaining.microlitres > capacity.microlitres -> RefillError.ABOVE_CAPACITY
+            else -> null
+        }
+        return ReservoirConfigErrors(capError, remError)
+    }
+
+    /** Sends the capacity and current amount (DEVICE mode); only valid input is sent. */
+    fun configure(capacityText: String, remainingText: String) {
+        if (!validateConfigure(capacityText, remainingText).valid) return
+        val cap = (parse(capacityText) as Volume.Conversion.Ok).microlitres
+        val rem = (parse(remainingText) as Volume.Conversion.Ok).microlitres
+        viewModelScope.launch {
+            if (outcome(repository.configureReservoir(cap, rem))) _configured.value = true
+        }
+    }
+
+    private fun parse(text: String): Volume.Conversion? = AmountInput.parseMl(text)?.let { Volume.mlToMicrolitres(it) }
+
+    private fun errorOf(c: Volume.Conversion): RefillError? = when (c) {
+        is Volume.Conversion.Ok -> null
+        Volume.Conversion.NotPositive -> RefillError.NOT_POSITIVE
+        Volume.Conversion.TooPrecise -> RefillError.TOO_PRECISE
+        Volume.Conversion.NotFinite, Volume.Conversion.OutOfRange -> RefillError.INVALID
+    }
+
+    /** Maps a refill/configure result to the shared outcome; true = confirmed by the device (or DEMO done). */
+    private fun outcome(r: CommandResult): Boolean {
+        when (r) {
+            is CommandResult.Done -> return true
+            CommandResult.Uncertain -> _refillOutcome.value = RefillOutcome.UNCERTAIN
+            CommandResult.NotSent -> _refillOutcome.value = RefillOutcome.NOT_SENT
+            CommandResult.AwaitingVerification -> _refillOutcome.value = RefillOutcome.AWAITING_VERIFICATION
+            is CommandResult.DeviceRejected -> _refillOutcome.value = RefillOutcome.REJECTED
+            CommandResult.NotAccepted -> _refillOutcome.value = RefillOutcome.NOT_ACCEPTED
+            // DEMO results other than Done: unchanged behavior (nothing shown).
+            is CommandResult.Rejected, CommandResult.NotActive, CommandResult.AlreadyActive -> Unit
+        }
+        return false
+    }
+
     companion object {
+        /** REFILL carries capacity_ul as a u32 (BLE_PROTOCOL 0x42). */
+        const val CAPACITY_MAX_UL = 0xFFFF_FFFFL
+
         fun factory(repository: DispenserRepository, lowStock: LowStockPolicy): ViewModelProvider.Factory = viewModelFactory {
             initializer { ReservoirViewModel(repository, lowStock) }
         }

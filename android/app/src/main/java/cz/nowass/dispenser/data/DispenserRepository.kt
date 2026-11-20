@@ -35,6 +35,15 @@ interface DispenserRepository {
     suspend fun refillReservoir(remainingUl: Long): CommandResult
 
     /**
+     * DEVICE mode: sets the reservoir capacity and the current amount together (initializes an
+     * unconfigured reservoir, or changes the capacity of a configured one), through the same REFILL
+     * as [refillReservoir] (journaled, verified by read-back). 0 < [remainingUl] <= [capacityUl]; an
+     * empty reservoir (0) is not accepted by the current firmware and is never replaced by another
+     * value. DEMO: [CommandResult.NotActive] (the simulation's capacity is fixed by its start).
+     */
+    suspend fun configureReservoir(capacityUl: Long, remainingUl: Long): CommandResult = CommandResult.NotActive
+
+    /**
      * Device confirmation state per schedule id. Locally saved schedules are
      * [SyncState.PENDING] ("Uloženo v telefonu"): stored on the phone, not transferred
      * to or accepted by the dispenser. Only a future device read-back may report

@@ -23,6 +23,9 @@ import cz.nowass.dispenser.ui.history.HistoryUiState
 import cz.nowass.dispenser.ui.history.HistoryViewModel
 import cz.nowass.dispenser.ui.reservoir.RefillOutcome
 import cz.nowass.dispenser.ui.reservoir.ReservoirUiState
+import cz.nowass.dispenser.device.ops.DeviceValidation
+import cz.nowass.dispenser.ui.reservoir.RefillError
+import cz.nowass.dispenser.ui.reservoir.ReservoirConfigErrors
 import cz.nowass.dispenser.ui.reservoir.ReservoirViewModel
 import cz.nowass.dispenser.ui.schedule.EditorResult
 import cz.nowass.dispenser.ui.schedule.ScheduleEditorUiState
@@ -163,6 +166,43 @@ class DeviceModeViewModelsTest {
         fake.writeOutcome = OpResult.Ok(ScheduleWrite("id-1", 4, 10))
         vm.save()
         assertEquals(EditorResult.SAVED, vm.closeResult.value)
+    }
+
+    @Test
+    fun unknown_reservoir_offers_configuration_with_validation_and_device_outcomes() = runTest {
+        fake.authenticated(7)
+        fake.statusF.value = Fresh.Live(FakeDeviceRepository.status(capacityUl = 0, remainingUl = 0), readAt, 7)
+        val vm = ReservoirViewModel(repo)
+        val s = vm.uiState.let { f -> backgroundScope.launch { f.collect {} }; f.filterIsInstance<ReservoirUiState.Ready>().first { !it.refillNeedsConnection } }
+        assertNull("capacity unknown", s.reservoir)
+        assertTrue(s.configurable)
+        assertEquals(ReservoirConfigErrors(null, null), vm.validateConfigure("500", "300"))
+        assertEquals(ReservoirConfigErrors(null, null), vm.validateConfigure("500", "500")) // full
+        assertEquals(RefillError.NOT_POSITIVE, vm.validateConfigure("500", "0").remaining) // empty: refused, not substituted
+        assertEquals(RefillError.ABOVE_CAPACITY, vm.validateConfigure("500", "501").remaining)
+        assertEquals(RefillError.NOT_POSITIVE, vm.validateConfigure("0", "1").capacity)
+        assertEquals(RefillError.OUT_OF_RANGE, vm.validateConfigure("4294968", "1").capacity) // > u32 µl
+        assertEquals(ReservoirConfigErrors(null, null), vm.validateConfigure("4294967,295", "1"))
+        assertEquals(RefillError.INVALID, vm.validateConfigure("abc", "1").capacity)
+        assertEquals(RefillError.TOO_PRECISE, vm.validateConfigure("500", "1,0005").remaining)
+        // invalid input is never sent
+        vm.configure("500", "0")
+        assertTrue(fake.calls.none { it.startsWith("refill") })
+        // outcomes: uncertain is neither success nor failure; confirmed sets the done state
+        fake.refillOutcome = OpResult.Uncertain("lost reply", journalId = 3)
+        vm.configure("500", "300")
+        assertEquals("refill 300000 capacity 500000", fake.calls.last())
+        assertEquals(RefillOutcome.UNCERTAIN, vm.refillOutcome.value)
+        assertFalse(vm.configured.value)
+        vm.consumeRefillDone()
+        fake.refillOutcome = OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.CAPACITY_INVALID)))
+        vm.configure("500", "300")
+        assertEquals(RefillOutcome.NOT_ACCEPTED, vm.refillOutcome.value)
+        vm.consumeRefillDone()
+        fake.refillOutcome = OpResult.Ok(FakeDeviceRepository.status(capacityUl = 500_000, remainingUl = 300_000))
+        vm.configure("500", "300")
+        assertTrue(vm.configured.value)
+        assertNull(vm.refillOutcome.value)
     }
 
     @Test

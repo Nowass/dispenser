@@ -296,6 +296,70 @@ class DeviceRepositoryTest {
         assertEquals(OpResult.Refused(LocalRefusal.Unresolved(id)), r.refill(110_000))
     }
 
+    // ---- Phase A: reservoir configuration (capacity + current amount through REFILL) ------------
+
+    @Test
+    fun an_unconfigured_reservoir_is_initialized_with_the_given_capacity() = runTest {
+        val r = repo()
+        r.connected()
+        dev.capacityUl = 0
+        dev.remainingUl = 0
+        // without a capacity the phone refuses: nothing sent
+        assertEquals(OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.CAPACITY_UNKNOWN))), r.refill(100_000))
+        assertEquals(0, dev.count(M.REFILL))
+        val res = r.refill(300_000, capacityUl = 500_000)
+        assertTrue("$res", res is OpResult.Ok)
+        val sent = dev.received.last { it.first == M.REFILL }.second
+        assertEquals(500_000L, sent["capacity_ul"])
+        assertEquals(300_000L, sent["remaining_ul"])
+        assertEquals(500_000L, (res as OpResult.Ok).value.capacityUl)
+        assertEquals(300_000L, res.value.remainingUl)
+        assertTrue("journal row resolved by the answer", rows().none { it.unresolved })
+        // afterwards a plain refill uses the capacity now known to the device
+        assertTrue(r.refill(450_000) is OpResult.Ok)
+        assertEquals(500_000L, dev.received.last { it.first == M.REFILL }.second["capacity_ul"])
+    }
+
+    @Test
+    fun invalid_reservoir_values_are_refused_locally_and_never_sent() = runTest {
+        val r = repo()
+        r.connected()
+        val before = dev.received.size
+        fun invalid(res: OpResult<*>, vararg v: DeviceValidation) =
+            assertEquals(OpResult.Refused(LocalRefusal.Invalid(v.toSet())), res)
+        invalid(r.refill(0, capacityUl = 500_000), DeviceValidation.REMAINING_NOT_POSITIVE) // empty: not accepted yet, never replaced
+        invalid(r.refill(0), DeviceValidation.REMAINING_NOT_POSITIVE)
+        invalid(r.refill(-1, capacityUl = 500_000), DeviceValidation.REMAINING_NOT_POSITIVE)
+        invalid(r.refill(600_000, capacityUl = 500_000), DeviceValidation.REMAINING_ABOVE_CAPACITY)
+        invalid(r.refill(1, capacityUl = 0), DeviceValidation.CAPACITY_INVALID)
+        invalid(r.refill(1, capacityUl = 0x1_0000_0000L), DeviceValidation.CAPACITY_INVALID) // beyond u32
+        invalid(r.refill(0, capacityUl = 0), DeviceValidation.REMAINING_NOT_POSITIVE, DeviceValidation.CAPACITY_INVALID)
+        assertEquals("nothing reached the device, not even a status read", before, dev.received.size)
+        assertTrue(rows().isEmpty())
+        // the boundaries are accepted: 1 µl and exactly the capacity
+        assertTrue(r.refill(1, capacityUl = 500_000) is OpResult.Ok)
+        assertTrue(r.refill(0xFFFF_FFFFL, capacityUl = 0xFFFF_FFFFL) is OpResult.Ok)
+    }
+
+    @Test
+    fun a_lost_configuration_answer_is_uncertain_never_repeated_and_read_back() = runTest {
+        val r = repo()
+        r.connected()
+        dev.capacityUl = 0
+        dev.faults[M.REFILL] = FakeDevicePort.Fault.EXECUTE_THEN_LOSE
+        assertTrue(r.refill(300_000, capacityUl = 500_000) is OpResult.Uncertain)
+        // the same values again are refused while the first is unresolved (never a second REFILL)
+        val id = rows().single().id
+        assertTrue(rows().single().unresolved)
+        r.connected() // next session: read back, never re-sent
+        val row = rows().single()
+        assertEquals(id, row.id)
+        assertEquals(Resolution.READ_BACK, row.resolution)
+        assertEquals(300_000L, row.resolutionDetail)
+        assertEquals(500_000L, dev.capacityUl)
+        assertEquals(1, dev.count(M.REFILL))
+    }
+
     // ---- schedules ---------------------------------------------------------------------------
 
     @Test

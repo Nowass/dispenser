@@ -350,23 +350,39 @@ class DeviceDispenserRepository(
 
     // ---- REFILL (D5) -------------------------------------------------------------------------
 
-    override suspend fun refill(remainingUl: Long): OpResult<StatusRecord> {
+    override suspend fun refill(remainingUl: Long, capacityUl: Long?): OpResult<StatusRecord> {
+        // values that can never be valid are refused before anything else (nothing sent, nothing read)
+        refillProblems(remainingUl, capacityUl)?.let { return OpResult.Refused(LocalRefusal.Invalid(it)) }
         val s = session() ?: return notConnected()
         return reserved("REFILL", { unresolved(PendingKind.REFILL) }) {
-            // the capacity comes from THIS session, immediately before; never from the cache
+            // the current capacity comes from THIS session, immediately before; never from the cache
             val st = when (val r = readStatus(s)) {
                 is OpResult.Ok -> r.value
                 is OpResult.Uncertain -> return OpResult.NotSent("status read failed: ${r.reason}") // REFILL itself was never sent
                 else -> return r.cast()
             }
             if (!same(s)) return OpResult.Refused(LocalRefusal.SessionChanged)
-            if (st.capacityUl <= 0) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.CAPACITY_UNKNOWN)))
-            if (remainingUl !in 0..st.capacityUl) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.REMAINING_ABOVE_CAPACITY)))
+            val capacity = capacityUl ?: st.capacityUl
+            if (capacity <= 0) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.CAPACITY_UNKNOWN)))
+            if (remainingUl > capacity) return OpResult.Refused(LocalRefusal.Invalid(setOf(DeviceValidation.REMAINING_ABOVE_CAPACITY)))
             var body: ByteArray? = null
             journaled(s, op(PendingKind.REFILL).copy(volumeUl = remainingUl), M.REFILL,
-                mapOf("capacity_ul" to st.capacityUl, "remaining_ul" to remainingUl),
+                mapOf("capacity_ul" to capacity, "remaining_ul" to remainingUl),
                 decode = { m -> body = enc(M.REFILL, m); Records.status(m) }) { v -> keep(statusS, KEY_STATUS, v, checkNotNull(body), s) }
         }
+    }
+
+    /** Value checks of REFILL that need no device state (firmware: 0 < remaining <= capacity <= u32). */
+    private fun refillProblems(remainingUl: Long, capacityUl: Long?): Set<DeviceValidation>? {
+        val p = mutableSetOf<DeviceValidation>()
+        if (remainingUl <= 0) p += DeviceValidation.REMAINING_NOT_POSITIVE
+        if (capacityUl != null) {
+            if (capacityUl !in 1..DeviceScheduleMapping.U32_MAX) p += DeviceValidation.CAPACITY_INVALID
+            else if (remainingUl > capacityUl) p += DeviceValidation.REMAINING_ABOVE_CAPACITY
+        } else if (remainingUl > DeviceScheduleMapping.U32_MAX) {
+            p += DeviceValidation.REMAINING_ABOVE_CAPACITY
+        }
+        return p.takeIf { it.isNotEmpty() }
     }
 
     // ---- schedules ---------------------------------------------------------------------------

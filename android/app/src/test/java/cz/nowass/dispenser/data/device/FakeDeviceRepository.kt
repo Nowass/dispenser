@@ -65,7 +65,9 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
         calls += "update $id $expectedRevision enabled=${draft.enabled}"; return writeOutcome
     }
     override suspend fun deleteSchedule(id: String, expectedRevision: Long): OpResult<ScheduleWrite> { calls += "delete $id"; return writeOutcome }
-    override suspend fun refill(remainingUl: Long): OpResult<StatusRecord> { calls += "refill $remainingUl"; return refillOutcome }
+    override suspend fun refill(remainingUl: Long, capacityUl: Long?): OpResult<StatusRecord> {
+        calls += if (capacityUl == null) "refill $remainingUl" else "refill $remainingUl capacity $capacityUl"; return refillOutcome
+    }
 
     private fun no(): Nothing = throw UnsupportedOperationException("not used by the shared-screen adapter")
     override suspend fun refreshStatus(): OpResult<StatusRecord> = no()

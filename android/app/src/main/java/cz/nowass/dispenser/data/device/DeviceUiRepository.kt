@@ -131,7 +131,13 @@ class DeviceUiRepository(
     /** No mutation while the credential is unusable (fail closed; nothing is journaled or sent). */
     private val blocked: Boolean get() = access.value.recoveryRequired
 
-    override suspend fun refillReservoir(remainingUl: Long): CommandResult = if (blocked) CommandResult.NotSent else when (val r = device.refill(remainingUl)) {
+    override suspend fun refillReservoir(remainingUl: Long): CommandResult =
+        if (blocked) CommandResult.NotSent else commandOf(device.refill(remainingUl))
+
+    override suspend fun configureReservoir(capacityUl: Long, remainingUl: Long): CommandResult =
+        if (blocked) CommandResult.NotSent else commandOf(device.refill(remainingUl, capacityUl))
+
+    private fun commandOf(r: OpResult<StatusRecord>): CommandResult = when (r) {
         is OpResult.Ok -> CommandResult.Done(newEvents = 0)
         is OpResult.Uncertain -> CommandResult.Uncertain
         is OpResult.NotSent -> CommandResult.NotSent

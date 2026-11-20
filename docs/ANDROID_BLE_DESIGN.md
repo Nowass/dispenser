@@ -614,7 +614,7 @@ firmware application and security logic compiled for the host:
 | Configuration | GET_CONFIG / SET_CONFIG (revisioned, field mask; limits only in SERVICE_REQUIRED) | read-before-write; conflict UI |
 | Schedules | LIST (paged, 4/page) + GET each; CREATE/UPDATE/DELETE with revisions; read-back → `DEVICE_APPLIED` | device is the source of truth in DEVICE mode; Android IDs (UUID) fit `str(1..64,id)`; µl `u32` limit enforced before sending; device timezone is Europe/Prague (non-Prague schedules refused in DEVICE mode); edits are online-only in v1 **[E12]** |
 | Manual dose | MANUAL_DOSE{seq, µl} → EV_SUSPENDING_FOR_DOSE → disconnect → reconnect → GET_RESULT | confirmation dialog; journal entry before send; no auto-reissue |
-| Refill / readiness | REFILL (absolute capacity/remaining), SET_READINESS | existing reservoir screen; no automatic resend |
+| Refill / readiness | REFILL (absolute capacity/remaining), SET_READINESS | existing reservoir screen; no automatic resend. Phase A: "Nastavit zásobník" when the capacity is unknown, "Změnit kapacitu nebo stav" for a configured reservoir (capacity + current amount → REFILL) |
 | Time | SET_TIME when Status `clock_trust` ≠ SYNCED or after REFUSED detail 3 | uncertainty must be ≤ 2,000 ms; source of phone time and its uncertainty **[E13]** |
 | Notifications / errors | Status `pending_notes`, `highest_severity`; error table 5.2; EV_SESSION_CLOSING countdown | no Android push notifications (e-mail delivery stays in Cloudflare) |
 | History | not in protocol v1 (types 0x90–0x9F reserved) | DEVICE mode shows no device history in v1; simulated history stays DEMO-only |
@@ -1194,7 +1194,7 @@ the additional rules below; D6 modified.
 | `data/device/local/DeviceDatabase` | Room `device.db` (schema exported): `pending_ops` journal and `device_cache` (the device's own response bodies with their read time); excluded from backup/transfer by the existing catch-all rules; no destructive migration |
 | Journal (11.4, table 5.1) | written before every journaled mutation (manual dose, REFILL, SET_CONFIG, schedule writes, SET_READINESS, PHONE_REMOVE); removed on a definitive answer; kept on `Uncertain` and on STORAGE; resolved by read-back at the next session: GET_RESULT (manual), Status (REFILL → `READ_BACK`, readiness), GET_CONFIG (masked fields), GET_SCHEDULE (`APPLIED` / `NOT_APPLIED` / `CHANGED_ELSEWHERE`), PHONES_LIST; duplicate intents and stacked doses refused while a row is unresolved |
 | Manual dose (D4, E12) | live floor → durable `seq` → durable PREPARED row → send; NOT_DECIDED → `AWAITING_USER` (re-send with the same `seq` or discard, user actions only); PENDING stays unresolved; DONE / FAILED / REFUSED / INTERRUPTED / result-unavailable resolved and kept until acknowledged |
-| REFILL (D5) | capacity from GET_STATUS in the same session immediately before; aborted (`SessionChanged`) if the session changed or closed; never re-sent automatically |
+| REFILL (D5) | capacity from GET_STATUS in the same session immediately before; aborted (`SessionChanged`) if the session changed or closed; never re-sent automatically. Phase A (2026-11-20): `refill(remaining, capacity?)` with an explicit capacity initializes an unconfigured reservoir or changes the capacity (same REFILL, journal and read-back) |
 | SET_TIME (D6) | behind `PhoneTimeSource` (UTC + uncertainty); no source or an uncertainty outside 0..2,000 ms → `Refused(TimeUntrusted)`, nothing sent; never retransmitted (a resend would carry a stale time) |
 
 ### 15.2 Findings
@@ -1435,6 +1435,27 @@ Check for Updates, the changelog and the licences are unchanged.
   device's own thresholds, gates and readiness are shown by the device status screen (step d).
 - `CredentialStore.hasConfirmedRecord` (file check, also as a static for startup) is the only change
   in `crypto/`.
+
+## 16a. Reservoir configuration (Phase A, bench MVP, 2026-11-20)
+
+A new board reports capacity 0, so the reservoir is unknown and the existing refill (which keeps the
+device's capacity) is refused locally (`CAPACITY_UNKNOWN`). Phase A lets the owner set it through the
+existing REFILL (`capacity_ul`, `remaining_ul`), with no protocol or firmware change:
+- `DeviceRepository.refill(remainingUl, capacityUl = null)`: null keeps the capacity read live in the
+  same session (unchanged D5 path); a value sets a new capacity. `DispenserRepository.configureReservoir`
+  maps to it in DEVICE mode (DEMO: `NotActive`). Journal row, uncertainty handling (never re-sent,
+  `READ_BACK` at the next session), reservation against a second REFILL and the status cache are the
+  existing ones.
+- Local validation before anything is sent (not even the status read): 0 < remaining <= capacity <= u32
+  µl (`REMAINING_NOT_POSITIVE`, `REMAINING_ABOVE_CAPACITY`, `CAPACITY_INVALID`); the reservoir screen
+  validates the same per field.
+- UI: "Nastavit zásobník" (capacity unknown) and "Změnit kapacitu nebo stav" (configured), one dialog
+  with capacity and current amount; "Doplnit zásobník" keeps setting the absolute current amount (refill
+  or correction). Online only, like refill.
+- **Known limitation:** the firmware refuses an empty reservoir (`dsp_dosing_refill`: remaining 0 →
+  INVALID). The app shows "Zařízení zatím nepřijímá prázdný zásobník (0 ml)" and never substitutes another
+  value; accepting 0 (and what it means for the BLOCKED latch) is a later firmware decision.
+- Not part of Phase A: pump configuration and readiness (Phase B), history readout (Phase C).
 
 ## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
 

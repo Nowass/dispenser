@@ -16,6 +16,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -66,17 +67,23 @@ import kotlin.math.roundToInt
 
 const val RESERVOIR_REFILL_TEST_TAG = "reservoir_refill"
 const val RESERVOIR_REFILL_OUTCOME_TEST_TAG = "reservoir_refill_outcome"
+const val RESERVOIR_CONFIGURE_TEST_TAG = "reservoir_configure"
+const val RESERVOIR_CHANGE_TEST_TAG = "reservoir_change"
 
 @Composable
 fun ReservoirRoute(viewModel: ReservoirViewModel, isDemo: Boolean, onBack: () -> Unit) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val refillDone by viewModel.refillDone.collectAsStateWithLifecycle()
     val refillOutcome by viewModel.refillOutcome.collectAsStateWithLifecycle()
+    val configured by viewModel.configured.collectAsStateWithLifecycle()
     ReservoirScreen(
         state, isDemo, onBack, viewModel::validateRefill, viewModel::refill,
         refillConfirmed = refillDone,
         onRefillOpened = viewModel::consumeRefillDone,
         refillOutcome = refillOutcome,
+        validateConfigure = viewModel::validateConfigure,
+        onConfigure = viewModel::configure,
+        configureConfirmed = configured,
     )
 }
 
@@ -90,8 +97,12 @@ fun ReservoirScreen(
     refillConfirmed: Boolean = false,
     onRefillOpened: () -> Unit = {},
     refillOutcome: RefillOutcome? = null,
+    validateConfigure: (String, String) -> ReservoirConfigErrors = { _, _ -> ReservoirConfigErrors(RefillError.NOT_ACTIVE, null) },
+    onConfigure: (String, String) -> Unit = { _, _ -> },
+    configureConfirmed: Boolean = false,
 ) {
     var showRefill by rememberSaveable { mutableStateOf(false) }
+    var showConfigure by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = Spacing.xs),
@@ -117,6 +128,23 @@ fun ReservoirScreen(
                 verticalArrangement = Arrangement.spacedBy(Spacing.m),
             ) {
                 LevelCard(state)
+                if (state.reservoir == null && state.configurable) {
+                    // DEVICE mode, capacity unknown: initialize (capacity + current amount)
+                    Text(stringResource(R.string.reservoir_configure_hint), style = MaterialTheme.typography.bodyMedium)
+                    Button(
+                        onClick = { onRefillOpened(); showConfigure = true },
+                        enabled = !state.refillNeedsConnection,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag(RESERVOIR_CONFIGURE_TEST_TAG),
+                    ) { Text(stringResource(R.string.reservoir_configure), style = MaterialTheme.typography.titleMedium) }
+                    if (state.refillNeedsConnection) {
+                        Text(
+                            stringResource(R.string.reservoir_configure_needs_connection),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
                 if (state.reservoir != null) {
                     PredictionCard(state)
                     Button(
@@ -126,6 +154,14 @@ fun ReservoirScreen(
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary),
                         modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).testTag(RESERVOIR_REFILL_TEST_TAG),
                     ) { Text(stringResource(R.string.reservoir_refill), style = MaterialTheme.typography.titleMedium) }
+                    if (state.configurable) {
+                        OutlinedButton(
+                            onClick = { onRefillOpened(); showConfigure = true },
+                            enabled = !state.refillNeedsConnection,
+                            shape = MaterialTheme.shapes.medium,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(RESERVOIR_CHANGE_TEST_TAG),
+                        ) { Text(stringResource(R.string.reservoir_change)) }
+                    }
                     if (state.refillNeedsConnection) {
                         Text(
                             stringResource(R.string.refill_needs_connection),
@@ -133,6 +169,8 @@ fun ReservoirScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                }
+                if (state.reservoir != null || state.configurable) {
                     if (refillOutcome != null) {
                         Text(
                             stringResource(
@@ -149,9 +187,15 @@ fun ReservoirScreen(
                             modifier = Modifier.testTag(RESERVOIR_REFILL_OUTCOME_TEST_TAG).semantics { liveRegion = LiveRegionMode.Polite },
                         )
                     }
-                    if (refillConfirmed) {
+                    if (refillConfirmed || configureConfirmed) {
                         Text(
-                            stringResource(if (state.isDemo) R.string.refill_done else R.string.refill_done_device),
+                            stringResource(
+                                when {
+                                    configureConfirmed -> R.string.configure_done_device
+                                    state.isDemo -> R.string.refill_done
+                                    else -> R.string.refill_done_device
+                                },
+                            ),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
@@ -170,6 +214,15 @@ fun ReservoirScreen(
             validate = validateRefill,
             onDismiss = { showRefill = false },
             onConfirm = { onRefill(it); showRefill = false },
+        )
+    }
+    if (showConfigure && ready?.configurable == true) {
+        ConfigureDialog(
+            initialCapacity = reservoir?.let { Format.mlInput(Volume.microlitresToMl(it.capacityUl)) } ?: "",
+            initialRemaining = reservoir?.let { Format.mlInput(Volume.microlitresToMl(it.remainingUl)) } ?: "",
+            validate = validateConfigure,
+            onDismiss = { showConfigure = false },
+            onConfirm = { c, r -> onConfigure(c, r); showConfigure = false },
         )
     }
 }
@@ -291,6 +344,7 @@ private fun RefillDialog(
                                 RefillError.ABOVE_CAPACITY -> stringResource(R.string.refill_err_above_capacity, capacityLabel)
                                 RefillError.NOT_POSITIVE -> stringResource(R.string.editor_err_amount_positive)
                                 RefillError.TOO_PRECISE -> stringResource(R.string.editor_err_amount_precision)
+                                RefillError.OUT_OF_RANGE -> stringResource(R.string.editor_err_amount_range)
                                 RefillError.INVALID, RefillError.NOT_ACTIVE -> stringResource(R.string.editor_err_amount_invalid)
                             },
                         )
@@ -304,6 +358,69 @@ private fun RefillDialog(
         confirmButton = { TextButton(onClick = { onConfirm(text) }, enabled = error == null) { Text(stringResource(R.string.refill_confirm)) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) } },
     )
+}
+
+/** Capacity + current amount (DEVICE mode): initialization or capacity change, one REFILL. */
+@Composable
+private fun ConfigureDialog(
+    initialCapacity: String,
+    initialRemaining: String,
+    validate: (String, String) -> ReservoirConfigErrors,
+    onDismiss: () -> Unit,
+    onConfirm: (String, String) -> Unit,
+) {
+    var capacity by rememberSaveable { mutableStateOf(initialCapacity) }
+    var remaining by rememberSaveable { mutableStateOf(initialRemaining) }
+    val errors = validate(capacity, remaining)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.configure_dialog_title)) },
+        text = {
+            Column(Modifier.imePadding(), verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
+                OutlinedTextField(
+                    value = capacity,
+                    onValueChange = { capacity = it },
+                    label = { Text(stringResource(R.string.configure_capacity_label)) },
+                    suffix = { Text(stringResource(R.string.editor_amount_suffix)) },
+                    singleLine = true,
+                    isError = capacity.isNotEmpty() && errors.capacity != null,
+                    supportingText = errors.capacity?.takeIf { capacity.isNotEmpty() }?.let { e -> { Text(configureError(e, remaining = false)) } },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = remaining,
+                    onValueChange = { remaining = it },
+                    label = { Text(stringResource(R.string.configure_remaining_label)) },
+                    suffix = { Text(stringResource(R.string.editor_amount_suffix)) },
+                    singleLine = true,
+                    isError = remaining.isNotEmpty() && errors.remaining != null,
+                    supportingText = {
+                        Text(
+                            errors.remaining?.takeIf { remaining.isNotEmpty() }?.let { configureError(it, remaining = true) }
+                                ?: stringResource(R.string.configure_remaining_hint),
+                        )
+                    },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextButton(onClick = { remaining = capacity }, enabled = errors.capacity == null) {
+                    Text(stringResource(R.string.refill_fill_to_capacity))
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(capacity, remaining) }, enabled = errors.valid) { Text(stringResource(R.string.refill_confirm)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) } },
+    )
+}
+
+@Composable
+private fun configureError(e: RefillError, remaining: Boolean): String = when (e) {
+    RefillError.NOT_POSITIVE -> stringResource(if (remaining) R.string.configure_err_remaining_zero else R.string.editor_err_amount_positive)
+    RefillError.ABOVE_CAPACITY -> stringResource(R.string.configure_err_remaining_above)
+    RefillError.OUT_OF_RANGE -> stringResource(R.string.configure_err_capacity_range)
+    RefillError.TOO_PRECISE -> stringResource(R.string.editor_err_amount_precision)
+    RefillError.INVALID, RefillError.NOT_ACTIVE -> stringResource(R.string.editor_err_amount_invalid)
 }
 
 @Preview(name = "Reservoir 412", widthDp = 412, heightDp = 900, showBackground = true, backgroundColor = 0xFF111820)

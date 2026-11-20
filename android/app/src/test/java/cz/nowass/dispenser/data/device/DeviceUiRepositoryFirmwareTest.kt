@@ -36,6 +36,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -160,6 +161,74 @@ class DeviceUiRepositoryFirmwareTest {
         assertEquals(ConnectionState.DISCONNECTED, cached.connection)
         assertNotNull(q.ui.observeReservoir().first())
         assertEquals(listOf(id), withTimeout(5_000) { q.ui.observeSchedules().first { it.isNotEmpty() } }.map { it.id })
+    }
+
+    /**
+     * Phase A against the REAL firmware: the reservoir is (re)initialized with a capacity and the current
+     * amount through REFILL; invalid values never reach the device; refill,
+     * amount update and capacity change follow; a lost REFILL answer is Uncertain, never re-sent and
+     * resolved by read-back in the next session; the values persist into a new wake of the device
+     * (storage reloaded, as after a reset).
+     */
+    @Test
+    fun reservoir_configuration_refill_lost_answer_and_persistence() = runBlocking {
+        val p = Phone()
+        wake()
+        p.claim()
+        assertTrue(p.repo.connect() is ConnectOutcome.Connected)
+        // The simulator provisions a reservoir (the bench board starts at capacity 0, covered by the unit
+        // tests: refused locally without a capacity). The firmware path is the same either way:
+        // dsp_dosing_refill takes capacity and amount from REFILL and never reads the current capacity.
+        assertTrue((p.repo.refreshStatus() as OpResult.Ok).value.capacityUl > 0)
+
+        // invalid values: refused on the phone, no REFILL frame at all
+        val refills0 = ports.sent(M.REFILL)
+        assertEquals(CommandResult.NotAccepted, p.ui.configureReservoir(500_000, 0)) // empty: not accepted yet
+        assertEquals(CommandResult.NotAccepted, p.ui.configureReservoir(500_000, 600_000))
+        assertEquals(CommandResult.NotAccepted, p.ui.configureReservoir(0, 1))
+        assertEquals(refills0, ports.sent(M.REFILL))
+
+        // initialization, then refill / amount update, then a capacity change
+        assertEquals(CommandResult.Done(0), p.ui.configureReservoir(500_000, 300_000))
+        var res = p.ui.observeReservoir().first()!!
+        assertEquals(500_000L, res.capacityUl)
+        assertEquals(300_000L, res.remainingUl)
+        assertEquals(CommandResult.Done(0), p.ui.refillReservoir(500_000))
+        assertEquals(500_000L, p.ui.observeReservoir().first()!!.remainingUl)
+        assertEquals(CommandResult.Done(0), p.ui.refillReservoir(120_000)) // a lower current amount (correction)
+        assertEquals(CommandResult.Done(0), p.ui.configureReservoir(1_000_000, 800_000))
+        res = p.ui.observeReservoir().first()!!
+        assertEquals(1_000_000L, res.capacityUl)
+        assertEquals(800_000L, res.remainingUl)
+        assertTrue(journal.list(deviceId).none { it.unresolved })
+
+        // the answer is lost and the link drops: Uncertain, never repeated, read back next session
+        ports.dropFrameType = M.REFILL
+        ports.disconnectAfterDrop = true
+        val sentBefore = ports.sent(M.REFILL)
+        assertEquals(CommandResult.Uncertain, p.ui.configureReservoir(900_000, 700_000))
+        assertEquals(sentBefore + 1, ports.sent(M.REFILL))
+        ports.dropFrameType = null
+        ports.disconnectAfterDrop = false
+        assertTrue(FirmwareSim.waitAdvertising(5_000))
+        assertEquals(CommandResult.NotSent, p.ui.configureReservoir(900_000, 700_000)) // link gone: nothing sent
+        assertTrue(p.repo.connect() is ConnectOutcome.Connected)
+        val row = journal.list(deviceId).single { it.kind == PendingKind.REFILL && it.resolution != null && it.resolvedAtMs != null && it.volumeUl == 700_000L }
+        assertEquals(Resolution.READ_BACK, row.resolution)
+        assertEquals(700_000L, row.resolutionDetail)
+        assertEquals(sentBefore + 1, ports.sent(M.REFILL)) // never re-sent
+        res = p.ui.observeReservoir().first()!!
+        assertEquals(900_000L, res.capacityUl)
+        assertEquals(700_000L, res.remainingUl)
+
+        // a new wake of the device reloads its storage: the values persist
+        p.repo.disconnect(graceful = true) // explicit END_SESSION ends the window
+        assertTrue(FirmwareSim.joinWake(20_000))
+        wake()
+        assertTrue(p.repo.connect() is ConnectOutcome.Connected)
+        val st = (p.repo.refreshStatus() as OpResult.Ok).value
+        assertEquals(900_000L, st.capacityUl)
+        assertEquals(700_000L, st.remainingUl)
     }
 
     /**

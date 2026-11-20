@@ -121,8 +121,13 @@ interface DeviceRepository {
     /** Removes a RESOLVED row once the user has seen its outcome. */
     suspend fun acknowledge(journalId: Long): OpResult<Unit>
 
-    /** REFILL with the capacity read live in the same session immediately before (D5). */
-    suspend fun refill(remainingUl: Long): OpResult<StatusRecord>
+    /**
+     * REFILL (D5): sets the absolute [remainingUl]. [capacityUl] null keeps the capacity read live in the
+     * same session immediately before (refused locally when the device has none); non-null sets a new
+     * capacity, which also initializes an unconfigured reservoir. Validated locally before anything is
+     * sent: 0 < remaining <= capacity <= u32 (the firmware does not accept an empty reservoir yet).
+     */
+    suspend fun refill(remainingUl: Long, capacityUl: Long? = null): OpResult<StatusRecord>
     suspend fun setReadiness(readiness: Readiness): OpResult<StatusRecord>
     /** SET_TIME only with a [PhoneTimeSource] uncertainty ≤ 2,000 ms, else refused locally (D6). */
     suspend fun setTime(): OpResult<TimeDecisionRecord>
