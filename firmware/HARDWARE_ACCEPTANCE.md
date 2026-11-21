@@ -484,7 +484,7 @@ matching debug APK:
 
 | # | Check | Expected | Result |
 |---|---|---|---|
-| E1 | First boot of the new image on the existing NVS | storage opens as layout v5 (no migration), schedules, ownership, reservoir and readiness unchanged; History tab shows exactly the events already in NVS (none invented) | **PENDING USER VERIFICATION (firmware 0cbb830 flashed and booted 2026-11-20, see 8d.2).** No verified Android observation after the update yet: the owner's NOT READY confirmation predates the 0cbb830 write, and the general "everything looks OK" report was not specific. Installed APK: **unverified** (expected `a3d5f7908ea243bfd6dbf38db8c03bae08d8ee08a5f4214f34d412c6bdcafead`, `cz.nowass.dispenser.debug` 0.5.0-beta.2+debug, versionCode 6; not checked independently, the phone was not connected to the PC). To pass, the owner confirms: (1) the updated debug UI (F2: separate "Spojení: …" line, "NEOVĚŘENO" handling, "Min. interval mezi starty dávek"); (2) an authenticated BLE connection; (3) readiness SERVICE_REQUIRED (NOT READY); (4) reservoir 487 / 500 ml; (5) exactly three preserved history events: seq 1 refill 17:14:55 (417 → 500 ml), seq 2 Nuli 8 ml 17:20:21 OK BENCH (500 → 492), seq 3 Bar 5 ml 17:20:29 OK BENCH (492 → 487) (decoded from the pre-flash `nvs` backup; `evhw` = 3). Expected schedules: 10 (enabled: Denni 10:17 daily, Nuli 17:17 daily, Bar 17:20 once) |
+| E1 | First boot of the new image on the existing NVS | storage opens as layout v5 (no migration), schedules, ownership, reservoir and readiness unchanged; History tab shows exactly the events already in NVS (none invented) | **PARTLY VERIFIED — checklist not complete (firmware 0cbb830).** Screenshot verification by the owner, 2026-11-21: authenticated BLE session ("Připojeno") with the device history displayed — PASS; the three events of 2026-11-20 preserved with matching names, volumes and reservoir transitions (seq 1 refill 17:14:55 417 → 500 ml; seq 2 Nuli 8 ml 17:20:21 OK BENCH 500 → 492; seq 3 Bar 5 ml 17:20:29 OK BENCH 492 → 487; as decoded from the pre-flash `nvs` backup) — **PASS: history persisted across the firmware update.** NOT YET VERIFIED: the installed APK (expected SHA-256 `a3d5f7908ea243bfd6dbf38db8c03bae08d8ee08a5f4214f34d412c6bdcafead`, 0.5.0-beta.2+debug) and the updated F2 debug UI; the current readiness (a dose ran on 2026-11-21, see below, so SERVICE_REQUIRED must be read from the device status before any further test); the reservoir on the status screen (inferred from the history: 495 / 500 ml) |
 | E2 | Refill / set capacity in the app (NOT READY) | one RESERVOIR_REFILL / INIT / ADJUST event with before → after | |
 | E3 | One new scheduled 5 ml dose (GPIO only, no load) | one 5 s pulse; one DOSE_SCHEDULED OK event tagged "BENCH: jen signál GPIO", estimate before → after − 5 ml | |
 | E4 | Reconnect, then a RESET of the board | the same events with the same order after both | |
@@ -496,6 +496,13 @@ matching debug APK:
 ACCEPTED FOR BENCH TESTING ONLY and stays open for production. The history is a best-effort record,
 not an audit trail. The dosing anti-replay protection stays independent and unchanged. R5 stays NOT
 ACCEPTED (bench-only security deviation, 8a.2). This is not an authorization to flash or install.
+
+Observations 2026-11-21 (owner screenshots, history tab; not a formal E2/E3 run): two further events
+after the 0cbb830 update — 13:05 reservoir refill 487 → 500 ml; 13:09 scheduled dose "Test" 5 ml, OK,
+tagged BENCH (GPIO signal only), 500 → 495 ml. They show new events appended after the update with the
+expected labels and estimates. The 13:09 dose implies the device was READY and the schedule enabled at
+13:09; this was not part of an operator-run test (no pulse measurement or serial log recorded), and the
+readiness since then is unverified. E2/E3 stay OPEN until run under the procedure.
 
 #### 8d.1 Proposed deployment procedure (requires separate approval; nothing done yet)
 
