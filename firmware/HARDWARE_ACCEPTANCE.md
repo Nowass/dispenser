@@ -594,6 +594,25 @@ Still open for this firmware: E1–E6 (need the new APK; with the incident fixes
 the 0cbb830 image, 8d.1), confirmation that ownership, schedules and reservoir are unchanged (the
 pulses imply storage, credentials and gates were valid; a post-boot NVS read was not authorized).
 
+### 8e. Wake button GPIO3 (bench MVP; NOT RUN, no flash authorized)
+
+Image: the 0cbb830 bench configuration plus `sdkconfig.button.defaults` (README "Wake button").
+Circuit: normally-open button D1/GPIO3 → GND, 10 kΩ GPIO3 → 3V3, nothing on RESET/BOOT; GPIO10
+unchanged with no load. Before any flash: approval, then the read-only readiness check in ROM
+download mode (the device ran a BENCH dose on 2026-11-21, so NOT READY must not be assumed), stop if
+READY; private backups of `nvs`, `nvs_sec`, `otadata`; write only `0x30000`; verify that the
+bootloader, partition table, `otadata`, `nvs` and `nvs_sec` are byte-identical before the first boot.
+
+| # | Step | Expected | Result |
+|---|---|---|---|
+| W0 | Board unpowered: wire the button and pull-up; then powered, multimeter on D1 | ~3.3 V released, ~0 V pressed | |
+| W1 | First boot (one RESET), console capture running, no connection; wait out the 180 s window | `wake: cause=POWER_ON`; window; `button wake armed (GPIO3, active low)`; `deep sleep for N s` | |
+| W2 | Short press (~0.2 s) | `wake: cause=BUTTON (reset reason 8, timer=0, gpio=1, gpio mask 0x8)`; `dsp_ble: radio up`; the app connects authenticated; record press → advertising time | |
+| W3 | End the window from the app (or wait 180 s) | both sources armed again; deep sleep | |
+| W4 | Natural timer wake (next sync/dose plan, up to 6 h; no schedule change) | `wake: cause=TIMER`; no `dsp_ble: radio up`; deep sleep again | |
+| W5 | Hold the button through a sleep entry for ≥ 2 min, then release, then press | `button active at sleep entry: GPIO wake not armed, timer 60 s`; TIMER wakes ~60 s apart without BLE; after release `button wake armed`; the press gives a BUTTON wake | |
+| W6 | GPIO10 throughout W1–W5 (logic probe), device NOT READY | always low, no pump log line; readiness still SERVICE_REQUIRED in the app afterwards | |
+
 ## 9. Configuration limits and storage (M1.10b.1)
 
 The firmware accepts every representable value of the calibration and safety fields (only

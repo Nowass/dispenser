@@ -58,6 +58,41 @@ dsp_plat_button_t dsp_plat_button_check(int gpio)
     return DSP_PLAT_BUTTON_OK;
 }
 
+dsp_plat_sleep_arm_t dsp_plat_sleep_arm(int gpio, bool button_active, int64_t sleep_s)
+{
+    dsp_plat_sleep_arm_t a;
+    a.pin = dsp_plat_button_check(gpio);
+    a.held = a.pin == DSP_PLAT_BUTTON_OK && button_active;
+    a.arm_gpio = a.pin == DSP_PLAT_BUTTON_OK && !button_active;
+    a.sleep_s = sleep_s;
+    if (a.held && a.sleep_s > DSP_PLAT_BUTTON_HELD_RETRY_S) {
+        a.sleep_s = DSP_PLAT_BUTTON_HELD_RETRY_S;
+    }
+    return a;
+}
+
+const char *dsp_plat_wake_cause_name(dsp_wake_cause_t cause)
+{
+    switch (cause) {
+    case DSP_CAUSE_POWER_ON:
+        return "POWER_ON";
+    case DSP_CAUSE_TIMER:
+        return "TIMER";
+    case DSP_CAUSE_BUTTON:
+        return "BUTTON";
+    case DSP_CAUSE_SOFTWARE:
+        return "SOFTWARE";
+    case DSP_CAUSE_WATCHDOG:
+        return "WATCHDOG";
+    case DSP_CAUSE_PANIC:
+        return "PANIC";
+    case DSP_CAUSE_BROWNOUT:
+        return "BROWNOUT";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 size_t dsp_plat_rtc_load(const dsp_plat_rtc_t *rtc, uint8_t *buf, size_t cap)
 {
     if (rtc == NULL || buf == NULL || rtc->len == 0 || rtc->len > DSP_PLAT_RTC_CAP ||

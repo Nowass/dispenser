@@ -24,22 +24,29 @@ config DSP_NOTIFY_HEALTH_URL
         an event or a credential.
 
 config DSP_BUTTON_WAKE_GPIO
-    int "Button deep-sleep wake GPIO (-1 = none; pending hardware review)"
+    int "Button deep-sleep wake GPIO (-1 = none)"
     range -1 21
     default -1
     help
-        GPIO for the service-mode button wake (M1.9c provision only). -1 keeps
-        the button wake disabled, which is the required setting until the
-        hardware review assigns a pin from the board pinout. Only ESP32-C3
-        deep-sleep wake pads GPIO0-GPIO5 are accepted, and the strapping pin
-        GPIO2 is rejected at run time; an invalid value leaves timer-only wake.
-        Configures an input wake only, never an output.
+        GPIO of the service-mode wake button. -1 (the default image) keeps the
+        button wake disabled. The MVP wake button (sdkconfig.button.defaults)
+        uses XIAO ESP32-C3 D1 = GPIO3: a normally-open momentary pushbutton to
+        GND with an external 10 kOhm pull-up to 3V3, active low, not connected
+        to RESET or BOOT. Only the ESP32-C3 deep-sleep wake pads GPIO0-GPIO5
+        are accepted and the strapping pin GPIO2 is refused (build-time check,
+        repeated at run time). Configures an input only, never an output.
+
+        A button wake (ESP_SLEEP_WAKEUP_GPIO) opens the BLE service window like
+        a power-on in the bring-up build; a timer wake never does. The button
+        is never a dosing trigger. The wake is level triggered on the ESP32-C3:
+        when the button is still active at sleep entry, only the timer is armed
+        and the sleep is capped to 60 s (no wake loop).
 
 config DSP_BUTTON_WAKE_ACTIVE_HIGH
     bool "Button wake level is high"
     default n
     help
-        Wake on a high level (default: low level with a pull-up). Depends on
-        the button circuit, to be decided by the hardware review.
+        Wake on a high level (default: low level with a pull-up, as in the MVP
+        button circuit).
 
 endmenu

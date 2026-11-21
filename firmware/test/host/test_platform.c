@@ -66,6 +66,72 @@ static void test_sleep_and_button(void)
     DSP_CHECK_EQ_INT(DSP_PLAT_BUTTON_NOT_WAKE_CAPABLE, dsp_plat_button_check(21));
 }
 
+/* MVP wake button: both wake sources on every sleep; a held/stuck button never arms the level
+ * wake (it would fire at once into a new service window) and the timer sleep is capped. */
+static void test_button_sleep_arming(void)
+{
+    /* released button on GPIO3: GPIO wake armed, the planned timer sleep is kept unchanged */
+    const int64_t planned[] = {1, 59, 60, 61, 3600, 6 * 3600, DSP_POWER_MAX_SLEEP_MAX_S};
+    for (size_t i = 0; i < sizeof planned / sizeof planned[0]; i++) {
+        dsp_plat_sleep_arm_t a = dsp_plat_sleep_arm(3, false, planned[i]);
+        DSP_CHECK_EQ_INT(DSP_PLAT_BUTTON_OK, a.pin);
+        DSP_CHECK(a.arm_gpio);
+        DSP_CHECK(!a.held);
+        DSP_CHECK_EQ_INT(planned[i], a.sleep_s);
+    }
+    /* held at sleep entry: timer only, capped to the retry interval, never extended */
+    dsp_plat_sleep_arm_t h = dsp_plat_sleep_arm(3, true, 6 * 3600);
+    DSP_CHECK(!h.arm_gpio);
+    DSP_CHECK(h.held);
+    DSP_CHECK_EQ_INT(DSP_PLAT_BUTTON_HELD_RETRY_S, h.sleep_s);
+    h = dsp_plat_sleep_arm(3, true, 60);
+    DSP_CHECK_EQ_INT(60, h.sleep_s);
+    h = dsp_plat_sleep_arm(3, true, 61);
+    DSP_CHECK_EQ_INT(60, h.sleep_s);
+    h = dsp_plat_sleep_arm(3, true, 5); /* an imminent dose wake stays as planned */
+    DSP_CHECK(!h.arm_gpio);
+    DSP_CHECK_EQ_INT(5, h.sleep_s);
+    DSP_CHECK(DSP_PLAT_BUTTON_HELD_RETRY_S >= DSP_POWER_MIN_SLEEP_S);
+    /* the timer microseconds of a capped sleep */
+    DSP_CHECK_EQ_INT(60000000, dsp_plat_sleep_us(dsp_plat_sleep_arm(3, true, 21600).sleep_s));
+    /* stuck button, many consecutive sleeps: never armed, never longer than the retry */
+    for (int k = 0; k < 100; k++) {
+        dsp_plat_sleep_arm_t s = dsp_plat_sleep_arm(3, true, 21600 - k);
+        DSP_CHECK(!s.arm_gpio && s.sleep_s == DSP_PLAT_BUTTON_HELD_RETRY_S);
+    }
+    /* released again: the next sleep arms the button and the full plan */
+    DSP_CHECK(dsp_plat_sleep_arm(3, false, 21600).arm_gpio);
+    /* no or unusable pin: timer only, the plan unchanged whatever the level reads */
+    const int bad[] = {-1, 2, 6, 8, 9, 10, 21};
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        for (int lvl = 0; lvl < 2; lvl++) {
+            dsp_plat_sleep_arm_t b = dsp_plat_sleep_arm(bad[i], lvl != 0, 21600);
+            DSP_CHECK(!b.arm_gpio);
+            DSP_CHECK(!b.held);
+            DSP_CHECK_EQ_INT(21600, b.sleep_s);
+            DSP_CHECK(b.pin != DSP_PLAT_BUTTON_OK);
+        }
+    }
+    /* the other wake pads are accepted the same way */
+    DSP_CHECK(dsp_plat_sleep_arm(0, false, 100).arm_gpio);
+    DSP_CHECK(dsp_plat_sleep_arm(5, false, 100).arm_gpio);
+}
+
+static void test_wake_cause_names(void)
+{
+    DSP_CHECK_EQ_STR("BUTTON", dsp_plat_wake_cause_name(DSP_CAUSE_BUTTON));
+    DSP_CHECK_EQ_STR("TIMER", dsp_plat_wake_cause_name(DSP_CAUSE_TIMER));
+    DSP_CHECK_EQ_STR("POWER_ON", dsp_plat_wake_cause_name(DSP_CAUSE_POWER_ON));
+    DSP_CHECK_EQ_STR("SOFTWARE", dsp_plat_wake_cause_name(DSP_CAUSE_SOFTWARE));
+    DSP_CHECK_EQ_STR("WATCHDOG", dsp_plat_wake_cause_name(DSP_CAUSE_WATCHDOG));
+    DSP_CHECK_EQ_STR("PANIC", dsp_plat_wake_cause_name(DSP_CAUSE_PANIC));
+    DSP_CHECK_EQ_STR("BROWNOUT", dsp_plat_wake_cause_name(DSP_CAUSE_BROWNOUT));
+    DSP_CHECK_EQ_STR("UNKNOWN", dsp_plat_wake_cause_name((dsp_wake_cause_t)99));
+    /* GPIO + timer at once (button pressed as the timer fires): the button wins */
+    DSP_CHECK_EQ_STR("BUTTON", dsp_plat_wake_cause_name(dsp_plat_wake_cause(
+                                   DSP_PLAT_RST_DEEP_SLEEP, DSP_PLAT_WAKE_GPIO | DSP_PLAT_WAKE_TIMER)));
+}
+
 static void test_rtc_retained_storage(void)
 {
     dsp_power_retained_t r;
@@ -374,6 +440,8 @@ int main(void)
 {
     DSP_RUN(test_wake_cause_mapping);
     DSP_RUN(test_sleep_and_button);
+    DSP_RUN(test_button_sleep_arming);
+    DSP_RUN(test_wake_cause_names);
     DSP_RUN(test_rtc_retained_storage);
     DSP_RUN(test_queue_two_threads);
     return dsp_test_finish();

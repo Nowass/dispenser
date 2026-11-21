@@ -1780,7 +1780,7 @@ application task is the single owner. No automatic dosing can happen:
 The runtime cannot be combined with the older diagnostics (Kconfig dependency). An NVS open
 failure gives the application a failing KV, so it enters DEGRADED.
 
-### Pinout review (no pin assigned)
+### Pinout (pump GPIO10, wake button GPIO3)
 
 From Seeed's published XIAO ESP32-C3 pinout (to be confirmed against the board schematic in the
 hardware review): D0 = GPIO2 (strapping), D1 = GPIO3, D2 = GPIO4, D3 = GPIO5, D4 = GPIO6,
@@ -1790,9 +1790,10 @@ uses GPIO12–17.
 
 - **Button wake:** the ESP32-C3 wakes from deep sleep only on GPIO0–5. On the pads that leaves
   D1–D3 (GPIO3–5); D0 (GPIO2) is a strapping pin and is rejected; the BOOT button (GPIO9) cannot
-  wake from deep sleep. `CONFIG_DSP_BUTTON_WAKE_GPIO` stays -1 until the review.
-- **Battery measurement:** ADC1 is GPIO0–4 (ADC2 is unreliable with Wi-Fi), so it competes
-  with the button candidates; the review must allocate both together.
+  wake from deep sleep. **Assigned (MVP, 2026-11-21): D1 = GPIO3**, see "Wake button" below; the
+  default image keeps `CONFIG_DSP_BUTTON_WAKE_GPIO=-1`.
+- **Battery measurement:** ADC1 is GPIO0–4 (ADC2 is unreliable with Wi-Fi). With GPIO3 taken by
+  the button, GPIO4 (D2) is the natural candidate (GPIO0/1 are not on the XIAO pads).
 - **Pump gate:** avoid the strapping pins (GPIO2/8/9), USB (GPIO18/19) and the UART0 console
   (GPIO20/21); the remaining pads (GPIO6, GPIO7, GPIO10, or GPIO3–5 if not used for the button or
   ADC) need their reset and boot levels measured; an external pull-down is required either way.
@@ -2260,6 +2261,49 @@ nebo stav") before connecting a pump. The firmware cannot detect whether a load 
 
 Log lines: `dsp_pump_gpio: BENCH pump control signal on GPIO10, active-high, max 10000 ms per run`,
 `GPIO10 ACTIVE for N ms (bench: control signal only, no liquid measured)`, `GPIO10 inactive after N ms`.
+
+### Wake button (`sdkconfig.button.defaults`, bench MVP)
+
+A physical button wakes the device from deep sleep and opens the BLE service window, replacing
+the RESET press of the bring-up workflow (the bring-up power-on window stays as a fallback).
+
+- **Circuit:** XIAO D1 = GPIO3, normally-open momentary pushbutton to GND, external 10 kΩ pull-up
+  GPIO3 → 3V3, active low; no connection to RESET or BOOT. GPIO3 is a deep-sleep wake pad, not a
+  strapping, JTAG, USB, UART0 or flash pin, and differs from the pump control pin GPIO10
+  (compile-time checks in `dsp_esp_power.c` and `dsp_esp_pump_gpio.c`; `test_button_config`).
+- **Arming (every sleep):** the RTC timer is always armed with the planned sleep;
+  `esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(BIT(3), ESP_GPIO_WAKEUP_GPIO_LOW)` is added
+  when the button is released. ESP-IDF configures the pad inside `esp_deep_sleep_start` (internal
+  pull-up, because `CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS=y` is kept: same direction as
+  the external 10 kΩ, ~0.4 mA only while pressed, and the pad stays defined if the external
+  resistor is missing) and latches it with a pad hold, which the next sleep entry releases before
+  it reads the level.
+- **Held or stuck button:** the ESP32-C3 GPIO wake is level-only, so a button still low at sleep
+  entry would wake the chip at once into a new service window. The level is sampled 5× over ~8 ms
+  right before sleep; if any sample is low, only the timer is armed and the sleep is capped to
+  60 s (`DSP_PLAT_BUTTON_HELD_RETRY_S`). Those short timer wakes open no window; the first sleep
+  after the release arms the button again.
+- **Wake handling:** `ESP_SLEEP_WAKEUP_GPIO` → `DSP_CAUSE_BUTTON` (wins over a simultaneous timer
+  wake) → physical presence → the BLE service window, exactly as a power-on in the bring-up build.
+  A timer wake never opens a window. The order is unchanged: recovery, clock, due dose, Wi-Fi/SNTP
+  when a sync is due, then BLE, then plan and sleep with both sources. The window ends after 180 s
+  without a client or 15 min in total.
+- **Not a dosing trigger:** dosing runs only through the Dosing Service's gates (readiness,
+  schedules, due window, anti-replay, limits, reservoir) exactly as on a timer wake; a button wake
+  never changes readiness or the READY floor. GPIO10 behavior, NVS layout, BLE protocol and
+  credentials are unchanged.
+- **Log (once per boot, no device data):** `dsp_power: wake: cause=BUTTON (reset reason 8,
+  timer=0, gpio=1, gpio mask 0x8)`; before sleep `dsp_power: button wake armed (GPIO3, active low)`
+  or `dsp_power: button active at sleep entry: GPIO wake not armed, timer 60 s (planned N s)`.
+
+```sh
+# BUILD-ONLY bench variant (BLE bring-up + Wi-Fi time + GPIO pump signal + wake button)
+idf.py -B build-button -D SDKCONFIG=build-button/sdkconfig \
+       -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble.defaults;<bring-up fragment>;sdkconfig.wifitime.defaults;sdkconfig.pumpgpio.defaults;sdkconfig.button.defaults" build
+```
+
+Not verified on hardware (wake current, pad hold release and the held-button path need the bench
+check in `HARDWARE_ACCEPTANCE.md` §8e).
 
 ### Wi-Fi time synchronization only (`CONFIG_DSP_APP_WIFI_TIME`, bench MVP)
 

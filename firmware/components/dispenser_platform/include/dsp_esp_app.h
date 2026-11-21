@@ -8,8 +8,11 @@
  *
  *  - Power port: reset reason + deep-sleep wake sources -> dsp_wake_cause_t; the 48-byte
  *    retained block in RTC_NOINIT memory (length-checked here, validated by the domain);
- *    deep sleep with the RTC timer and, only if a button GPIO is configured and passes
- *    dsp_plat_button_check, a GPIO wake (default: none, pending the hardware review);
+ *    deep sleep with the RTC timer (always) and, only if a button GPIO is configured, passes
+ *    dsp_plat_button_check and is not active at sleep entry, a GPIO level wake (default image:
+ *    none; MVP wake button: GPIO3 active low, sdkconfig.button.defaults). A button active at
+ *    sleep entry arms the timer only, capped to DSP_PLAT_BUTTON_HELD_RETRY_S; the wake cause is
+ *    logged once per boot;
  *    fail-safe: pump off, Wi-Fi stopped, outcome logged, SoC reset (never deep sleep).
  *  - Queue lock: a portMUX critical section around the command queue only (a few bytes
  *    copied, no blocking call inside; task context only, never from an ISR).

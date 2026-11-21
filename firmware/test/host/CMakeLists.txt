@@ -102,6 +102,8 @@ target_compile_options(test_manual PRIVATE -Wno-unused-function)
 # Incident 2026-11-20 (F1): READY dosing floor (same harness).
 dsp_add_host_test(test_ready_floor test_ready_floor.c support/fake_kv.c)
 target_compile_options(test_ready_floor PRIVATE -Wno-unused-function)
+dsp_add_host_test(test_button_wake test_button_wake.c support/fake_kv.c)
+target_compile_options(test_button_wake PRIVATE -Wno-unused-function)
 # Phase C: the event history through the Application Service (same harness).
 dsp_add_host_test(test_history_app test_history_app.c support/fake_kv.c)
 target_compile_options(test_history_app PRIVATE -Wno-unused-function)
@@ -142,6 +144,8 @@ add_test(NAME test_endpoint_guard
 # M1.7 flash layout guard (stale sdkconfig incident 2026-11-19; pure CMake script).
 add_test(NAME test_flash_layout_guard
          COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/test_flash_layout_guard.cmake")
+add_test(NAME test_button_config
+         COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_LIST_DIR}/test_button_config.cmake")
 target_link_libraries(test_platform PRIVATE Threads::Threads)
 # M1.10d.1: the pure BLE byte transport (compiled unchanged into the firmware component) over a
 # fault-injecting fake radio, including a two-thread test (simulated NimBLE host task).

@@ -49,9 +49,9 @@ bool dsp_plat_reset_keeps_rtc(dsp_plat_reset_t reset);
 uint64_t dsp_plat_sleep_us(int64_t sleep_s);
 
 /* Button wake pin check for the XIAO ESP32-C3 (ESP32-C3 deep-sleep wake pads GPIO0-GPIO5).
- * -1 = no button configured (the default until the hardware review assigns one).
- * Strapping pins (GPIO2 on the ESP32-C3; GPIO8/9 are not wake-capable anyway) are
- * rejected until the hardware review has analysed them. */
+ * -1 = no button configured (the Kconfig default; the MVP wake button build sets GPIO3 through
+ * sdkconfig.button.defaults). Strapping pins (GPIO2 on the ESP32-C3; GPIO8/9 are not
+ * wake-capable anyway) are rejected. */
 typedef enum {
     DSP_PLAT_BUTTON_DISABLED = 0,
     DSP_PLAT_BUTTON_OK,
@@ -60,6 +60,30 @@ typedef enum {
 } dsp_plat_button_t;
 
 dsp_plat_button_t dsp_plat_button_check(int gpio);
+
+/* Sleep-entry decision for the button wake (MVP wake button, XIAO D1 = GPIO3, active low).
+ * The ESP32-C3 GPIO deep-sleep wake is LEVEL triggered only: a button that is still active at
+ * sleep entry would wake the chip at once, and every button wake opens a BLE service window
+ * (a wake loop that drains the battery). So:
+ *  - pin not usable (disabled, not wake-capable, strapping): timer only, sleep unchanged;
+ *  - button active (held or stuck) at sleep entry: GPIO wake NOT armed, the timer sleep is
+ *    capped to DSP_PLAT_BUTTON_HELD_RETRY_S (the following timer wake re-checks and arms the
+ *    button again once it is released; a timer wake never opens a service window);
+ *  - otherwise: GPIO wake armed together with the unchanged timer sleep.
+ * The timer is ALWAYS armed (the scheduler's wake source is never replaced). */
+#define DSP_PLAT_BUTTON_HELD_RETRY_S ((int64_t)60)
+
+typedef struct {
+    dsp_plat_button_t pin; /* dsp_plat_button_check(gpio) */
+    bool held;             /* pin usable and the button was active at sleep entry */
+    bool arm_gpio;         /* arm the GPIO wake for this sleep */
+    int64_t sleep_s;       /* timer sleep to arm (never longer than requested) */
+} dsp_plat_sleep_arm_t;
+
+dsp_plat_sleep_arm_t dsp_plat_sleep_arm(int gpio, bool button_active, int64_t sleep_s);
+
+/* Log-safe name of a wake cause ("BUTTON", "TIMER", ...; never device data). */
+const char *dsp_plat_wake_cause_name(dsp_wake_cause_t cause);
 
 /* RTC-retained storage of the domain block (120 bytes since M1.10b.3; contents validated by
  * the domain: magic, version, length, CRC, ranges). Lives in RTC_NOINIT memory: arbitrary

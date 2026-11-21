@@ -5,8 +5,10 @@
 #include "dsp_esp_time.h"
 #include "dsp_platform_logic.h"
 
+#include "driver/gpio.h"
 #include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -18,6 +20,53 @@ static const char *TAG = "dsp_power";
 /* RTC_NOINIT: survives deep sleep and soft resets, arbitrary after power-on (length header
  * checked here; magic/version/CRC/ranges by the domain). */
 static RTC_NOINIT_ATTR dsp_plat_rtc_t s_rtc;
+
+#if CONFIG_DSP_BUTTON_WAKE_GPIO >= 0
+/* MVP wake button (sdkconfig.button.defaults: XIAO D1 = GPIO3, normally-open to GND, external
+ * 10 kOhm pull-up to 3V3, active low). ESP32-C3 deep-sleep GPIO wake pads are GPIO0-GPIO5; the
+ * strapping pin GPIO2 is refused. dsp_plat_button_check repeats the rule at run time. */
+_Static_assert(CONFIG_DSP_BUTTON_WAKE_GPIO <= 5 && CONFIG_DSP_BUTTON_WAKE_GPIO != 2,
+               "button wake GPIO must be a non-strapping ESP32-C3 deep-sleep wake pad (0, 1, 3, 4, 5)");
+#define BTN_GPIO CONFIG_DSP_BUTTON_WAKE_GPIO
+#if CONFIG_DSP_BUTTON_WAKE_ACTIVE_HIGH
+#define BTN_ACTIVE_LEVEL 1
+#else
+#define BTN_ACTIVE_LEVEL 0
+#endif
+#define BTN_SAMPLES 5
+#define BTN_SAMPLE_GAP_US 2000
+
+/* Level of the button right before sleep (input only, never an output). The previous deep sleep
+ * left the pad latched by the IDF wake-pad hold, and a held pad ignores configuration: release it
+ * first. The pull matches what ESP-IDF applies in sleep (CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_
+ * RESISTORS: pull-up for a low-level wake), in parallel with the external 10 kOhm. Active in ANY
+ * of 5 samples over ~8 ms counts as active (conservative: never arm a level wake that would fire
+ * at once). A configuration failure also counts as active (timer only, short retry). */
+static bool button_active(void)
+{
+    (void)gpio_hold_dis(BTN_GPIO);
+    gpio_config_t c = {
+        .pin_bit_mask = 1ull << BTN_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = BTN_ACTIVE_LEVEL ? GPIO_PULLUP_DISABLE : GPIO_PULLUP_ENABLE,
+        .pull_down_en = BTN_ACTIVE_LEVEL ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    if (gpio_config(&c) != ESP_OK) {
+        return true;
+    }
+    esp_rom_delay_us(100); /* settle after the pull change */
+    for (int i = 0; i < BTN_SAMPLES; i++) {
+        if (gpio_get_level(BTN_GPIO) == BTN_ACTIVE_LEVEL) {
+            return true;
+        }
+        if (i + 1 < BTN_SAMPLES) {
+            esp_rom_delay_us(BTN_SAMPLE_GAP_US);
+        }
+    }
+    return false;
+}
+#endif
 
 static const dsp_pump_port_t *s_pump;
 static const dsp_wifi_driver_t *s_wifi;
@@ -49,6 +98,7 @@ static dsp_plat_reset_t reset_kind(void)
 static dsp_wake_cause_t pw_wake_cause(void *ctx)
 {
     (void)ctx;
+    static bool logged;
     uint32_t causes = esp_sleep_get_wakeup_causes();
     uint32_t w = 0;
     if (causes & (1u << ESP_SLEEP_WAKEUP_TIMER)) {
@@ -57,7 +107,16 @@ static dsp_wake_cause_t pw_wake_cause(void *ctx)
     if (causes & (1u << ESP_SLEEP_WAKEUP_GPIO)) {
         w |= DSP_PLAT_WAKE_GPIO;
     }
-    return dsp_plat_wake_cause(reset_kind(), w);
+    dsp_wake_cause_t cause = dsp_plat_wake_cause(reset_kind(), w);
+    if (!logged) {
+        /* Once per boot; only the cause, the reset reason code and the wake pad mask. */
+        logged = true;
+        ESP_LOGI(TAG, "wake: cause=%s (reset reason %d, timer=%d, gpio=%d, gpio mask 0x%llx)",
+                 dsp_plat_wake_cause_name(cause), (int)esp_reset_reason(),
+                 (w & DSP_PLAT_WAKE_TIMER) != 0, (w & DSP_PLAT_WAKE_GPIO) != 0,
+                 (unsigned long long)esp_sleep_get_gpio_wakeup_status());
+    }
+    return cause;
 }
 
 static size_t pw_load(void *ctx, uint8_t *buf, size_t cap)
@@ -103,28 +162,35 @@ static void pw_fail_safe(void *ctx, uint32_t failures)
 static void pw_sleep(void *ctx, int64_t sleep_s)
 {
     (void)ctx;
-    esp_err_t err = esp_sleep_enable_timer_wakeup(dsp_plat_sleep_us(sleep_s));
+    /* Both wake sources: the timer (scheduler, always) and, when usable and not held, the
+     * button. A held or stuck button arms the timer only, capped to a short retry (level wake:
+     * arming it would wake at once into a new service window). */
+#if CONFIG_DSP_BUTTON_WAKE_GPIO >= 0
+    dsp_plat_sleep_arm_t arm = dsp_plat_sleep_arm(BTN_GPIO, button_active(), sleep_s);
+#else
+    dsp_plat_sleep_arm_t arm = dsp_plat_sleep_arm(-1, false, sleep_s);
+#endif
+    esp_err_t err = esp_sleep_enable_timer_wakeup(dsp_plat_sleep_us(arm.sleep_s));
     if (err != ESP_OK) {
         /* Without a timer the device could sleep forever: reset instead (a new wake). */
         ESP_LOGE(TAG, "timer wake-up not armed (0x%x)", (unsigned)err);
         dsp_esp_fail_safe(0);
     }
 #if CONFIG_DSP_BUTTON_WAKE_GPIO >= 0
-    if (dsp_plat_button_check(CONFIG_DSP_BUTTON_WAKE_GPIO) == DSP_PLAT_BUTTON_OK) {
+    if (arm.arm_gpio) {
         err = esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(
-            1ull << CONFIG_DSP_BUTTON_WAKE_GPIO,
-#if CONFIG_DSP_BUTTON_WAKE_ACTIVE_HIGH
-            ESP_GPIO_WAKEUP_GPIO_HIGH
-#else
-            ESP_GPIO_WAKEUP_GPIO_LOW
-#endif
-        );
+            1ull << BTN_GPIO, BTN_ACTIVE_LEVEL ? ESP_GPIO_WAKEUP_GPIO_HIGH : ESP_GPIO_WAKEUP_GPIO_LOW);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "button wake-up not armed (0x%x): timer only", (unsigned)err);
+        } else {
+            ESP_LOGI(TAG, "button wake armed (GPIO%d, active %s)", BTN_GPIO,
+                     BTN_ACTIVE_LEVEL ? "high" : "low");
         }
+    } else if (arm.held) {
+        ESP_LOGW(TAG, "button active at sleep entry: GPIO wake not armed, timer %lld s (planned %lld s)",
+                 (long long)arm.sleep_s, (long long)sleep_s);
     } else {
-        ESP_LOGW(TAG, "button GPIO %d rejected (not wake-capable or strapping): timer only",
-                 CONFIG_DSP_BUTTON_WAKE_GPIO);
+        ESP_LOGW(TAG, "button GPIO %d rejected (not wake-capable or strapping): timer only", BTN_GPIO);
     }
 #endif
     /* Last action before sleep: the pump output inactive (the GPIO driver also enables the
@@ -133,7 +199,7 @@ static void pw_sleep(void *ctx, int64_t sleep_s)
         s_pump->force_off(s_pump->ctx);
     }
     /* Stack high-water mark of the application task (hardware acceptance 7.6). */
-    ESP_LOGI(TAG, "deep sleep for %lld s (stack free min %u B)", (long long)sleep_s,
+    ESP_LOGI(TAG, "deep sleep for %lld s (stack free min %u B)", (long long)arm.sleep_s,
              (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
     esp_deep_sleep_start();
 }

@@ -1,0 +1,19 @@
+# MVP wake button fragment (BUILD-ONLY until verified on hardware): a physical button wakes the
+# ESP32-C3 from deep sleep and opens the BLE service window (DSP_CAUSE_BUTTON, physical presence).
+# Use after sdkconfig.defaults, sdkconfig.ble.defaults (and the wifitime/pumpgpio fragments).
+#
+# Circuit: XIAO ESP32-C3 D1 = GPIO3, normally-open momentary pushbutton to GND, external 10 kOhm
+# pull-up GPIO3 -> 3V3, active LOW. Not connected to RESET or BOOT. GPIO3 is a deep-sleep wake pad
+# (GPIO0-5), not a strapping pin (2, 8, 9), not JTAG (4-7), not USB/UART0/flash, and differs from
+# the pump control pin (GPIO10, compile-time check in dsp_esp_pump_gpio.c).
+#
+# The timer wake stays armed on every sleep. A timer wake never opens a service window. The button
+# is NOT a dosing trigger: readiness, schedules, limits, anti-replay and the pump driver are unchanged.
+CONFIG_DSP_BUTTON_WAKE_GPIO=3
+CONFIG_DSP_BUTTON_WAKE_ACTIVE_HIGH=n
+# Kept at the ESP-IDF default on purpose: in deep sleep ESP-IDF adds the internal pull-up (~45 kOhm)
+# to a low-level wake pad. Same direction as the external 10 kOhm (about 8.2 kOhm combined, ~0.4 mA
+# only while the button is pressed, nothing while released), and it keeps the pad defined if the
+# external resistor is missing or broken (a floating pad would cause spurious wakes, each opening a
+# service window). The IDF note about disabling it targets opposing internal/external pulls.
+CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS=y
