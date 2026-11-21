@@ -597,6 +597,12 @@ pulses imply storage, credentials and gates were valid; a post-boot NVS read was
 ### 8e. Wake button GPIO3 (bench MVP; NOT RUN, no flash authorized)
 
 Image: the 0cbb830 bench configuration plus `sdkconfig.button.defaults` (README "Wake button").
+Candidate (built 2026-11-21 from 2ab4212 in a fresh directory,
+`~/dispenser-hw-builds/ble-wifitime-gpio-button-2ab4212`): `dispenser.bin` 1,214,160 B, SHA-256
+`e22474d916413ed748ec27bd3be8b75646f7a1a57a1992b3076d614cd441c6bd`; erase range
+`0x00030000..0x00158fff` (one sector more than 0cbb830); partition table byte-identical to
+0cbb830/54a7925; the only `CONFIG_` difference from the 0cbb830 build is
+`CONFIG_DSP_BUTTON_WAKE_GPIO=3`. Only `0x30000` would be written (the board keeps bootloader db7e593).
 Circuit: normally-open button D1/GPIO3 → GND, 10 kΩ GPIO3 → 3V3, nothing on RESET/BOOT; GPIO10
 unchanged with no load. Before any flash: approval, then the read-only readiness check in ROM
 download mode (the device ran a BENCH dose on 2026-11-21, so NOT READY must not be assumed), stop if
