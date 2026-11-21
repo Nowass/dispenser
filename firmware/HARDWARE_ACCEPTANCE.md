@@ -594,7 +594,7 @@ Still open for this firmware: E1–E6 (need the new APK; with the incident fixes
 the 0cbb830 image, 8d.1), confirmation that ownership, schedules and reservoir are unchanged (the
 pulses imply storage, credentials and gates were valid; a post-boot NVS read was not authorized).
 
-### 8e. Wake button GPIO3 (bench MVP; NOT RUN, no flash authorized)
+### 8e. Wake button GPIO3 (bench MVP; **BENCH VERIFIED** 2026-11-21, smoke test W0–W4)
 
 Image: the 0cbb830 bench configuration plus `sdkconfig.button.defaults` (README "Wake button").
 Candidate (built 2026-11-21 from 2ab4212 in a fresh directory,
@@ -611,13 +611,28 @@ bootloader, partition table, `otadata`, `nvs` and `nvs_sec` are byte-identical b
 
 | # | Step | Expected | Result |
 |---|---|---|---|
-| W0 | Board unpowered: wire the button and pull-up; then powered, multimeter on D1 | ~3.3 V released, ~0 V pressed | |
-| W1 | First boot (one RESET), console capture running, no connection; wait out the 180 s window | `wake: cause=POWER_ON`; window; `button wake armed (GPIO3, active low)`; `deep sleep for N s` | |
-| W2 | Short press (~0.2 s) | `wake: cause=BUTTON (reset reason 8, timer=0, gpio=1, gpio mask 0x8)`; `dsp_ble: radio up`; the app connects authenticated; record press → advertising time | |
-| W3 | End the window from the app (or wait 180 s) | both sources armed again; deep sleep | |
-| W4 | Natural timer wake (next sync/dose plan, up to 6 h; no schedule change) | `wake: cause=TIMER`; no `dsp_ble: radio up`; deep sleep again | |
-| W5 | Hold the button through a sleep entry for ≥ 2 min, then release, then press | `button active at sleep entry: GPIO wake not armed, timer 60 s`; TIMER wakes ~60 s apart without BLE; after release `button wake armed`; the press gives a BUTTON wake | |
-| W6 | GPIO10 throughout W1–W5 (logic probe), device NOT READY | always low, no pump log line; readiness still SERVICE_REQUIRED in the app afterwards | |
+| W0 | Board unpowered: wire the button and pull-up; then powered, multimeter on D1 | ~3.3 V released, ~0 V pressed | NOT MEASURED. Deviation accepted by the owner: button D1 → GND only, **no external 10 kΩ** (internal sleep pull-up, kept by `CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS=y`, is the only pull-up). The released level is shown indirectly: four sleeps without a spurious wake, every wake caused by a press |
+| W1 | First boot (one RESET), console capture running, no connection; wait out the 180 s window | `wake: cause=POWER_ON`; window; `button wake armed (GPIO3, active low)`; `deep sleep for N s` | **PASS** (16:07:31): `wake: cause=POWER_ON (reset reason 1 …)`, Wi-Fi/SNTP, Wi-Fi off, BLE up at 6.06 s, deep sleep at 16:10:37 (180 s idle). The pre-sleep lines (`button wake armed`, `deep sleep for`) are never captured: the USB-Serial-JTAG console drops at sleep entry (same for earlier images); arming is shown by W2 |
+| W2 | Short press (~0.2 s) | `wake: cause=BUTTON (reset reason 8, timer=0, gpio=1, gpio mask 0x8)`; `dsp_ble: radio up`; the app connects authenticated; record press → advertising time | **PASS** (16:30:30): exactly that line; `dsp_ble: radio up` at 641 ms after boot (no sync due); no pump line |
+| W3 | End the window from the app (or wait 180 s) | both sources armed again; deep sleep | **PASS**: authenticated connection in the app (owner-reported); after ending, deep sleep at 16:34:46 (the app's end closed the connection, the window then ended after 180 s idle) |
+| W4 | Natural timer wake (next sync/dose plan, up to 6 h; no schedule change) | `wake: cause=TIMER`; no `dsp_ble: radio up`; deep sleep again | DEFERRED (approved smoke-test scope). Replaced by the debounce check: two more ordinary presses in separate sleep cycles (16:37:25, 16:41:30) → one BUTTON wake and one BLE window each, deep sleep at 16:40:27 and 16:44:30, no further wake until the capture ended at 16:49:10: **PASS** |
+| W5 | Hold the button through a sleep entry for ≥ 2 min, then release, then press | `button active at sleep entry: GPIO wake not armed, timer 60 s`; TIMER wakes ~60 s apart without BLE; after release `button wake armed`; the press gives a BUTTON wake | DEFERRED (optional long press not performed; host-tested) |
+| W6 | GPIO10 throughout W1–W5 (logic probe), device NOT READY | always low, no pump log line; readiness still SERVICE_REQUIRED in the app afterwards | **PASS (log level)**: no pump run, cutoff or error line in any of the 4 boots; GPIO10 not probed electrically. Readiness read from the backup before the flash: SERVICE_REQUIRED; no operation changed it afterwards |
+
+Deployment 2026-11-21 (owner approval of the same day; `deploy-2ab4212.log`, redacted
+`serial-2ab4212.redacted.log` in `~/dispenser-hw-evidence/wakebutton-20261121`): ROM download mode,
+identity ESP32-C3 v0.4 / e0:72:a1:1e:1f:34 / 4 MB; flash held bootloader db7e593, the partition
+table and app 0cbb830; private backups of `nvs`, `nvs_sec`, `otadata` (each read twice, identical;
+`nvs_sec` = provisioned image); readiness **SERVICE_REQUIRED**; only `0x30000` written (erase
+`0x00030000..0x00158fff`, 1,214,160 B, hash verified); app, bootloader and table verified,
+`otadata`, `nvs`, `nvs_sec` byte-identical before the first boot. No erase, provisioning, schedule,
+readiness or reservoir change, no dose.
+
+Logger finding: the earlier `ble_logger.py` reopened the port after every deep sleep with DTR set low
+first, passing through DTR=0/RTS=1, the USB-JTAG chip-reset state (`rst:0x15 USB_UART_CHIP_RESET`
+right after each "port reopened" in the 2026-11-20 GPIO logs): those wakes were turned into resets
+by the capture. The new capture leaves the control lines untouched on reopen; the wake causes above
+are therefore genuine deep-sleep wakes (`reset reason 8`).
 
 ## 9. Configuration limits and storage (M1.10b.1)
 

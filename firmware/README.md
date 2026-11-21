@@ -2302,8 +2302,21 @@ idf.py -B build-button -D SDKCONFIG=build-button/sdkconfig \
        -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble.defaults;<bring-up fragment>;sdkconfig.wifitime.defaults;sdkconfig.pumpgpio.defaults;sdkconfig.button.defaults" build
 ```
 
-Not verified on hardware (wake current, pad hold release and the held-button path need the bench
-check in `HARDWARE_ACCEPTANCE.md` §8e).
+- **Debounce (review 2026-11-21, no filter added):** the wake cause is read once at boot from the
+  latched RTC wake register, and GPIO3 has no interrupt or polling while awake, so contact bounce
+  after the first low level (during boot or the window) cannot create a second event; deep-sleep wake
+  sources are re-armed only at the next sleep entry. A short press that already ended at boot is still
+  a BUTTON wake (GPIO3 need not stay low). Bounce at release right before sleep entry is caught by the
+  5-sample check (any low sample → timer only, ≤ 60 s). Residual race: a press or a release bounce
+  between the last sample and `esp_deep_sleep_start` gives one immediate BUTTON wake and one extra
+  window; the next sleep entry samples again, so it cannot repeat without further presses (accepted
+  bench limitation). The 60 s cap is `min(planned, 60)`: an earlier dose wake is never postponed. The
+  active-mode GPIO glitch filter is not relied on; in deep sleep any low level of ≥ 3 RTC slow-clock
+  cycles (~22 µs) wakes the chip, so noise on long wires could wake it (an external pull-up or a small
+  capacitor helps; not seen on the bench).
+
+Bench verified 2026-11-21 (`HARDWARE_ACCEPTANCE.md` §8e, smoke test W0–W4, internal pull-up only);
+the held-button path and a natural timer wake were not run on hardware.
 
 ### Wi-Fi time synchronization only (`CONFIG_DSP_APP_WIFI_TIME`, bench MVP)
 
