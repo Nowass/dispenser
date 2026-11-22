@@ -798,12 +798,13 @@ static void test_claim_session_dispatch(void)
     req_init(3, DSP_BLE_T_WIFI_GET);      /* recognized, not provided */
     req_init(4, DSP_BLE_T_INVITE_CREATE);
     req_init(5, DSP_BLE_T_LIST_SCHEDULES);
-    for (int i = 0; i <= 5; i++) {
+    req_init(6, DSP_BLE_T_GET_BATTERY);   /* fw 0.2.0; this harness has no battery port */
+    for (int i = 0; i <= 6; i++) {
         step(t++, hk(h_req, i, 0));
     }
     step(t++, hk(h_drain, 0, 0));
-    req_init(6, DSP_BLE_T_END_SESSION); /* encrypted, authorized: ends the window (C10) */
-    step(t++, hk(h_req, 6, 0));
+    req_init(7, DSP_BLE_T_END_SESSION); /* encrypted, authorized: ends the window (C10) */
+    step(t++, hk(h_req, 7, 0));
     step(t + 5, mk(OP_END_TIMEOUT));    /* not reached if the owner's END works */
     DSP_CHECK(session());
     drain();
@@ -823,7 +824,11 @@ static void test_claim_session_dispatch(void)
               !all_zero(iv->b.invite_create_rsp.token, 16));
     const logent_t *ls = by_txn(1005);
     DSP_CHECK(ls != NULL && ls->decoded && !(ls->flags & DSP_BLE_F_ERROR));
-    const logent_t *en = by_txn(1006);
+    const logent_t *bt = by_txn(1006);
+    DSP_CHECK(bt != NULL && bt->enc && bt->decoded && !(bt->flags & DSP_BLE_F_ERROR));
+    DSP_CHECK(bt != NULL && bt->b.battery.battery.state == DSP_BATT_NOT_MEASURED &&
+              bt->b.battery.battery.battery_mv == 0 && bt->b.battery.battery.age_s == 0);
+    const logent_t *en = by_txn(1007);
     DSP_CHECK(en != NULL && en->enc && !(en->flags & DSP_BLE_F_ERROR));
     DSP_CHECK_EQ_INT(DSP_BLE_END_COMMAND, rep.ble_end); /* the owner ended the window */
     for (int i = 0; i < g_nlog; i++) {

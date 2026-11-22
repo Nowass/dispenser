@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "dsp_battery.h"
 #include "dsp_power.h"
 
 #ifdef __cplusplus
@@ -84,6 +85,51 @@ dsp_plat_sleep_arm_t dsp_plat_sleep_arm(int gpio, bool button_active, int64_t sl
 
 /* Log-safe name of a wake cause ("BUTTON", "TIMER", ...; never device data). */
 const char *dsp_plat_wake_cause_name(dsp_wake_cause_t cause);
+
+/* ---- Battery voltage (XIAO ESP32-C3: BAT+ -> R1 -> ADC pad -> R2 -> GND) -------------------
+ *
+ * Pin check: only ADC1 pads (GPIO0-GPIO4 on the ESP32-C3; ADC2 is not usable together with the
+ * radio), never the strapping pin GPIO2 (a divider at about half the battery voltage could
+ * disturb the boot mode), never the wake button or the pump pin. -1 = no battery telemetry. */
+typedef enum {
+    DSP_PLAT_BATT_PIN_DISABLED = 0,
+    DSP_PLAT_BATT_PIN_OK,
+    DSP_PLAT_BATT_PIN_NOT_ADC1,
+    DSP_PLAT_BATT_PIN_STRAPPING,
+    DSP_PLAT_BATT_PIN_CONFLICT, /* the wake button or the pump pin */
+} dsp_plat_batt_pin_t;
+
+dsp_plat_batt_pin_t dsp_plat_batt_pin_check(int gpio, int button_gpio, int pump_gpio);
+
+/* Sampling. The 1 MOhm / 1 MOhm divider is a ~500 kOhm source: without a capacitor at the pad
+ * the ADC's sampling capacitor needs several conversions on the same channel to settle, so the
+ * adapter first discards DSP_PLAT_BATT_DISCARD conversions, then takes DSP_PLAT_BATT_SAMPLES
+ * calibrated readings back to back (no delays; about a millisecond in total). The result is the
+ * mean of the samples left after dropping the DSP_PLAT_BATT_TRIM lowest and highest (robust
+ * against single disturbed conversions). A 100 nF capacitor from the pad to GND makes the source
+ * stiff; the method is the same with or without it. */
+#define DSP_PLAT_BATT_DISCARD 4u
+#define DSP_PLAT_BATT_SAMPLES 16u
+#define DSP_PLAT_BATT_TRIM 4u
+/* Kept samples spread (max - min at the ADC input) above which the reading is UNSTABLE. */
+#define DSP_PLAT_BATT_MAX_SPREAD_MV 100u
+
+typedef struct {
+    uint8_t state;       /* dsp_batt_state_t */
+    uint16_t battery_mv; /* 0 unless state == DSP_BATT_VALID */
+    uint16_t adc_mv;     /* trimmed mean at the ADC input (diagnostics; 0 when not computed) */
+    uint16_t spread_mv;  /* max - min of the kept samples (diagnostics) */
+} dsp_plat_batt_result_t;
+
+/* adc_mv: n calibrated readings in mV (after the discarded ones); n must be between
+ * 2 * DSP_PLAT_BATT_TRIM + 1 and DSP_PLAT_BATT_SAMPLES (else ADC_FAILED). divider_x1000: battery
+ * voltage / ADC voltage x 1000 (2000 for two equal resistors); outside 1000..10000 = ADC_FAILED.
+ * A negative reading is ADC_FAILED. The battery voltage is rounded to the nearest mV and checked
+ * against the credible window (dsp_battery.h), never clamped. */
+dsp_plat_batt_result_t dsp_plat_batt_compute(const int *adc_mv, size_t n, uint32_t divider_x1000);
+
+/* Log-safe name of a battery state ("VALID", "ADC_FAILED", ...). */
+const char *dsp_plat_batt_state_name(uint8_t state);
 
 /* RTC-retained storage of the domain block (120 bytes since M1.10b.3; contents validated by
  * the domain: magic, version, length, CRC, ranges). Lives in RTC_NOINIT memory: arbitrary

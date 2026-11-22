@@ -436,6 +436,170 @@ static void test_queue_two_threads(void)
     printf("queue: %d posted, %d busy retries, %zu frames sent\n", posted_ok, posted_busy, rep.frames_out);
 }
 
+/* ---- Battery voltage (pure part of dsp_esp_battery) ---------------------------------------- */
+
+static void test_battery_pin_check(void)
+{
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_DISABLED, dsp_plat_batt_pin_check(-1, 3, 10));
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_OK, dsp_plat_batt_pin_check(4, 3, 10)); /* XIAO D2 / A2 */
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_OK, dsp_plat_batt_pin_check(0, 3, 10));
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_OK, dsp_plat_batt_pin_check(1, 3, 10));
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_STRAPPING, dsp_plat_batt_pin_check(2, 3, 10));
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_CONFLICT, dsp_plat_batt_pin_check(3, 3, 10)); /* wake button */
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_CONFLICT, dsp_plat_batt_pin_check(4, -1, 4));
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_OK, dsp_plat_batt_pin_check(3, -1, 10)); /* no button */
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_NOT_ADC1, dsp_plat_batt_pin_check(5, 3, 10)); /* ADC2 */
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_NOT_ADC1, dsp_plat_batt_pin_check(10, 3, 4)); /* pump pin, no ADC */
+    DSP_CHECK_EQ_INT(DSP_PLAT_BATT_PIN_NOT_ADC1, dsp_plat_batt_pin_check(21, 3, 10));
+}
+
+static void fill(int *v, size_t n, int mv)
+{
+    for (size_t i = 0; i < n; i++) {
+        v[i] = mv;
+    }
+}
+
+static void test_battery_compute_nominal_and_divider(void)
+{
+    int v[DSP_PLAT_BATT_SAMPLES];
+    /* the owner's bench reading: 1.985 V at the midpoint of 1 MOhm / 1 MOhm = 3.970 V */
+    fill(v, DSP_PLAT_BATT_SAMPLES, 1985);
+    dsp_plat_batt_result_t r = dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000);
+    DSP_CHECK_EQ_INT(DSP_BATT_VALID, r.state);
+    DSP_CHECK_EQ_INT(3970, r.battery_mv);
+    DSP_CHECK_EQ_INT(1985, r.adc_mv);
+    DSP_CHECK_EQ_INT(0, r.spread_mv);
+    /* other ratios (x1000), rounded to the nearest mV */
+    r = dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2010); /* 1985 * 2.010 = 3989.85 */
+    DSP_CHECK_EQ_INT(3990, r.battery_mv);
+    r = dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 1999); /* 3968.015 */
+    DSP_CHECK_EQ_INT(3968, r.battery_mv);
+    /* the trimmed mean is rounded: 1985 x 4 and 1986 x 4 kept -> 1985.5 -> 1986 */
+    for (size_t i = 0; i < DSP_PLAT_BATT_SAMPLES; i++) {
+        v[i] = i % 2 == 0 ? 1985 : 1986;
+    }
+    r = dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000);
+    DSP_CHECK_EQ_INT(1986, r.adc_mv);
+    DSP_CHECK_EQ_INT(3972, r.battery_mv);
+    DSP_CHECK_EQ_INT(1, r.spread_mv);
+    /* the minimum count of samples (2 x trim + 1) */
+    fill(v, DSP_PLAT_BATT_SAMPLES, 2000);
+    r = dsp_plat_batt_compute(v, 2u * DSP_PLAT_BATT_TRIM + 1u, 2000);
+    DSP_CHECK_EQ_INT(DSP_BATT_VALID, r.state);
+    DSP_CHECK_EQ_INT(4000, r.battery_mv);
+}
+
+static void test_battery_compute_trims_outliers(void)
+{
+    int v[DSP_PLAT_BATT_SAMPLES];
+    fill(v, DSP_PLAT_BATT_SAMPLES, 1900);
+    /* four disturbed conversions on each side (e.g. a settling sample capacitor, noise) */
+    v[0] = 0;
+    v[3] = 120;
+    v[7] = 600;
+    v[9] = 1100;
+    v[2] = 3100;
+    v[5] = 2900;
+    v[11] = 2600;
+    v[15] = 2400;
+    dsp_plat_batt_result_t r = dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000);
+    DSP_CHECK_EQ_INT(DSP_BATT_VALID, r.state);
+    DSP_CHECK_EQ_INT(3800, r.battery_mv);
+    DSP_CHECK_EQ_INT(0, r.spread_mv);
+    /* order does not matter */
+    int w[DSP_PLAT_BATT_SAMPLES];
+    for (size_t i = 0; i < DSP_PLAT_BATT_SAMPLES; i++) {
+        w[i] = v[DSP_PLAT_BATT_SAMPLES - 1 - i];
+    }
+    dsp_plat_batt_result_t r2 = dsp_plat_batt_compute(w, DSP_PLAT_BATT_SAMPLES, 2000);
+    DSP_CHECK_EQ_INT(r.battery_mv, r2.battery_mv);
+}
+
+static void test_battery_compute_unstable(void)
+{
+    int v[DSP_PLAT_BATT_SAMPLES];
+    /* a slow ramp (settling without a capacitor): the kept samples span the spread limit */
+    for (size_t i = 0; i < DSP_PLAT_BATT_SAMPLES; i++) {
+        v[i] = 1900 + (int)i * 15; /* kept: 1960..2065 -> spread 105 */
+    }
+    dsp_plat_batt_result_t r = dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000);
+    DSP_CHECK_EQ_INT(DSP_BATT_UNSTABLE, r.state);
+    DSP_CHECK_EQ_INT(0, r.battery_mv); /* never a voltage for an unstable reading */
+    DSP_CHECK_EQ_INT(105, r.spread_mv);
+    /* exactly at the limit: still valid */
+    fill(v, DSP_PLAT_BATT_SAMPLES, 1950);
+    for (size_t i = 8; i < DSP_PLAT_BATT_SAMPLES; i++) {
+        v[i] = 1950 + (int)DSP_PLAT_BATT_MAX_SPREAD_MV;
+    }
+    r = dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000);
+    DSP_CHECK_EQ_INT(DSP_BATT_VALID, r.state);
+    DSP_CHECK_EQ_INT((int)DSP_PLAT_BATT_MAX_SPREAD_MV, r.spread_mv);
+}
+
+static void test_battery_compute_range_boundaries(void)
+{
+    int v[DSP_PLAT_BATT_SAMPLES];
+    fill(v, DSP_PLAT_BATT_SAMPLES, 1250); /* 2500 mV: lowest credible */
+    DSP_CHECK_EQ_INT(DSP_BATT_VALID, dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000).state);
+    fill(v, DSP_PLAT_BATT_SAMPLES, 1249); /* 2498 mV */
+    dsp_plat_batt_result_t r = dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000);
+    DSP_CHECK_EQ_INT(DSP_BATT_OUT_OF_RANGE, r.state);
+    DSP_CHECK_EQ_INT(0, r.battery_mv);
+    DSP_CHECK_EQ_INT(1249, r.adc_mv); /* diagnostics still report the input */
+    fill(v, DSP_PLAT_BATT_SAMPLES, 2300); /* 4600 mV: highest credible */
+    DSP_CHECK_EQ_INT(DSP_BATT_VALID, dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000).state);
+    fill(v, DSP_PLAT_BATT_SAMPLES, 2301);
+    DSP_CHECK_EQ_INT(DSP_BATT_OUT_OF_RANGE, dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000).state);
+    /* open divider (pad pulled to GND by R2) and a saturated ADC input */
+    fill(v, DSP_PLAT_BATT_SAMPLES, 0);
+    DSP_CHECK_EQ_INT(DSP_BATT_OUT_OF_RANGE, dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000).state);
+    fill(v, DSP_PLAT_BATT_SAMPLES, 2900);
+    DSP_CHECK_EQ_INT(DSP_BATT_OUT_OF_RANGE, dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000).state);
+}
+
+static void test_battery_compute_invalid_input(void)
+{
+    int v[DSP_PLAT_BATT_SAMPLES];
+    fill(v, DSP_PLAT_BATT_SAMPLES, 1985);
+    DSP_CHECK_EQ_INT(DSP_BATT_ADC_FAILED, dsp_plat_batt_compute(NULL, DSP_PLAT_BATT_SAMPLES, 2000).state);
+    DSP_CHECK_EQ_INT(DSP_BATT_ADC_FAILED, dsp_plat_batt_compute(v, 2u * DSP_PLAT_BATT_TRIM, 2000).state);
+    DSP_CHECK_EQ_INT(DSP_BATT_ADC_FAILED, dsp_plat_batt_compute(v, 0, 2000).state);
+    DSP_CHECK_EQ_INT(DSP_BATT_ADC_FAILED, dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES + 1u, 2000).state);
+    DSP_CHECK_EQ_INT(DSP_BATT_ADC_FAILED, dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 999).state);
+    DSP_CHECK_EQ_INT(DSP_BATT_ADC_FAILED, dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 10001).state);
+    /* ratio 1.000 is accepted: 1985 mV is then out of range, not an ADC failure */
+    DSP_CHECK_EQ_INT(DSP_BATT_OUT_OF_RANGE, dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 1000).state);
+    v[6] = -1; /* a negative "calibrated" reading */
+    dsp_plat_batt_result_t r = dsp_plat_batt_compute(v, DSP_PLAT_BATT_SAMPLES, 2000);
+    DSP_CHECK_EQ_INT(DSP_BATT_ADC_FAILED, r.state);
+    DSP_CHECK_EQ_INT(0, r.battery_mv);
+    DSP_CHECK_EQ_INT(0, r.adc_mv);
+}
+
+static void test_battery_sanitize_and_names(void)
+{
+    dsp_batt_sample_t s = dsp_batt_sanitize((dsp_batt_sample_t){DSP_BATT_VALID, 3970});
+    DSP_CHECK_EQ_INT(DSP_BATT_VALID, s.state);
+    DSP_CHECK_EQ_INT(3970, s.battery_mv);
+    s = dsp_batt_sanitize((dsp_batt_sample_t){DSP_BATT_VALID, 0});
+    DSP_CHECK_EQ_INT(DSP_BATT_OUT_OF_RANGE, s.state);
+    DSP_CHECK_EQ_INT(0, s.battery_mv);
+    s = dsp_batt_sanitize((dsp_batt_sample_t){DSP_BATT_NO_CALIBRATION, 4000});
+    DSP_CHECK_EQ_INT(DSP_BATT_NO_CALIBRATION, s.state);
+    DSP_CHECK_EQ_INT(0, s.battery_mv);
+    s = dsp_batt_sanitize((dsp_batt_sample_t){200, 4000});
+    DSP_CHECK_EQ_INT(DSP_BATT_ADC_FAILED, s.state);
+    DSP_CHECK_EQ_INT(0, s.battery_mv);
+    DSP_CHECK_EQ_STR("VALID", dsp_plat_batt_state_name(DSP_BATT_VALID));
+    DSP_CHECK_EQ_STR("NOT_MEASURED", dsp_plat_batt_state_name(DSP_BATT_NOT_MEASURED));
+    DSP_CHECK_EQ_STR("ADC_FAILED", dsp_plat_batt_state_name(DSP_BATT_ADC_FAILED));
+    DSP_CHECK_EQ_STR("NO_CALIBRATION", dsp_plat_batt_state_name(DSP_BATT_NO_CALIBRATION));
+    DSP_CHECK_EQ_STR("OUT_OF_RANGE", dsp_plat_batt_state_name(DSP_BATT_OUT_OF_RANGE));
+    DSP_CHECK_EQ_STR("UNSTABLE", dsp_plat_batt_state_name(DSP_BATT_UNSTABLE));
+    DSP_CHECK_EQ_STR("UNKNOWN", dsp_plat_batt_state_name(6));
+}
+
 int main(void)
 {
     DSP_RUN(test_wake_cause_mapping);
@@ -444,5 +608,12 @@ int main(void)
     DSP_RUN(test_wake_cause_names);
     DSP_RUN(test_rtc_retained_storage);
     DSP_RUN(test_queue_two_threads);
+    DSP_RUN(test_battery_pin_check);
+    DSP_RUN(test_battery_compute_nominal_and_divider);
+    DSP_RUN(test_battery_compute_trims_outliers);
+    DSP_RUN(test_battery_compute_unstable);
+    DSP_RUN(test_battery_compute_range_boundaries);
+    DSP_RUN(test_battery_compute_invalid_input);
+    DSP_RUN(test_battery_sanitize_and_names);
     return dsp_test_finish();
 }

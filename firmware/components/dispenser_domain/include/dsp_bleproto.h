@@ -53,6 +53,7 @@ typedef enum {
     DSP_BLE_T_GET_STATUS = 0x10,
     DSP_BLE_T_GET_DIAGNOSTICS = 0x11,
     DSP_BLE_T_ACK_REJECTIONS = 0x12,
+    DSP_BLE_T_GET_BATTERY = 0x13, /* firmware >= 0.2.0 (docs/BLE_PROTOCOL.md 7.7) */
     DSP_BLE_T_GET_CONFIG = 0x20,
     DSP_BLE_T_SET_CONFIG = 0x21,
     DSP_BLE_T_LIST_SCHEDULES = 0x30,
@@ -197,6 +198,13 @@ typedef struct {
     uint8_t last_wake_reason;
 } dsp_ble_diag_rec_t;
 
+/* Battery telemetry (protocol 7.7): state 0 VALID .. 5 UNSTABLE (dsp_batt_state_t). */
+typedef struct {
+    uint8_t state;
+    uint16_t battery_mv; /* 0 unless VALID */
+    uint32_t age_s;      /* seconds since the measurement (0 unless VALID) */
+} dsp_ble_battery_rec_t;
+
 typedef struct {
     uint32_t revision;
     uint32_t reservoir_capacity_ul;
@@ -242,6 +250,7 @@ typedef struct { uint8_t msg_index; dsp_ble_blob_t noise; } dsp_ble_hs_rsp_t;
 typedef struct { uint8_t slot; } dsp_ble_slot_t;
 typedef struct { dsp_ble_status_rec_t status; } dsp_ble_status_body_t;
 typedef struct { dsp_ble_diag_rec_t diag; } dsp_ble_diag_body_t;
+typedef struct { dsp_ble_battery_rec_t battery; } dsp_ble_battery_body_t;
 typedef struct { dsp_ble_config_rec_t config; } dsp_ble_config_body_t;
 typedef struct {
     uint32_t expected_revision;
@@ -316,6 +325,7 @@ typedef union {
     dsp_ble_slot_t slot; /* ENROLL_RESULT response, PHONE_REMOVE request */
     dsp_ble_status_body_t status;
     dsp_ble_diag_body_t diag;
+    dsp_ble_battery_body_t battery;
     dsp_ble_config_body_t config;
     dsp_ble_set_config_req_t set_config_req;
     dsp_ble_revision_t revision;

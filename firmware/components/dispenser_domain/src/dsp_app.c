@@ -157,6 +157,37 @@ static void stage_observe(dsp_app_t *app)
     (void)dsp_dosing_observe_reservoir(&app->dosing, notify_clock(app));
 }
 
+/* ---- Battery telemetry (runtime only) ---------------------------------------------------- */
+
+static uint64_t mono_or_0(const dsp_app_t *app)
+{
+    return app->cfg->mono != NULL && app->cfg->mono->now_ms != NULL
+               ? app->cfg->mono->now_ms(app->cfg->mono->ctx)
+               : 0;
+}
+
+/* One measurement through the platform port (never while the pump runs: every caller runs in
+ * the application task outside a pump run). */
+static void battery_measure(dsp_app_t *app)
+{
+    const dsp_battery_port_t *b = app->cfg->battery;
+    if (b == NULL || b->measure == NULL) {
+        return;
+    }
+    app->batt = dsp_batt_sanitize(b->measure(b->ctx));
+    app->batt_measured = true;
+    app->batt_ms = mono_or_0(app);
+    app->rep.battery_reads++;
+    app->rep.battery = app->batt;
+}
+
+/* The end of a pump run attempt: no battery measurement within DSP_APP_BATTERY_PUMP_QUIET_MS. */
+static void pump_mark(dsp_app_t *app)
+{
+    app->pump_ran = true;
+    app->pump_ms = mono_or_0(app);
+}
+
 static void stage_dose(dsp_app_t *app)
 {
     trace(app, DSP_STAGE_DOSE);
@@ -168,6 +199,9 @@ static void stage_dose(dsp_app_t *app)
         app->rep.dose_passes++;
         app->rep.dosed += r.dosed;
         app->rep.pump_failures += r.pump_failures;
+        if (r.dosed > 0 || r.pump_failures > 0) {
+            pump_mark(app);
+        }
         if (r.pump_failures > 0) {
             app->pump_fault = true; /* no further activation in this wake */
         }
@@ -1347,6 +1381,9 @@ dsp_app_op_result_t dsp_app_manual_dose(dsp_app_t *app, const dsp_app_auth_t *au
         uint32_t refusal = app->inhibited || app->pump_fault ? DSP_MREFUSE_DEGRADED : 0;
         o = dsp_dosing_manual_request(&app->dosing, slot, seq, volume_ul, dose_clock(app), refusal);
     }
+    if (o.kind == DSP_MANUAL_EXECUTED) {
+        pump_mark(app); /* the pump was started (or attempted) */
+    }
     if (o.kind == DSP_MANUAL_EXECUTED && o.dose.status == DSP_DOSING_OK) {
         app->rep.manual_doses++;
     }
@@ -1523,6 +1560,37 @@ dsp_app_op_result_t dsp_app_get_diagnostics(dsp_app_t *app, const dsp_app_auth_t
     out->clock_reason = (uint8_t)app->tk.reason;
     out->last_sync_utc = app->tk.meta.last_sync_utc;
     out->last_wake_reason = app->retained.last_reason;
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_get_battery(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                        dsp_app_battery_t *out)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    uint64_t now = mono_or_0(app);
+    bool stale = !app->batt_measured || now < app->batt_ms ||
+                 now - app->batt_ms >= DSP_APP_BATTERY_REFRESH_MS;
+    bool quiet = !app->pump_ran || (now >= app->pump_ms && now - app->pump_ms >= DSP_APP_BATTERY_PUMP_QUIET_MS);
+    if (stale && quiet) {
+        battery_measure(app);
+        now = app->batt_measured ? app->batt_ms : now;
+    }
+    memset(out, 0, sizeof *out);
+    if (!app->batt_measured) {
+        out->sample.state = DSP_BATT_NOT_MEASURED;
+    } else {
+        out->sample = app->batt;
+        if (app->batt.state == DSP_BATT_VALID && now >= app->batt_ms) {
+            uint64_t age = (now - app->batt_ms) / 1000u;
+            out->age_s = age > UINT32_MAX ? UINT32_MAX : (uint32_t)age;
+        }
+    }
     return done(app, op(DSP_OP_OK, 0, 0));
 }
 
@@ -2797,6 +2865,9 @@ dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg)
     app->rep.inhibited = app->inhibited;
 
     if (!app->rep.pump_unconfirmed) {
+        /* Battery telemetry: once per wake (POWER_ON, BUTTON, TIMER), before any dosing, Wi-Fi or
+         * BLE activity, with the pump confirmed OFF. Never a reason to wake. */
+        battery_measure(app);
         /* 2. LOAD (failure = DEGRADED). */
         trace(app, DSP_STAGE_LOAD);
         app->loaded = load(app);

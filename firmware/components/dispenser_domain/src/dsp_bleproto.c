@@ -59,6 +59,12 @@ static const dsp_ble_field_t DIAG_F[] = {
 };
 LAYOUT(DIAG_L, DIAG_F);
 
+static const dsp_ble_field_t BATTERY_F[] = {
+    F_ENUM(dsp_ble_battery_rec_t, state, 0, 5), F_U16(dsp_ble_battery_rec_t, battery_mv),
+    F_U32(dsp_ble_battery_rec_t, age_s),
+};
+LAYOUT(BATTERY_L, BATTERY_F);
+
 static const dsp_ble_field_t CONFIG_F[] = {
     F_U32(dsp_ble_config_rec_t, revision), F_U32(dsp_ble_config_rec_t, reservoir_capacity_ul),
     F_U32(dsp_ble_config_rec_t, reservoir_remaining_ul), F_U8(dsp_ble_config_rec_t, low_stock_percent),
@@ -121,6 +127,8 @@ static const dsp_ble_field_t STATUS_BODY_F[] = {F_REC(dsp_ble_status_body_t, sta
 LAYOUT(STATUS_BODY_L, STATUS_BODY_F);
 static const dsp_ble_field_t DIAG_BODY_F[] = {F_REC(dsp_ble_diag_body_t, diag, DIAG_L)};
 LAYOUT(DIAG_BODY_L, DIAG_BODY_F);
+static const dsp_ble_field_t BATTERY_BODY_F[] = {F_REC(dsp_ble_battery_body_t, battery, BATTERY_L)};
+LAYOUT(BATTERY_BODY_L, BATTERY_BODY_F);
 static const dsp_ble_field_t CONFIG_BODY_F[] = {F_REC(dsp_ble_config_body_t, config, CONFIG_L)};
 LAYOUT(CONFIG_BODY_L, CONFIG_BODY_F);
 static const dsp_ble_field_t SET_CONFIG_F[] = {
@@ -245,6 +253,7 @@ static const type_entry_t TYPES[] = {
     {DSP_BLE_T_GET_STATUS, EN, &EMPTY_L, &STATUS_BODY_L, NULL},
     {DSP_BLE_T_GET_DIAGNOSTICS, EN, &EMPTY_L, &DIAG_BODY_L, NULL},
     {DSP_BLE_T_ACK_REJECTIONS, EN, &EMPTY_L, &EMPTY_L, NULL},
+    {DSP_BLE_T_GET_BATTERY, EN, &EMPTY_L, &BATTERY_BODY_L, NULL},
     {DSP_BLE_T_GET_CONFIG, EN, &EMPTY_L, &CONFIG_BODY_L, NULL},
     {DSP_BLE_T_SET_CONFIG, EN, &SET_CONFIG_L, &REVISION_L, NULL},
     {DSP_BLE_T_LIST_SCHEDULES, EN, &PAGE_L, &LIST_SCHED_RSP_L, NULL},

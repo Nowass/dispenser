@@ -49,6 +49,7 @@
 #if CONFIG_DSP_APP_RUNTIME
 #include "dsp_app.h"
 #include "dsp_esp_app.h"
+#include "dsp_esp_battery.h"
 #include "dsp_esp_notify.h"
 #include "dsp_esp_time.h"
 #include "dsp_nvs_kv.h"
@@ -333,6 +334,7 @@ static void app_runtime(void)
     s_cfg.ble = NULL; /* service mode only with CONFIG_DSP_BLE_TRANSPORT (below) */
     s_cfg.random = esp_random();
     s_cfg.max_sleep_s = CONFIG_DSP_APP_MAX_SLEEP_S;
+    s_cfg.battery = dsp_esp_battery_port(); /* NULL unless CONFIG_DSP_BATTERY_ADC_GPIO >= 0 */
 #if CONFIG_DSP_BLE_SECURITY
     /* C2: the libsodium RNG implementation is registered before any libsodium use; sodium_init
      * runs only once the hardware entropy source is active (dsp_esp_rng_ready). Without the

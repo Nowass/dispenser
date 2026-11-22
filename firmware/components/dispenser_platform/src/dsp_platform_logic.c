@@ -116,3 +116,89 @@ bool dsp_plat_rtc_store(dsp_plat_rtc_t *rtc, const uint8_t *buf, size_t len)
     rtc->len = (uint32_t)len;
     return true;
 }
+
+dsp_plat_batt_pin_t dsp_plat_batt_pin_check(int gpio, int button_gpio, int pump_gpio)
+{
+    if (gpio < 0) {
+        return DSP_PLAT_BATT_PIN_DISABLED;
+    }
+    if (gpio > 4) {
+        return DSP_PLAT_BATT_PIN_NOT_ADC1; /* ESP32-C3 ADC1: GPIO0-GPIO4 */
+    }
+    if (gpio == 2) {
+        return DSP_PLAT_BATT_PIN_STRAPPING;
+    }
+    if (gpio == button_gpio || gpio == pump_gpio) {
+        return DSP_PLAT_BATT_PIN_CONFLICT;
+    }
+    return DSP_PLAT_BATT_PIN_OK;
+}
+
+static dsp_plat_batt_result_t batt_result(uint8_t state)
+{
+    dsp_plat_batt_result_t r;
+    memset(&r, 0, sizeof r);
+    r.state = state;
+    return r;
+}
+
+dsp_plat_batt_result_t dsp_plat_batt_compute(const int *adc_mv, size_t n, uint32_t divider_x1000)
+{
+    if (adc_mv == NULL || n < 2u * DSP_PLAT_BATT_TRIM + 1u || n > DSP_PLAT_BATT_SAMPLES ||
+        divider_x1000 < 1000u || divider_x1000 > 10000u) {
+        return batt_result(DSP_BATT_ADC_FAILED);
+    }
+    int s[DSP_PLAT_BATT_SAMPLES];
+    for (size_t i = 0; i < n; i++) {
+        if (adc_mv[i] < 0 || adc_mv[i] > 10000) {
+            return batt_result(DSP_BATT_ADC_FAILED); /* not a calibrated reading */
+        }
+        /* insertion sort (n <= 16) */
+        size_t j = i;
+        while (j > 0 && s[j - 1] > adc_mv[i]) {
+            s[j] = s[j - 1];
+            j--;
+        }
+        s[j] = adc_mv[i];
+    }
+    size_t lo = DSP_PLAT_BATT_TRIM;
+    size_t hi = n - DSP_PLAT_BATT_TRIM; /* exclusive */
+    uint32_t sum = 0;
+    for (size_t i = lo; i < hi; i++) {
+        sum += (uint32_t)s[i];
+    }
+    uint32_t k = (uint32_t)(hi - lo);
+    uint32_t adc = (sum + k / 2u) / k;
+    dsp_plat_batt_result_t r = batt_result(DSP_BATT_VALID);
+    r.adc_mv = (uint16_t)adc;
+    r.spread_mv = (uint16_t)(s[hi - 1] - s[lo]);
+    uint32_t batt = (adc * divider_x1000 + 500u) / 1000u; /* <= 10000 * 10000: no overflow */
+    if (r.spread_mv > DSP_PLAT_BATT_MAX_SPREAD_MV) {
+        r.state = DSP_BATT_UNSTABLE;
+    } else if (batt < DSP_BATT_MIN_MV || batt > DSP_BATT_MAX_MV) {
+        r.state = DSP_BATT_OUT_OF_RANGE;
+    } else {
+        r.battery_mv = (uint16_t)batt;
+    }
+    return r;
+}
+
+const char *dsp_plat_batt_state_name(uint8_t state)
+{
+    switch (state) {
+    case DSP_BATT_VALID:
+        return "VALID";
+    case DSP_BATT_NOT_MEASURED:
+        return "NOT_MEASURED";
+    case DSP_BATT_ADC_FAILED:
+        return "ADC_FAILED";
+    case DSP_BATT_NO_CALIBRATION:
+        return "NO_CALIBRATION";
+    case DSP_BATT_OUT_OF_RANGE:
+        return "OUT_OF_RANGE";
+    case DSP_BATT_UNSTABLE:
+        return "UNSTABLE";
+    default:
+        return "UNKNOWN";
+    }
+}

@@ -40,6 +40,8 @@ SCHEDULE = [("id", "str", (1, 64, "id")), ("revision", "u32", None), ("enabled",
             ("minute", "enum", tuple(range(60))), ("kind", "enum", (0, 1, 2)), ("interval", "u32", None),
             ("weekday_mask", "mask8", 0x7F), ("has_end", "bool", None), ("end_date", "date", None),
             ("name", "str", (0, 32, "text"))]
+# GET_BATTERY (section 7.7, firmware >= 0.2.0)
+BATTERY = [("state", "enum", (0, 1, 2, 3, 4, 5)), ("battery_mv", "u16", None), ("age_s", "u32", None)]
 ERROR = [("code", "enum", tuple(range(1, 21))), ("detail", "u32", None), ("aux", "u32", None)]
 # GET_HISTORY event (section 7.6, Phase C)
 HIST_EVENT = [("seq", "u32", None), ("type", "enum", (1, 2, 3, 4, 5)), ("result", "enum", (0, 1, 2, 3, 4)),
@@ -58,6 +60,7 @@ TYPES = {
     0x10: ("GET_STATUS", [], [("status", "record", STATUS)], None),
     0x11: ("GET_DIAGNOSTICS", [], [("diag", "record", DIAGNOSTICS)], None),
     0x12: ("ACK_REJECTIONS", [], [], None),
+    0x13: ("GET_BATTERY", [], [("battery", "record", BATTERY)], None),
     0x20: ("GET_CONFIG", [], [("config", "record", CONFIG)], None),
     0x21: ("SET_CONFIG", [("expected_revision", "u32", None), ("field_mask", "mask16", 0x03FF),
                           ("config", "record", CONFIG)], [("revision", "u32", None)], None),
@@ -225,6 +228,10 @@ MSGS = [
     ("get_diagnostics_response", 0x11, RESPONSE, 10, dict(diag=DIAG_V)),
     ("ack_rejections_request", 0x12, 0, 11, dict()),
     ("ack_rejections_response", 0x12, RESPONSE, 11, dict()),
+    ("get_battery_request", 0x13, 0, 41, dict()),
+    ("get_battery_response", 0x13, RESPONSE, 41, dict(battery=dict(state=0, battery_mv=3970, age_s=12))),
+    ("get_battery_response_unavailable", 0x13, RESPONSE, 42, dict(battery=dict(state=3, battery_mv=0, age_s=0))),
+    ("get_battery_response_extremes", 0x13, RESPONSE, 0xFFFF, dict(battery=dict(state=5, battery_mv=65535, age_s=4294967295))),
     ("get_config_response", 0x20, RESPONSE, 12, dict(config=CONFIG_V)),
     ("set_config_request", 0x21, 0, 13, dict(expected_revision=7, field_mask=0x03F0, config=CONFIG_V)),
     ("set_config_response", 0x21, RESPONSE, 13, dict(revision=8)),
@@ -387,6 +394,9 @@ def bad_vectors():
     out.append(("status_reserved_nonzero", frame(0x10, RESPONSE, 9, sv[:-1] + b"\x01").hex(), "bad_reserved"))
     out.append(("readiness_0", frame(0x43, 0, 22, b"\x00").hex(), "bad_enum"))
     out.append(("readiness_3", frame(0x43, 0, 22, b"\x03").hex(), "bad_enum"))
+    out.append(("battery_state_6", frame(0x13, RESPONSE, 41, struct.pack("<BHI", 6, 0, 0)).hex(), "bad_enum"))
+    out.append(("battery_truncated", frame(0x13, RESPONSE, 41, struct.pack("<BH", 0, 3970)).hex(), "truncated"))
+    out.append(("battery_trailing", frame(0x13, RESPONSE, 41, struct.pack("<BHIB", 0, 3970, 0, 0)).hex(), "trailing"))
     out.append(("battery_101", frame(0x10, RESPONSE, 9, sv[:44] + b"\x65" + sv[45:]).hex(), "bad_enum"))
     out.append(("error_code_0", frame(0x10, RESPONSE | ERRORF, 8, struct.pack("<BII", 0, 0, 0)).hex(), "bad_enum"))
     out.append(("error_code_21", frame(0x10, RESPONSE | ERRORF, 8, struct.pack("<BII", 21, 0, 0)).hex(), "bad_enum"))

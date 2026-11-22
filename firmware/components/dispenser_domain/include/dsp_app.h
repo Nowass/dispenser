@@ -36,6 +36,7 @@
 
 #include "dsp_connectivity.h"
 #include "dsp_auth.h"
+#include "dsp_battery.h"
 #include "dsp_bleproto.h"
 #include "dsp_dosing.h"
 #include "dsp_link.h"
@@ -228,6 +229,11 @@ typedef struct {
     /* Phase C: DSP_EVF_PUMP_SIMULATED / DSP_EVF_PUMP_BENCH_GPIO, marking every dose event of this
      * build in the user-visible history (0 = neither). Build-time, never changed over BLE. */
     uint8_t event_pump_flags;
+    /* Battery telemetry (optional; NULL = none, GET_BATTERY then answers NOT_MEASURED). Measured
+     * once per wake before any dosing, Wi-Fi or BLE activity, and refreshed on GET_BATTERY when
+     * older than DSP_APP_BATTERY_REFRESH_MS (never within DSP_APP_BATTERY_PUMP_QUIET_MS of a pump
+     * run). Runtime memory only. */
+    const dsp_battery_port_t *battery;
 } dsp_app_config_t;
 
 typedef enum {
@@ -295,6 +301,9 @@ typedef struct {
     bool overlays_cleared;      /* invite/arm cleared by a reset, a clock step or an anomaly */
     size_t owner_changes;       /* durable ownership changes in this wake */
     size_t rate_limited;        /* operations answered BUSY/RATE_LIMITED */
+    /* Battery telemetry: measurements taken in this wake and the latest one. */
+    size_t battery_reads;
+    dsp_batt_sample_t battery;
     size_t trace_len;
     uint8_t trace[DSP_APP_TRACE_MAX]; /* dsp_app_stage_t in execution order */
 } dsp_app_report_t;
@@ -544,6 +553,19 @@ dsp_app_op_result_t dsp_app_get_status(dsp_app_t *app, const dsp_app_auth_t *aut
 dsp_app_op_result_t dsp_app_get_diagnostics(dsp_app_t *app, const dsp_app_auth_t *auth,
                                             dsp_ble_diag_rec_t *out);
 dsp_app_op_result_t dsp_app_ack_rejections(dsp_app_t *app, const dsp_app_auth_t *auth);
+/* Battery telemetry (GET_BATTERY, docs/BLE_PROTOCOL.md 7.7). The latest measurement of this wake
+ * (taken before any dosing); re-measured first when it is older than DSP_APP_BATTERY_REFRESH_MS
+ * and no pump run ended within DSP_APP_BATTERY_PUMP_QUIET_MS. age_s: seconds since that
+ * measurement (0 unless VALID). Without a battery port: NOT_MEASURED. Same preconditions as
+ * GET_STATUS; nothing is stored. */
+#define DSP_APP_BATTERY_REFRESH_MS 60000u
+#define DSP_APP_BATTERY_PUMP_QUIET_MS 2000u
+typedef struct {
+    dsp_batt_sample_t sample;
+    uint32_t age_s;
+} dsp_app_battery_t;
+dsp_app_op_result_t dsp_app_get_battery(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                        dsp_app_battery_t *out);
 /* Decision C10: ends the whole service window (BLE stops after the current item). Only with an
  * authorization issued for this connection (an unauthenticated END_SESSION closes only its own
  * connection, dsp_link). Allowed while a recovery confirmation is pending and without loaded
@@ -682,6 +704,12 @@ struct dsp_app {
     uint8_t tx[DSP_BLE_FRAME_MAX]; /* reply frame buffer */
     dsp_app_report_t rep;
     dsp_evlog_t evlog;    /* Phase C: user-visible event history (separate keys, informational) */
+    /* Battery telemetry (runtime only, see cfg->battery) */
+    dsp_batt_sample_t batt;
+    bool batt_measured;
+    uint64_t batt_ms;     /* monotonic time of the measurement (0 without a monotonic clock) */
+    bool pump_ran;        /* a pump run was attempted in this wake */
+    uint64_t pump_ms;     /* monotonic time at the end of the last pump run */
 };
 
 /* Runs one complete wake (ends with the sleep or fail-safe port call). */

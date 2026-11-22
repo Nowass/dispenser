@@ -103,7 +103,7 @@ static void test_frames_reach_no_operation(void)
     step(g_true + n + 1, op_frame(enc, sizeof enc));
     step(g_true + n + 2, mk(OP_END_TIMEOUT)); /* no authorization of any kind in this wake */
     DSP_CHECK(session());
-    DSP_CHECK_EQ_INT(26, n); /* 25 privileged types (GET_HISTORY since Phase C) + HS */
+    DSP_CHECK_EQ_INT(27, n); /* 26 privileged types (GET_HISTORY since Phase C, GET_BATTERY since fw 0.2.0) + HS */
     DSP_CHECK_EQ_INT(0, (int)rep.ops);       /* no dsp_app_* operation was entered */
     DSP_CHECK(kv_unchanged_except_time());   /* nothing written by any frame */
     DSP_CHECK_EQ_INT(pumps0, pump.calls);    /* no pump */

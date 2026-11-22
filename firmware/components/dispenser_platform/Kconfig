@@ -49,4 +49,28 @@ config DSP_BUTTON_WAKE_ACTIVE_HIGH
         Wake on a high level (default: low level with a pull-up, as in the MVP
         button circuit).
 
+config DSP_BATTERY_ADC_GPIO
+    int "Battery voltage ADC GPIO (-1 = none)"
+    range -1 21
+    default -1
+    help
+        ADC pad of the battery voltage divider. -1 (the default image) means no
+        battery telemetry: GET_BATTERY answers NOT_MEASURED. The MVP circuit
+        (sdkconfig.battery.defaults) uses XIAO ESP32-C3 D2 = GPIO4 (ADC1_CH4):
+        BAT+ -> 1 MOhm -> GPIO4 -> 1 MOhm -> GND, optionally 100 nF from GPIO4
+        to GND. Only ADC1 pads GPIO0-GPIO4 are accepted (ADC2 is not usable
+        with the radio); the strapping pin GPIO2, the wake button and the pump
+        pin are refused at build time. Measured once per wake before any
+        dosing, Wi-Fi or BLE, and on request (GET_BATTERY) at most once per
+        minute, never right after a pump run. Runtime only: nothing is stored.
+
+config DSP_BATTERY_DIVIDER_X1000
+    int "Battery divider ratio x1000 (battery voltage / pad voltage)"
+    range 1000 10000
+    default 2000
+    depends on DSP_BATTERY_ADC_GPIO >= 0
+    help
+        (R1 + R2) / R2 x 1000. 2000 for two equal resistors (1 MOhm / 1 MOhm).
+        May be trimmed after a comparison with a multimeter at BAT+.
+
 endmenu

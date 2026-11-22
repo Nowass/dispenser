@@ -43,6 +43,10 @@ msg name=get_status_response_extremes kind=rsp type=0x10 txn=65535 status.readin
 msg name=get_diagnostics_response kind=rsp type=0x11 txn=10 diag.notify_storage_ok=1 diag.tx_diag=5 diag.tx_diag_status=503 diag.rejections_unread=1 diag.rejections_total=3 diag.clock_trust=2 diag.clock_reason=0 diag.last_sync_utc=1795100000 diag.last_wake_reason=1 frame=010011010a0018000105f7010103000200600dff6a0000000001000000000000
 msg name=ack_rejections_request kind=req type=0x12 txn=11 - frame=010012000b000000
 msg name=ack_rejections_response kind=rsp type=0x12 txn=11 - frame=010012010b000000
+msg name=get_battery_request kind=req type=0x13 txn=41 - frame=0100130029000000
+msg name=get_battery_response kind=rsp type=0x13 txn=41 battery.state=0 battery.battery_mv=3970 battery.age_s=12 frame=010013012900070000820f0c000000
+msg name=get_battery_response_unavailable kind=rsp type=0x13 txn=42 battery.state=3 battery.battery_mv=0 battery.age_s=0 frame=010013012a00070003000000000000
+msg name=get_battery_response_extremes kind=rsp type=0x13 txn=65535 battery.state=5 battery.battery_mv=65535 battery.age_s=4294967295 frame=01001301ffff070005ffffffffffff
 msg name=get_config_response kind=rsp type=0x20 txn=12 config.revision=7 config.reservoir_capacity_ul=100000 config.reservoir_remaining_ul=73500 config.low_stock_percent=20 config.time_sync_interval_h=24 config.notify_mask=31 config.pump_flow_ul_per_s=1200 config.calibrated_at=1795071600 config.max_dose_ul=20000 config.max_daily_ul=60000 config.max_runtime_ms=30000 config.min_interval_s=60 config.hw_max_runtime_ms=60000 frame=010020010c00300007000000a08601001c1f01001418001fb0040000709efe6a00000000204e000060ea0000307500003c00000060ea0000
 msg name=set_config_request kind=req type=0x21 txn=13 expected_revision=7 field_mask=1008 config.revision=7 config.reservoir_capacity_ul=100000 config.reservoir_remaining_ul=73500 config.low_stock_percent=20 config.time_sync_interval_h=24 config.notify_mask=31 config.pump_flow_ul_per_s=1200 config.calibrated_at=1795071600 config.max_dose_ul=20000 config.max_daily_ul=60000 config.max_runtime_ms=30000 config.min_interval_s=60 config.hw_max_runtime_ms=60000 frame=010021000d00360007000000f00307000000a08601001c1f01001418001fb0040000709efe6a00000000204e000060ea0000307500003c00000060ea0000
 msg name=set_config_response kind=rsp type=0x21 txn=13 revision=8 frame=010021010d00040008000000
@@ -131,6 +135,9 @@ bad name=bool_value_2 frame=0100100109003a0001000000000000000000a08601001c1f0100
 bad name=status_reserved_nonzero frame=0100100109003a0001000000000000000000a08601001c1f010014000100f0efff6a000000000100feff6a00000000020101ab00ff2b000000000000000000000001 expect=bad_reserved
 bad name=readiness_0 frame=010043001600010000 expect=bad_enum
 bad name=readiness_3 frame=010043001600010003 expect=bad_enum
+bad name=battery_state_6 frame=010013012900070006000000000000 expect=bad_enum
+bad name=battery_truncated frame=010013012900030000820f expect=truncated
+bad name=battery_trailing frame=010013012900080000820f0000000000 expect=trailing
 bad name=battery_101 frame=0100100109003a0001000000000000000000a08601001c1f010014000100f0efff6a000000000100feff6a00000000020101ab00652b000000000000000000000000 expect=bad_enum
 bad name=error_code_0 frame=0100100308000900000000000000000000 expect=bad_enum
 bad name=error_code_21 frame=0100100308000900150000000000000000 expect=bad_enum

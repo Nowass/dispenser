@@ -160,6 +160,8 @@ static struct {
 
 static dsp_schedule_set_t durable_set(void);
 static bool pump_fail_next;
+static bool pump_ever;          /* a pump run happened (battery telemetry oracle) */
+static uint64_t pump_end_mono;  /* monotonic ms at the end of the last pump run */
 static void (*pump_hook)(void); /* called while the pump runs (test-specific probes) */
 /* M1.10c.2a: manual doses arrive as encrypted BLE requests (dispatched after the hook that posted
  * them), not as scripted OP_MANUAL steps; the durable-decision oracle below still applies. */
@@ -231,6 +233,8 @@ static dsp_pump_result_t pump_run(void *ctx, uint32_t runtime_ms)
         h();
     }
     advance(g_true + (dsp_utc_t)((runtime_ms + 999u) / 1000u));
+    pump_ever = true;
+    pump_end_mono = mono_ms;
     if (in_wake && armed && pump_cut) {
         power_lost(); /* power lost during the pump run */
     }
@@ -328,6 +332,7 @@ enum {
     OP_GET_RESULT,
     OP_FLOOR,
     OP_HOOK,       /* M1.10b.3: a test-specific call inside the session (hook(i)) */
+    OP_BATTERY,    /* battery telemetry: dsp_app_get_battery */
 };
 
 typedef struct {
@@ -364,6 +369,7 @@ typedef struct {
     uint8_t state;
     uint32_t detail;
     uint64_t floor;
+    dsp_app_battery_t batt; /* OP_BATTERY */
     int pumps;   /* pump runs during the operation */
     long writes; /* KV sets during the operation */
 } res_t;
@@ -541,6 +547,9 @@ static void exec_op(int i)
         if (o->hook != NULL) {
             o->hook(i);
         }
+        break;
+    case OP_BATTERY:
+        r->r = dsp_app_get_battery(&app, auth, &r->batt);
         break;
     default:
         break;
@@ -791,6 +800,8 @@ static void world(void)
     proxy.commit = px_commit;
     in_wake = armed = cut_after = cut_happened = false;
     pump_cut = pump_fail_next = op_allows_pump = false;
+    pump_ever = false;
+    pump_end_mono = 0;
     pump_hook = NULL;
     op_writes = cut_at = 0;
     fail_set_key[0] = '\0';

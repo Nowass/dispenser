@@ -187,6 +187,15 @@ void dsp_dispatch(dsp_app_t *app, const dsp_app_auth_t *auth, const dsp_ble_msg_
     case DSP_BLE_T_ACK_REJECTIONS:
         (void)ok_or_error(rsp, dsp_app_ack_rejections(app, auth));
         break;
+    case DSP_BLE_T_GET_BATTERY: {
+        dsp_app_battery_t b;
+        if (ok_or_error(rsp, dsp_app_get_battery(app, auth, &b))) {
+            out->battery.battery.state = b.sample.state;
+            out->battery.battery.battery_mv = b.sample.battery_mv;
+            out->battery.battery.age_s = b.age_s;
+        }
+        break;
+    }
     case DSP_BLE_T_GET_CONFIG: {
         dsp_config_t c;
         uint32_t hw = 0;

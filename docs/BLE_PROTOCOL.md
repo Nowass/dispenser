@@ -115,6 +115,7 @@ notification (device → client).
 | 0x10 | GET_STATUS | enc | empty | Status (7.2) |
 | 0x11 | GET_DIAGNOSTICS | enc | empty | Diagnostics (7.3) |
 | 0x12 | ACK_REJECTIONS | enc | empty | empty |
+| 0x13 | GET_BATTERY | enc | empty | Battery (7.7); firmware ≥ 0.2.0 only (section 8.2) |
 | 0x20 | GET_CONFIG | enc | empty | Config (7.4) |
 | 0x21 | SET_CONFIG | enc | `expected_revision u32, field_mask u16, Config` | `revision u32` |
 | 0x30 | LIST_SCHEDULES | enc | `page u8` | `set_revision u32, total u8, page u8, n u8 (0–4), n × {id str(1..64,id), revision u32}` |
@@ -258,6 +259,20 @@ capacity_ul u32 | schedule_id str(0..64,id)` (32–96 bytes).
   recovery), 4 a storage failure after the claim (the pump never ran). Reservoir events are
   always 0.
 
+### 7.7 Battery (7 bytes, firmware ≥ 0.2.0)
+
+`state u8 (0 VALID, 1 NOT_MEASURED, 2 ADC_FAILED, 3 NO_CALIBRATION, 4 OUT_OF_RANGE, 5 UNSTABLE) |
+battery_mv u16 | age_s u32`.
+
+- `battery_mv`: the calibrated battery voltage in millivolts (ADC voltage × divider ratio); 0 unless
+  `state` is VALID. A VALID voltage lies within 2,500–4,600 mV (a reading outside is OUT_OF_RANGE,
+  never clamped). A client never shows a non-VALID state as 0 V or 0 %.
+- `age_s`: seconds between the measurement and the response (0 unless VALID).
+- NOT_MEASURED: the build has no battery input. The device measures once per wake (power-on,
+  button, timer) before any dosing, Wi-Fi or BLE activity, and re-measures on GET_BATTERY when the
+  value is older than 60 s and no pump run ended within the last 2 s. Runtime memory only (never
+  stored); no wake is ever added for it. The record carries no charger state.
+
 ## 8. Versioning and negotiation
 
 - `major` changes are incompatible. The client sends HELLO with the range of majors it supports;
@@ -289,6 +304,17 @@ capacity_ul u32 | schedule_id str(0..64,id)` (32–96 bytes).
   section 10.6), so it reveals nothing beyond the public `caps`.
 - `REFUSED` (7) stays reserved for a changeable state precondition of a provided operation
   (section 10.1); `UNAVAILABLE` never depends on device state.
+
+### 8.2 Additions gated by the firmware version (GET_BATTERY)
+
+The minor version cannot announce new types in v1: both sides bind their OWN `minor` into the
+Noise prologue (section 11), so a client and a device with different minors fail every handshake.
+`caps` cannot grow either (receivers refuse unknown bits). GET_BATTERY (0x13) is therefore added
+without a minor change and gated by the firmware version of the Info record (7.1): a client sends
+it only to firmware **0.2.0 or newer**. Older firmware does not know the type, and an unknown type
+in an encrypted frame closes its session without a reply; a client therefore never sends it there
+and reports the battery as unavailable. Existing clients never send it and are unaffected: no
+existing record, body or frame changed.
 
 ## 9. Examples
 

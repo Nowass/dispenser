@@ -1,0 +1,14 @@
+# Battery telemetry fragment (BUILD-ONLY until verified on hardware): the measured battery voltage
+# is reported to the authenticated app (GET_BATTERY, firmware >= 0.2.0). Use after
+# sdkconfig.defaults, sdkconfig.ble.defaults (and the wifitime/pumpgpio/button fragments).
+#
+# Circuit: XIAO ESP32-C3 BAT+ -> R1 1 MOhm -> D2 / A2 = GPIO4 (ADC1_CH4) -> R2 1 MOhm -> GND.
+# Optional 100 nF from GPIO4 to GND (recommended if readings are UNSTABLE). GPIO4 is an ADC1 pad,
+# not a strapping pin (2, 8, 9), not USB/UART0/flash; its JTAG function (MTMS) is unused while the
+# eFuses route JTAG to the USB-Serial-JTAG (factory default). It differs from the wake button
+# (GPIO3) and the pump control pin (GPIO10). The divider draws about 2 uA permanently.
+#
+# Measured once per wake (power-on, button, timer: scheduled dose, SNTP) before any dosing, Wi-Fi
+# or BLE; never a reason to wake. No dosing restriction depends on it in this milestone.
+CONFIG_DSP_BATTERY_ADC_GPIO=4
+CONFIG_DSP_BATTERY_DIVIDER_X1000=2000

@@ -99,6 +99,9 @@ dsp_add_host_test(test_app_ops test_app_ops.c support/fake_kv.c)
 # M1.10b.2: manual dose with durable anti-replay (reuses the test_app_ops harness).
 dsp_add_host_test(test_manual test_manual.c support/fake_kv.c)
 target_compile_options(test_manual PRIVATE -Wno-unused-function)
+# Battery telemetry through the Application Service (shared harness of test_app_ops.c).
+dsp_add_host_test(test_battery_app test_battery_app.c support/fake_kv.c)
+target_compile_options(test_battery_app PRIVATE -Wno-unused-function)
 # Incident 2026-11-20 (F1): READY dosing floor (same harness).
 dsp_add_host_test(test_ready_floor test_ready_floor.c support/fake_kv.c)
 target_compile_options(test_ready_floor PRIVATE -Wno-unused-function)
