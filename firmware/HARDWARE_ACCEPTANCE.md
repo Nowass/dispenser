@@ -176,6 +176,38 @@ these figures are **not** target measurements.
 | 8.3 | Handshake duration (X25519 in software) for XXpsk3 and IK, and per-frame encrypt/decrypt time | timestamps (`esp_timer_get_time`) | |
 | 8.4 | Hardware RNG quality with the radio on during a BLE session (ephemeral keys) | ESP-IDF RNG notes; entropy check | |
 
+### 8h. Combined BLE + HTTPS normal image against STAGING (**BENCH VERIFIED** 2026-11-22)
+
+Image `normal-ble-notifystaging-gpio-button-battery-6fd68c4` (`a64e5b6c…`, endpoint
+`dispenser-notify-staging…` only, no production host in the binary), pump motor disconnected,
+app-only writes at 0x30000 with backups (`backup-20261122-combined/`), evidence
+`~/dispenser-hw-evidence/combined-staging-20261122/` (redacted summary, decoded states, logs).
+
+- **Event:** a real RESERVOIR_LOW created on 7acb644 by the owner with the new app setting (LOW
+  threshold 20 % → 97 % at 96 % remaining; SET_CONFIG revision 34 → 35). Preflight decoded exactly
+  one undelivered entry (seq 1, WARNING, attempts 0) and an open episode; READY, reservoir amounts
+  and `nvs_sec` unchanged (the two past one-time schedules had been deleted by the owner earlier:
+  confirmed, schedule set revision 55, 0 schedules). Attempt 1 stopped before any write on that
+  schedule difference (and a chunked-blob reader bug, fixed); evidence kept.
+- **Delivery (power-on boot, no forced sync interval):** clean boot, GPIO10 never active, battery
+  VALID 4,052 mV; SNTP sample in 4.7 s; HTTPS session with 144,732 B free heap before TLS;
+  `Certificate validated` ~3.1 s after the session opened; staging D1 row
+  `dsp-e072a11e1f34-9767b4bc-1` (device `e072a11e1f34`, epoch `9767b4bc` = the device's, seq 1,
+  RESERVOIR_LOW, WARNING, 480,000 / 500,000 µl) received 22:28:37 UTC in that session; the existing
+  synthetic BATTERY_LOW row unchanged; PENDING (no cron, no e-mail). After the test the device queue
+  is empty with next_seq 2: acknowledged, no second attempt. The "https session closed" heap/stack
+  line was lost to the USB console (the device slept right after; known).
+- **BLE:** button wake, normal app SESSION, two battery taps (fresh samples); no Wi-Fi in that wake;
+  `radio down: heap free 190,832 B, min since boot 125,864 B, app stack free min 7,324 B` (of 12,288).
+- **Cleanup:** threshold restored to 20 % in the app after the ACK (revision 36); restore preflight
+  decoded the episode closed, no RESERVOIR_LOW queued, READY and schedules unchanged, `nvs_sec`
+  unchanged; **7acb644 restored** (verified), normal boot: SNTP, `dsp_wifi: stopped (radio off)`
+  before `dsp_ble: radio up`, app connected, battery tap OK.
+- **Not covered:** a device-side retry with the same ID (the first attempt was acknowledged; retry
+  and duplicate handling are covered by host/integration tests and the staging host test), the
+  TLS-wake heap minimum and stack mark (log lost before sleep), R4 RECOVERY and distinct
+  ephemerals/session IDs, R8, energy measurements.
+
 ### 8g. Battery telemetry, manual refresh and BATTERY_LOW classification (**BENCH VERIFIED** 2026-11-22)
 
 - 0bed92d (2026-11-22 19:21): app-only write at 0x30000, preflight and private backups
@@ -212,14 +244,14 @@ integration suite. With the production URL the build is still refused (`CONFIG_D
 | R2, R3 | RNG-gate parts PASS; stage-2 parts open | handshake-side counters / HELLO session ID 0 without RF not recorded on hardware |
 | R5 | **ACCEPTED under protocol v3** (2026-11-22) | v2 NOT ACCEPTED is kept; v3 replication: integrity valid, C1–C3 not confirmed, 5a PASS, STS validated rows PASS, pooled v2+v3 \|Z\| = 2.24 < 3.29 (8a.3). Observations: pooled p = 0.025, template flags only in `randombytes_buf` |
 | R4 | partly evidenced, not recorded | CLAIM (2026-11-20, `claim-20261120/`), SESSION (daily use) and ADD (normal app joined by invitation, 2026-11-22) worked with the real phone; RECOVERY never run; "different ephemerals and session IDs across runs" not recorded |
-| R7 | open; instrumented | from 7acb644+: `dsp_ble: radio down: heap free …, min since boot …, app stack free min …` and `dsp_https: https session … heap …` lines give the numbers from a normal run |
+| R7 | partly measured (8h: BLE-window heap minimum 125,864 B, app stack free min 7,324 B); TLS-wake numbers lost to the console | instrumented | from 7acb644+: `dsp_ble: radio down: heap free …, min since boot …, app stack free min …` and `dsp_https: https session … heap …` lines give the numbers from a normal run |
 | R8 | partly observed, not recorded | doses with the app connected suspended BLE and the app reconnected with a new IK session (auto-connect); EV_SESSION_CLOSING at the 15-min maximum and the plain END_SESSION case not recorded |
 | 8b H3–H10 | open | transport acceptance items |
 | 8c G1, G2, G4–G6 | open | pump control signal at boot/reset/sleep measured on the pin (W/G tests); G3 passed |
 | 2.x credentials | **blocked for production** | `nvs_sec` holds `api_token`, `wifi_ssid`, `wifi_pass`, `setup_code`, `dsp_sec`; the token is the synthetic bench token (60 characters, not the 64-hex production `DEVICE_API_TOKEN`): the production Worker would answer 401. Production credentials on this device are excluded by the R5 deviation |
-| 3.x Wi-Fi/time/TLS | 3.1 evidenced (SNTP sync in every deployment log); 3.2–3.5 open | TLS probe never run on the device |
+| 3.x Wi-Fi/time/TLS | 3.1 evidenced; **TLS with certificate validation on the device evidenced** (8h, staging); 3.3–3.5 open | |
 | 4.x HTTPS delivery | open on the device; staging ready | staging Worker `dispenser-notify-staging` deployed 2026-11-22 (version `e096433c`, own D1 `527a0135…`, token = bench token, no Gmail secrets, no cron). Verified from the host over HTTPS: `/health` 200, no/wrong token 401, new event 201, retry 200 duplicate, same ID with other content 409, exactly one D1 row (PENDING, never delivered). Firmware User-Agent `dispenser-v2` passes the Cloudflare edge (Python's default agent gets error 1010). |
-| 5.x measurements, 6.1 coexistence | open | 6.1 BLE window then Wi-Fi/TLS: the new heap lines make it measurable |
+| 5.x measurements, 6.1 coexistence | 5.2 partly (heap 144,732 B before TLS); 6.1 evidenced in sequence (Wi-Fi off before BLE, 8h); energy open | 6.1 BLE window then Wi-Fi/TLS: the new heap lines make it measurable |
 
 **Shortest safe path:**
 1. *Staging (no gate change):* the owner approves deploying the same Worker code as
