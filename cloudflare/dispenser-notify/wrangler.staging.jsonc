@@ -26,7 +26,7 @@
       "binding": "DB",
       "database_name": "dispenser-notifications-staging",
       // filled from `npx wrangler d1 create dispenser-notifications-staging`
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "527a0135-ece9-4c6c-a4d8-351155cfdf80",
       "migrations_dir": "migrations",
     },
   ],

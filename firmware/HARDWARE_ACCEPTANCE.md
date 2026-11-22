@@ -218,7 +218,7 @@ integration suite. With the production URL the build is still refused (`CONFIG_D
 | 8c G1, G2, G4–G6 | open | pump control signal at boot/reset/sleep measured on the pin (W/G tests); G3 passed |
 | 2.x credentials | **blocked for production** | `nvs_sec` holds `api_token`, `wifi_ssid`, `wifi_pass`, `setup_code`, `dsp_sec`; the token is the synthetic bench token (60 characters, not the 64-hex production `DEVICE_API_TOKEN`): the production Worker would answer 401. Production credentials on this device are excluded by the R5 deviation |
 | 3.x Wi-Fi/time/TLS | 3.1 evidenced (SNTP sync in every deployment log); 3.2–3.5 open | TLS probe never run on the device |
-| 4.x HTTPS delivery | open | needs a staging Worker (does not exist) or an approved production test |
+| 4.x HTTPS delivery | open on the device; staging ready | staging Worker `dispenser-notify-staging` deployed 2026-11-22 (version `e096433c`, own D1 `527a0135…`, token = bench token, no Gmail secrets, no cron). Verified from the host over HTTPS: `/health` 200, no/wrong token 401, new event 201, retry 200 duplicate, same ID with other content 409, exactly one D1 row (PENDING, never delivered). Firmware User-Agent `dispenser-v2` passes the Cloudflare edge (Python's default agent gets error 1010). |
 | 5.x measurements, 6.1 coexistence | open | 6.1 BLE window then Wi-Fi/TLS: the new heap lines make it measurable |
 
 **Shortest safe path:**
