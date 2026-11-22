@@ -62,11 +62,41 @@ static dsp_notify_status_t finish(dsp_notify_t *n, bool changed, dsp_notify_stat
     return st;
 }
 
+/* User opt-out category of a note type (dsp_notify_set_mask). */
+static uint8_t category_of(uint8_t type)
+{
+    switch (type) {
+    case DSP_NOTE_RESERVOIR_LOW:
+    case DSP_NOTE_RESERVOIR_BLOCKED:
+        return DSP_NOTIFY_LOW_RESERVOIR;
+    case DSP_NOTE_BATTERY_LOW:
+        return DSP_NOTIFY_LOW_BATTERY;
+    default:
+        return DSP_NOTIFY_DEVICE_ERROR; /* DEVICE_ERROR, DOSING_ERROR */
+    }
+}
+
+static bool muted(const dsp_notify_t *n, uint8_t type)
+{
+    return (n->muted & category_of(type)) != 0;
+}
+
+void dsp_notify_set_mask(dsp_notify_t *n, uint8_t notify_mask)
+{
+    if (n != NULL) {
+        n->muted = (uint8_t)(~notify_mask & DSP_NOTIFY_MASK_ALL);
+    }
+}
+
 /* Queue placement (approved): same condition's pending entry -> free slot -> oldest entry of
- * lower severity. CRITICAL entries are never evicted. Returns false if nothing fits. */
+ * lower severity. CRITICAL entries are never evicted. Returns false if nothing fits. A muted
+ * category is handled without an entry (true: nothing to re-raise, nothing dropped). */
 static bool enqueue(dsp_notify_t *n, uint8_t type, uint8_t cond, uint16_t code, uint32_t value,
                     uint32_t value2, uint8_t flags, uint8_t reminder_no, dsp_notify_clock_t clock)
 {
+    if (muted(n, type)) {
+        return true;
+    }
     dsp_notify_state_t *s = &n->s;
     uint8_t sev = severity_of(type);
     int slot = -1;
@@ -478,7 +508,7 @@ size_t dsp_notify_pending_count(const dsp_notify_t *n)
 {
     size_t count = 0;
     for (int i = 0; n != NULL && i < DSP_NOTIFY_QUEUE_CAPACITY; i++) {
-        count += n->s.queue[i].seq != 0;
+        count += n->s.queue[i].seq != 0 && !muted(n, n->s.queue[i].type);
     }
     return count;
 }
@@ -487,7 +517,7 @@ int dsp_notify_highest_pending_severity(const dsp_notify_t *n)
 {
     int sev = 0;
     for (int i = 0; n != NULL && i < DSP_NOTIFY_QUEUE_CAPACITY; i++) {
-        if (n->s.queue[i].seq != 0 && n->s.queue[i].severity > sev) {
+        if (n->s.queue[i].seq != 0 && !muted(n, n->s.queue[i].type) && n->s.queue[i].severity > sev) {
             sev = n->s.queue[i].severity;
         }
     }
@@ -558,8 +588,8 @@ dsp_notify_delivery_report_t dsp_notify_deliver(dsp_notify_t *n, const dsp_notif
         int pick = -1; /* highest severity, then oldest */
         for (int i = 0; i < DSP_NOTIFY_QUEUE_CAPACITY; i++) {
             const dsp_note_t *e = &n->s.queue[i];
-            if (e->seq == 0 || sent[i]) {
-                continue;
+            if (e->seq == 0 || sent[i] || muted(n, e->type)) {
+                continue; /* a muted category is never sent */
             }
             if (pick < 0 || e->severity > n->s.queue[pick].severity ||
                 (e->severity == n->s.queue[pick].severity && e->seq < n->s.queue[pick].seq)) {

@@ -2225,6 +2225,62 @@ static void test_notify_codec_v3_keys(void)
     DSP_CHECK_EQ_INT(DSP_CODEC_ERR_SIZE, dsp_codec_decode_notify(b, DSP_NOTIFY_RECORD_BYTES, &out));
 }
 
+/* notify_mask (user opt-out): a muted category queues nothing and sends nothing; its conditions
+ * are still tracked; already queued entries wait (not pending) until it is enabled again. */
+static void test_notify_mask_opt_out(void)
+{
+    fresh();
+    dsp_battery_obs_t low = {DSP_BATTERY_LOW, 3850};
+    dsp_battery_obs_t ok = {DSP_BATTERY_OK, 4100};
+    dsp_notify_set_mask(&n, DSP_NOTIFY_LOW_RESERVOIR | DSP_NOTIFY_DEVICE_ERROR);
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_observe_battery(&n, low, at(T0)));
+    DSP_CHECK(n.s.cond[DSP_COND_BATTERY_LOW].flags & DSP_COND_F_ACTIVE); /* tracked */
+    DSP_CHECK(!(n.s.cond[DSP_COND_BATTERY_LOW].flags & DSP_COND_F_RAISE_PENDING));
+    DSP_CHECK_EQ_INT(0, count_type(DSP_NOTE_BATTERY_LOW));
+    DSP_CHECK_EQ_INT(0, n.s.dropped);
+    /* other categories are unaffected */
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, obs_res(1000, false, at(T0)));
+    DSP_CHECK_EQ_INT(1, count_type(DSP_NOTE_RESERVOIR_LOW));
+    /* the 7-day reminder of a muted episode is not queued either */
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_tick(&n, at(T0 + WEEK + 1)));
+    DSP_CHECK_EQ_INT(0, count_type(DSP_NOTE_BATTERY_LOW));
+    /* enabled again: no flood for the running episode; the next episode is reported */
+    dsp_notify_set_mask(&n, DSP_NOTIFY_MASK_ALL);
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_observe_battery(&n, low, at(T0 + WEEK + 2)));
+    DSP_CHECK_EQ_INT(0, count_type(DSP_NOTE_BATTERY_LOW));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_observe_battery(&n, ok, at(T0 + WEEK + 3)));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_observe_battery(&n, low, at(T0 + WEEK + 4)));
+    DSP_CHECK_EQ_INT(1, count_type(DSP_NOTE_BATTERY_LOW));
+
+    /* a queued entry whose category gets muted: neither pending nor sent, kept */
+    fresh();
+    dsp_dosing_error_t e = {DSP_DOSEERR_PUMP_FAILED, false, 100};
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error(&n, &e, at(T0)));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_observe_battery(&n, low, at(T0)));
+    dsp_notify_set_mask(&n, DSP_NOTIFY_LOW_BATTERY); /* reservoir and device errors muted */
+    DSP_CHECK_EQ_INT(1, (int)dsp_notify_pending_count(&n));
+    DSP_CHECK_EQ_INT(DSP_SEV_WARNING, dsp_notify_highest_pending_severity(&n)); /* the CRITICAL one is muted */
+    dsp_notify_delivery_report_t r = deliver_all(DSP_TX_ACK, at(T0 + 1));
+    DSP_CHECK_EQ_INT(1, r.acked);
+    DSP_CHECK_EQ_INT(1, tx.calls);
+    DSP_CHECK_EQ_INT(DSP_NOTE_BATTERY_LOW, tx.log[0].type);
+    DSP_CHECK_EQ_INT(1, count_type(DSP_NOTE_DOSING_ERROR)); /* kept, untouched */
+    DSP_CHECK_EQ_INT(0, (int)dsp_notify_pending_count(&n));
+    /* a muted one-shot error is not queued and not counted as dropped */
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_OK, dsp_notify_report_dosing_error(&n, &e, at(T0 + 2)));
+    DSP_CHECK_EQ_INT(1, count_type(DSP_NOTE_DOSING_ERROR));
+    DSP_CHECK_EQ_INT(0, n.s.dropped);
+    /* enabled again: the kept entry is delivered */
+    dsp_notify_set_mask(&n, DSP_NOTIFY_MASK_ALL);
+    DSP_CHECK_EQ_INT(1, (int)dsp_notify_pending_count(&n));
+    r = deliver_all(DSP_TX_ACK, at(T0 + 3));
+    DSP_CHECK_EQ_INT(1, r.acked);
+    DSP_CHECK_EQ_INT(0, (int)dsp_notify_pending_count(&n));
+    /* a reboot (fresh RAM) is unmuted until the application applies the configuration again */
+    boot();
+    DSP_CHECK_EQ_INT(0, n.muted);
+}
+
 int main(void)
 {
     DSP_RUN(test_reservoir_threshold_crossing);
@@ -2233,6 +2289,7 @@ int main(void)
     DSP_RUN(test_hysteresis);
     DSP_RUN(test_repeated_observations_and_dedup);
     DSP_RUN(test_battery);
+    DSP_RUN(test_notify_mask_opt_out);
     DSP_RUN(test_dosing_failure);
     DSP_RUN(test_interrupted_dosing_uncertain);
     DSP_RUN(test_storage_and_device_errors);

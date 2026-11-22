@@ -116,6 +116,7 @@ static bool load(dsp_app_t *app)
                         cfg->hw_max_runtime_ms) != DSP_DOSING_OK) {
         return false;
     }
+    dsp_notify_set_mask(&app->notify, config.notify_mask); /* before recovery may report */
     dsp_dosing_set_admission_limit(&app->dosing, cfg->manual_decisions_per_day);
     dsp_dosing_set_event_log(&app->dosing, app->evlog.open ? &app->evlog : NULL,
                              cfg->event_pump_flags);
@@ -1047,6 +1048,9 @@ dsp_app_op_result_t dsp_app_set_config(dsp_app_t *app, const dsp_app_auth_t *aut
     }
     if (field_mask & DSP_CONFIG_F_SYNC_INTERVAL) {
         (void)dsp_timekeeper_set_interval(&app->tk, next.time_sync_interval_h);
+    }
+    if (field_mask & DSP_CONFIG_F_NOTIFY_MASK) {
+        dsp_notify_set_mask(&app->notify, next.notify_mask);
     }
     if (field_mask & (DSP_CONFIG_F_RESERVOIR_CAPACITY | DSP_CONFIG_F_LOW_STOCK)) {
         /* Low-stock episodes follow the new capacity/threshold; the BLOCKED latch is only

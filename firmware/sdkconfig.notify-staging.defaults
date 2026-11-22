@@ -1,0 +1,17 @@
+# NORMAL firmware with queued HTTPS notifications against the STAGING Worker (bench MVP).
+# Replaces sdkconfig.wifitime.defaults (Wi-Fi time sync only) in the normal profile:
+#   -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble.defaults;sdkconfig.notify-staging.defaults;
+#                         sdkconfig.pumpgpio.defaults;sdkconfig.button.defaults;sdkconfig.battery.defaults"
+# (no bring-up fragment: the GPIO3 wake button opens the service window).
+#
+# Same application cycle; dsp_connectivity additionally delivers the persistent notification queue
+# (CRITICAL first, 60 s budget) in the regular sync sessions; a CRITICAL event may use an existing
+# wake (hourly limit). Never during dosing or BLE; HTTPS only with trusted time and the full
+# certificate bundle; Bearer token from nvs_sec. The URL below is the PLANNED staging Worker
+# (cloudflare/dispenser-notify deployed under the name "dispenser-notify-staging" with its own D1);
+# it does not exist until the owner approves that deployment. The production endpoint stays refused
+# by the build guards while BLE security/transport or the GPIO pump are enabled (R5 not accepted).
+CONFIG_DSP_APP_WIFI_TIME=n
+CONFIG_DSP_APP_CONNECTIVITY=y
+CONFIG_DSP_APP_NOTIFY_URL="https://dispenser-notify-staging.nowassek.workers.dev/api/v1/events"
+CONFIG_DSP_APP_ALLOW_PRODUCTION=n

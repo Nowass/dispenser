@@ -5,9 +5,11 @@
 
 #include "esp_bt.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
 #include "host/ble_hs.h"
@@ -219,6 +221,11 @@ static void r_deinit(void *ctx)
         }
         (void)nimble_port_deinit(); /* controller disabled and deinitialized */
         s.running = false;
+        /* R7 / 6.1 evidence: heap after the BLE window (it must recover before Wi-Fi/TLS) and the
+         * calling (application) task's stack high-water mark. Numbers only. */
+        ESP_LOGI(TAG, "radio down: heap free %u B, min since boot %u B, app stack free min %u B",
+                 (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL));
     } else {
         ESP_LOGE(TAG, "NimBLE stop failed: controller left enabled (is_off reports it)");
     }

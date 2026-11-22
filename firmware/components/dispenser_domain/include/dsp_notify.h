@@ -140,11 +140,22 @@ typedef struct {
     bool loaded;
     bool dirty;      /* RAM state not yet persisted (a write failed) */
     uint32_t random; /* non-zero, used once to assign the storage epoch */
+    uint8_t muted;   /* RAM: DSP_NOTIFY_* categories the user disabled (0 = none, the default) */
 } dsp_notify_t;
 
 /* Loads the "notify" record. random: a non-zero random value (platform RNG), used only if
  * no epoch has been assigned yet. */
 dsp_notify_status_t dsp_notify_init(dsp_notify_t *n, dsp_storage_t *st, uint32_t random);
+
+/* User opt-out (config notify_mask): categories whose bit is CLEAR in notify_mask are muted.
+ * Categories: DSP_NOTIFY_LOW_RESERVOIR = RESERVOIR_LOW and RESERVOIR_BLOCKED,
+ * DSP_NOTIFY_LOW_BATTERY = BATTERY_LOW, DSP_NOTIFY_DEVICE_ERROR = DEVICE_ERROR and DOSING_ERROR.
+ * A muted category creates no queue entry (its conditions are still tracked, so re-enabling it
+ * does not flood: the next event is the next episode or reminder); entries already queued are
+ * neither sent nor counted as pending (no session is started for them) and are delivered if the
+ * category is enabled again before they are withdrawn. RAM only (applied every wake from the
+ * configuration); notification state on flash is unchanged by it. */
+void dsp_notify_set_mask(dsp_notify_t *n, uint8_t notify_mask);
 
 /* ---- Observations (each persists only when something changed) ---------------------- */
 

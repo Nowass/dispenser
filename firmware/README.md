@@ -2368,6 +2368,11 @@ No dosing decision depends on it in this milestone (no low-battery inhibition ye
   end-to-end check: the diagnostic image `sdkconfig.batterynotify.defaults` (one BATTERY_LOW test
   event with the measured voltage through the real ESP32 TLS transport, then the identical
   retry; no application runtime).
+- **Opt-out (`notify_mask`):** enforced by the engine since a27e640+: a category whose bit is clear
+  queues nothing and sends nothing (RESERVOIR_LOW/BLOCKED = bit 0, BATTERY_LOW = bit 1,
+  DEVICE_ERROR/DOSING_ERROR = bit 2); conditions are still tracked (no flood when re-enabled);
+  already queued entries wait, are not pending and start no session. Default: all enabled.
+- **Normal image with HTTPS:** `sdkconfig.notify-staging.defaults` (see HARDWARE_ACCEPTANCE 8f).
 - **Hardware verification (pending):** compare the reported voltage with a multimeter **at BAT+**
   (a 10 MΩ meter at the 500 kΩ midpoint itself reads about 5 % low); confirm whether the 100 nF
   capacitor is fitted; check that the voltage is VALID on button and timer wakes.

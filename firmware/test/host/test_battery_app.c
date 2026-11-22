@@ -266,6 +266,28 @@ static void test_preconditions_fail_closed(void)
     invariants();
 }
 
+static void test_notify_mask_set_config_mutes_battery_low(void)
+{
+    provision(true);
+    with_battery(sample(DSP_BATT_VALID, 3800)); /* LOW from the next wake on */
+    clear_script();
+    dsp_config_t c = durable_cfg();
+    c.notify_mask = DSP_NOTIFY_LOW_RESERVOIR | DSP_NOTIFY_DEVICE_ERROR; /* battery e-mails off */
+    int k = step(g_true, op_set_cfg_cur(DSP_CONFIG_F_NOTIFY_MASK, c));
+    DSP_CHECK(session());
+    DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[k].r.status);
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_LOW_BATTERY, app.notify.muted); /* applied at once */
+    /* the BUTTON wake itself measured LOW before SET_CONFIG: its event was queued unmuted, and is
+     * now held (neither pending nor sent) while the category is muted */
+    DSP_CHECK_EQ_INT(0, (int)dsp_notify_pending_count(&app.notify));
+    advance(g_true + 600);
+    DSP_CHECK(wake(DSP_CAUSE_TIMER));
+    DSP_CHECK_EQ_INT(DSP_NOTIFY_LOW_BATTERY, app.notify.muted); /* from the stored configuration */
+    DSP_CHECK_EQ_INT(DSP_BATTERY_LOW, rep.battery_obs);
+    DSP_CHECK_EQ_INT(0, (int)dsp_notify_pending_count(&app.notify));
+    invariants();
+}
+
 int main(void)
 {
     DSP_RUN(test_measured_once_per_wake_of_every_cause);
@@ -276,5 +298,6 @@ int main(void)
     DSP_RUN(test_window_boundaries_are_valid);
     DSP_RUN(test_without_port_not_measured);
     DSP_RUN(test_preconditions_fail_closed);
+    DSP_RUN(test_notify_mask_set_config_mutes_battery_low);
     return dsp_test_finish();
 }

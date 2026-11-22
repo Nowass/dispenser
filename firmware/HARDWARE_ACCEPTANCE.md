@@ -176,6 +176,47 @@ these figures are **not** target measurements.
 | 8.3 | Handshake duration (X25519 in software) for XXpsk3 and IK, and per-frame encrypt/decrypt time | timestamps (`esp_timer_get_time`) | |
 | 8.4 | Hardware RNG quality with the radio on during a BLE session (ephemeral keys) | ESP-IDF RNG notes; entropy check | |
 
+### 8f. Normal firmware with e-mail notifications: gate analysis (2026-11-22)
+
+Goal: ONE normal image (BLE + Android, GPIO3 button, GPIO10 pump, GPIO4 battery, dosing, deep
+sleep, Wi-Fi/SNTP, queued HTTPS notifications) delivering real e-mails. Evidence reviewed: this
+file, `~/dispenser-hw-evidence/` (rnggate, claim, ble-bringup, wakebutton, battery runs) and the
+serial logs of the 0bed92d / 7acb644 deployments.
+
+**Build state (host-verified, 2026-11-22):** the combined image builds
+(`sdkconfig.notify-staging.defaults` instead of `sdkconfig.wifitime.defaults`, no bring-up
+fragment): 1,425,984 B, 22 % of the 1.75 MiB slot free (6.2 static PASS), static DRAM 56.8 %. The
+same domain code with BLE and HTTPS configured together is covered by `test_app` (oracles: no pump
+run while Wi-Fi/BLE/HTTPS is active, no sleep with an active service, dosing deadlines) and the
+integration suite. With the production URL the build is still refused (`CONFIG_DSP_BLE_SECURITY
+… cannot be combined with CONFIG_DSP_APP_ALLOW_PRODUCTION`): the gates are unchanged.
+
+| Gate | Status | Evidence / what is missing |
+|---|---|---|
+| R1, R6 | PASS | 8a.2 (two RNG-gate runs) |
+| R2, R3 | RNG-gate parts PASS; stage-2 parts open | handshake-side counters / HELLO session ID 0 without RF not recorded on hardware |
+| **R5** | **NOT ACCEPTED** (bench deviation) | protocol v2 classified the 8 MiB run NOT ACCEPTED and forbids a statistical repeat; code review found no defect. Closing it needs an **owner decision**: either a documented investigation result, or a newly pre-registered protocol v3 with a fresh confirmatory capture (the existing RNG-gate image and `tools/rng_capture.py` apply unchanged) |
+| R4 | partly evidenced, not recorded | CLAIM (2026-11-20, `claim-20261120/`), SESSION (daily use) and ADD (normal app joined by invitation, 2026-11-22) worked with the real phone; RECOVERY never run; "different ephemerals and session IDs across runs" not recorded |
+| R7 | open; instrumented | from 7acb644+: `dsp_ble: radio down: heap free …, min since boot …, app stack free min …` and `dsp_https: https session … heap …` lines give the numbers from a normal run |
+| R8 | partly observed, not recorded | doses with the app connected suspended BLE and the app reconnected with a new IK session (auto-connect); EV_SESSION_CLOSING at the 15-min maximum and the plain END_SESSION case not recorded |
+| 8b H3–H10 | open | transport acceptance items |
+| 8c G1, G2, G4–G6 | open | pump control signal at boot/reset/sleep measured on the pin (W/G tests); G3 passed |
+| 2.x credentials | **blocked for production** | `nvs_sec` holds `api_token`, `wifi_ssid`, `wifi_pass`, `setup_code`, `dsp_sec`; the token is the synthetic bench token (60 characters, not the 64-hex production `DEVICE_API_TOKEN`): the production Worker would answer 401. Production credentials on this device are excluded by the R5 deviation |
+| 3.x Wi-Fi/time/TLS | 3.1 evidenced (SNTP sync in every deployment log); 3.2–3.5 open | TLS probe never run on the device |
+| 4.x HTTPS delivery | open | needs a staging Worker (does not exist) or an approved production test |
+| 5.x measurements, 6.1 coexistence | open | 6.1 BLE window then Wi-Fi/TLS: the new heap lines make it measurable |
+
+**Shortest safe path:**
+1. *Staging (no gate change):* the owner approves deploying the same Worker code as
+   `dispenser-notify-staging` with its own D1 and `DEVICE_API_TOKEN` = the existing bench token
+   (no `nvs_sec` change), optionally the same Gmail sender to the owner. Then flash the combined
+   staging image; it delivers real e-mails through the real ESP32 TLS stack and closes 3.2, 4.1–4.5,
+   5.2, 6.1 and R7 on hardware. This is still the bench MVP (synthetic credentials).
+2. *Production:* R5 decision (above), R4 RECOVERY + recorded runs, R8, G-tests and 8b; then a
+   reviewed change limited to `main/CMakeLists.txt` that lifts the BLE/transport/pump refusals for
+   `CONFIG_DSP_APP_ALLOW_PRODUCTION` (the bring-up window stays refused), production token
+   provisioning into `nvs_sec` (approval), and the production smoke test.
+
 ### 8a. M1.10c.2b — hardware acceptance of the security integration (OPEN)
 
 M1.10c.2a (software integration) is verified on the host and by ESP32-C3 cross-builds only. None of

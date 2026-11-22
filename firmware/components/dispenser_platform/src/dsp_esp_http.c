@@ -5,7 +5,12 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_tls_errors.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+static const char *TAG = "dsp_https"; /* numbers only: never URL, token or body */
 
 /* One HTTP client per device session: platform-level singleton (single owner). */
 static struct {
@@ -132,6 +137,8 @@ static bool port_open(void *ctx)
         return false;
     }
     quiet_logs();
+    /* 5.2 evidence: free heap before the TLS session (numbers only) */
+    ESP_LOGI(TAG, "https session: heap free %u B before TLS", (unsigned)esp_get_free_heap_size());
     s_http.client = new_client(s_http.url, HTTP_METHOD_POST);
     return s_http.client != NULL;
 }
@@ -189,6 +196,11 @@ static void port_close(void *ctx)
         esp_http_client_close(s_http.client);
         esp_http_client_cleanup(s_http.client);
         s_http.client = NULL;
+        /* 5.2 / R7 evidence: heap after the TLS session, the lowest heap since boot (includes the
+         * TLS peak) and the calling (application) task's stack high-water mark */
+        ESP_LOGI(TAG, "https session closed: heap free %u B, min since boot %u B, app stack free min %u B",
+                 (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL));
     }
     wipe(s_http.auth, sizeof s_http.auth);
 }
