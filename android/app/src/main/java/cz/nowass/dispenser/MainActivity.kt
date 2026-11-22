@@ -56,7 +56,7 @@ class MainActivity : ComponentActivity() {
                             assets = container.assets,
                             sourceCodeUrl = container.sourceCodeUrl,
                             backupViewModelFactory = BackupViewModel.factory(container.backup, container.documents, container.clock),
-                            // Release builds offer no BLE device feature (DeviceFeatures): the "coming later" placeholder.
+                            // Builds without the BLE device features (DeviceFeatures) keep the "coming later" placeholder.
                             deviceAdmin = remember(resolved) { if (deviceFeatures) container.deviceAdmin(resolved) else null },
                             // automatic foreground connection: DEVICE mode only, never in DEMO
                             autoConnect = remember(resolved) {

@@ -129,7 +129,8 @@ class DeviceAdminUi(
     val selectedDeviceInDemo: kotlinx.coroutines.flow.Flow<String?>,
     val onboardingFactory: (cz.nowass.dispenser.data.onboarding.OnboardingPurpose) -> androidx.lifecycle.ViewModelProvider.Factory,
     val switchToDevice: (String) -> Unit,
-    val switchToDemo: () -> Unit,
+    /** Back to DEMO (debug builds only); null hides it. */
+    val switchToDemo: (() -> Unit)?,
     val forget: () -> Unit,
     /** The last "Forget device" outcome that needs the user's attention; null = nothing to show. */
     val forgetNotice: kotlinx.coroutines.flow.StateFlow<cz.nowass.dispenser.ui.settings.ForgetNotice?> =
@@ -138,7 +139,7 @@ class DeviceAdminUi(
     /** DEVICE mode only: the owner's invitation and phone list screens. */
     val inviteFactory: (() -> androidx.lifecycle.ViewModelProvider.Factory)? = null,
     val phonesFactory: (() -> androidx.lifecycle.ViewModelProvider.Factory)? = null,
-    /** BENCH ONLY (debug builds, DEVICE mode): pump configuration and readiness. */
+    /** DEVICE mode: pump configuration and readiness (BENCH texts in debug builds). */
     val benchPumpFactory: (() -> androidx.lifecycle.ViewModelProvider.Factory)? = null,
 )
 

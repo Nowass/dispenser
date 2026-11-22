@@ -60,6 +60,7 @@ import cz.nowass.dispenser.ui.theme.Spacing
 
 const val ONBOARDING_LABEL_FIELD_TEST_TAG = "onboarding_label_field"
 const val ONBOARDING_SCAN_TEST_TAG = "onboarding_scan"
+const val ONBOARDING_PASTE_TEST_TAG = "onboarding_paste_invitation"
 const val ONBOARDING_STEP_TEST_TAG = "onboarding_step_"
 
 /** android.bluetooth.adapter.action.REQUEST_ENABLE (the UI layer does not import android.bluetooth). */
@@ -287,6 +288,12 @@ private fun InvitationStep(
         }
         // a rejected scan opens a fresh scanner (a new gate) on the next attempt
         ScannerArea(camera, actions, scanner, R.string.onboarding_scan_denied_invitation, open && problem == null) { open = true }
+        // same phone: the invitation copied by the other app variant (read once, then the clipboard is cleared)
+        val context = androidx.compose.ui.platform.LocalContext.current
+        TextButton(
+            onClick = { actions.scanned(cz.nowass.dispenser.ui.components.SensitiveClipboard.takeInvitation(context) ?: "") },
+            modifier = Modifier.testTag(ONBOARDING_PASTE_TEST_TAG),
+        ) { Text(stringResource(R.string.onboarding_invitation_paste)) }
     }
 }
 

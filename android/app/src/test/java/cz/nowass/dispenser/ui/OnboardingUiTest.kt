@@ -224,6 +224,70 @@ class OnboardingUiTest {
         compose.onNodeWithTag(ONBOARDING_LABEL_FIELD_TEST_TAG).performScrollTo().assertIsDisplayed()
     }
 
+    // ---- daily-use app (2026-11-22): DEMO switch per build type, same-phone invitation hand-over ----
+
+    @Test
+    fun the_switch_back_to_demo_is_shown_only_when_offered() {
+        var shown by mutableStateOf(true)
+        var toDemo = 0
+        compose.setContent {
+            DispenserTheme {
+                SettingsScreen(
+                    app = AppSettingsUiState.Ready(null, AppVersion("0.5.0", 5), null, simulationActive = false, isDemo = false),
+                    simulation = null, message = null, appActions = AppSettingsActions(), actions = SimulationActions(),
+                    deviceAdmin = SettingsDeviceAdmin(bleSupported = true, onSwitchToDemo = if (shown) ({ toDemo++ }) else null),
+                )
+            }
+        }
+        compose.onNodeWithTag(cz.nowass.dispenser.ui.settings.SETTINGS_SWITCH_TO_DEMO_TEST_TAG).performScrollTo().performClick()
+        assertEquals(1, toDemo)
+        shown = false // release builds (demo_switch_enabled = false)
+        compose.onNodeWithTag(cz.nowass.dispenser.ui.settings.SETTINGS_SWITCH_TO_DEMO_TEST_TAG).assertDoesNotExist()
+        compose.onNodeWithText("Přepnout do ukázkového režimu").assertDoesNotExist()
+    }
+
+    private fun clipboard() = compose.activity.getSystemService(android.content.ClipboardManager::class.java)
+
+    @Test
+    fun the_invitation_step_pastes_an_invitation_once_and_clears_the_clipboard() {
+        val scanned = mutableListOf<String>()
+        compose.setContent {
+            DispenserTheme {
+                OnboardingScreen(
+                    OnboardingUiState(OnboardingPurpose.ADD, step = OnboardingStep.INVITATION), isDemo = true, onClose = {},
+                    actions = cz.nowass.dispenser.ui.onboarding.OnboardingActions(scanned = { scanned += it }),
+                )
+            }
+        }
+        val invitation = "DSP2I1:" + "0".repeat(120)
+        cz.nowass.dispenser.ui.components.SensitiveClipboard.copyInvitation(compose.activity, "Pozvánka", invitation)
+        val desc = clipboard().primaryClip!!.description
+        assertTrue("marked sensitive", desc.extras?.getBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE) == true)
+        compose.onNodeWithTag(cz.nowass.dispenser.ui.onboarding.ONBOARDING_PASTE_TEST_TAG).performScrollTo().performClick()
+        assertEquals(listOf(invitation), scanned) // the same path as a scanned QR (validated by the ViewModel)
+        assertFalse("cleared after reading", clipboard().primaryClip?.getItemAt(0)?.text?.startsWith("DSP2I1:") == true)
+        // anything else on the clipboard is neither read as an invitation nor cleared
+        clipboard().setPrimaryClip(android.content.ClipData.newPlainText("x", "nákupní seznam"))
+        compose.onNodeWithTag(cz.nowass.dispenser.ui.onboarding.ONBOARDING_PASTE_TEST_TAG).performScrollTo().performClick()
+        assertEquals(listOf(invitation, ""), scanned) // "" → "not an invitation" in the ViewModel
+        assertEquals("nákupní seznam", clipboard().primaryClip?.getItemAt(0)?.text?.toString())
+    }
+
+    @Test
+    fun the_invitation_screen_copies_the_shown_invitation() {
+        val text = "DSP2I1:" + "1".repeat(120)
+        compose.setContent {
+            DispenserTheme {
+                cz.nowass.dispenser.ui.devices.InviteScreen(
+                    cz.nowass.dispenser.ui.devices.InviteUiState.Showing(text, System.currentTimeMillis() / 1000 + 600), {}, {}, {},
+                )
+            }
+        }
+        compose.onNodeWithTag(cz.nowass.dispenser.ui.devices.INVITE_COPY_TEST_TAG).performScrollTo().performClick()
+        assertEquals(text, clipboard().primaryClip?.getItemAt(0)?.text?.toString())
+        assertTrue(clipboard().primaryClip!!.description.extras?.getBoolean(android.content.ClipDescription.EXTRA_IS_SENSITIVE) == true)
+    }
+
     @Test
     fun the_phone_list_offers_removal_of_other_phones_only() {
         var removed: cz.nowass.dispenser.data.onboarding.PhoneUi? = null

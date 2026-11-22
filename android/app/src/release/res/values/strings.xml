@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Daily-use (release) texts of the pump settings screen: the same screen and controller as the
+    debug build's "BENCH" screen (same firmware gates, journaling and read-back), without bench and
+    debug wording. Device history tags (e.g. "BENCH: jen signál GPIO") stay: they report the device.
+-->
+<resources>
+    <string name="settings_device_bench_pump">Pumpa: kalibrace a připravenost</string>
+    <string name="bench_title">Pumpa</string>
+    <string name="bench_warning">Kalibraci a limity pumpy lze měnit jen ve stavu NOT READY. READY povolí plánované dávky podle rozvrhů; všechny kontroly dávkovače (limity, zásobník, hodiny) platí dál.</string>
+    <string name="bench_calibrate_now">Označit jako kalibrováno nyní</string>
+    <string name="bench_calibrate_again">Obnovit datum kalibrace na nyní</string>
+    <string name="bench_ready_confirm_text">Dávkovač bude v čase rozvrhů spouštět pumpu. Pokračujte jen tehdy, když je pumpa správně připojená a zkalibrovaná a zásobník odpovídá skutečnosti.</string>
+</resources>

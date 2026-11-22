@@ -113,14 +113,15 @@ data class SettingsDeviceAdmin(
     val onConnect: () -> Unit = {},
     val onRecover: () -> Unit = {},
     val onSwitchToDevice: () -> Unit = {},
-    val onSwitchToDemo: () -> Unit = {},
+    /** Back to DEMO; null hides it (release builds). */
+    val onSwitchToDemo: (() -> Unit)? = null,
     val onForget: () -> Unit = {},
     /** DEMO: join a device with an owner's invitation (ADD). */
     val onAddByInvitation: () -> Unit = {},
     /** DEVICE: the device's phone list / an invitation for another phone (null hides them). */
     val onPhones: (() -> Unit)? = null,
     val onInvite: (() -> Unit)? = null,
-    /** BENCH ONLY (debug builds): pump configuration and readiness (null hides it). */
+    /** DEVICE mode: pump configuration and readiness (null hides it). */
     val onBenchPump: (() -> Unit)? = null,
     /** The last "Forget device" outcome that needs attention (shown in either mode). */
     val forgetNotice: ForgetNotice? = null,
@@ -159,6 +160,7 @@ const val SETTINGS_DEVICE_RECOVERY_TEST_TAG = "settings_device_recovery"
 const val SETTINGS_DEVICE_UNRESOLVED_TEST_TAG = "settings_device_unresolved"
 const val SETTINGS_DEVICE_CONNECT_TEST_TAG = "settings_device_connect"
 const val SETTINGS_DEVICE_FORGET_TEST_TAG = "settings_device_forget"
+const val SETTINGS_SWITCH_TO_DEMO_TEST_TAG = "settings_switch_to_demo"
 const val SETTINGS_FORGET_NOTICE_TEST_TAG = "settings_forget_notice"
 
 /**
@@ -354,8 +356,10 @@ fun SettingsScreen(
                                 deviceAdmin.onInvite?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_invite)) } }
                                 deviceAdmin.onBenchPump?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_bench_pump)) } }
                             }
-                            OutlinedButton(onClick = deviceAdmin.onSwitchToDemo, modifier = Modifier.fillMaxWidth()) {
-                                Text(stringResource(R.string.settings_device_switch_to_demo))
+                            deviceAdmin.onSwitchToDemo?.let { toDemo ->
+                                OutlinedButton(onClick = toDemo, modifier = Modifier.fillMaxWidth().testTag(SETTINGS_SWITCH_TO_DEMO_TEST_TAG)) {
+                                    Text(stringResource(R.string.settings_device_switch_to_demo))
+                                }
                             }
                             TextButton(onClick = { showForget = true }, modifier = Modifier.testTag(SETTINGS_DEVICE_FORGET_TEST_TAG)) {
                                 Text(stringResource(R.string.settings_device_forget), color = MaterialTheme.colorScheme.error)

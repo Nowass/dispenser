@@ -51,6 +51,7 @@ import cz.nowass.dispenser.ui.components.StatusTag
 import java.time.Instant
 
 const val INVITE_QR_TEST_TAG = "invite_qr"
+const val INVITE_COPY_TEST_TAG = "invite_copy"
 const val PHONES_LIST_TEST_TAG = "phones_list"
 
 @Composable
@@ -127,6 +128,15 @@ fun InviteScreen(state: InviteUiState, onBack: () -> Unit, onCreate: (String) ->
                         val at = Instant.ofEpochSecond(state.expiresUtc).atZone(DEFAULT_ZONE)
                         Text(stringResource(R.string.invite_expires, Format.time(at)), style = MaterialTheme.typography.titleMedium)
                     }
+                    // same-phone hand-over to the other app variant (its own Keystore identity; a QR cannot be scanned on this phone)
+                    val context = androidx.compose.ui.platform.LocalContext.current
+                    var copied by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf(false) }
+                    val clipLabel = stringResource(R.string.invite_copy_label)
+                    OutlinedButton(
+                        onClick = { cz.nowass.dispenser.ui.components.SensitiveClipboard.copyInvitation(context, clipLabel, state.qrText); copied = true },
+                        modifier = Modifier.fillMaxWidth().testTag(INVITE_COPY_TEST_TAG),
+                    ) { Text(stringResource(R.string.invite_copy)) }
+                    if (copied) Body(stringResource(R.string.invite_copied))
                     OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
                         Text(stringResource(R.string.invite_cancel), color = MaterialTheme.colorScheme.error)
                     }

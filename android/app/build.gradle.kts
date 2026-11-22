@@ -130,15 +130,16 @@ android {
             applicationIdSuffix = ".debug"
             // SemVer build metadata: ignored by the update checker's version comparison.
             versionNameSuffix = "+debug"
-            // BLE device features (pairing, invitations, phones): debug only until hardware acceptance
-            // (v0.5.0-beta.2 decision A1). Off: Settings keeps the disabled "coming later" placeholder.
+            // BLE device features (pairing, invitations, phones, pump settings, automatic connection).
             resValue("bool", "device_features_enabled", "true")
-            // BENCH ONLY tools (pump configuration and readiness for the GPIO bring-up): debug builds only.
-            resValue("bool", "bench_tools_enabled", "true")
+            // Developer tool: switching an owned device's app back to DEMO (simulation). Debug only.
+            resValue("bool", "demo_switch_enabled", "true")
         }
         release {
-            resValue("bool", "device_features_enabled", "false")
-            resValue("bool", "bench_tools_enabled", "false")
+            // Daily-use app (2026-11-22): BLE device features on (automatic connection, pump settings,
+            // readiness, invitations). Pump settings use neutral texts (src/release/res); no BENCH wording.
+            resValue("bool", "device_features_enabled", "true")
+            resValue("bool", "demo_switch_enabled", "false")
             if (releaseSigning != null) signingConfig = signingConfigs.getByName("release")
             optimization {
                 enable = true

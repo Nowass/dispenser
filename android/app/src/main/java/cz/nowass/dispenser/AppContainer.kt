@@ -364,7 +364,7 @@ class AppContainer(private val context: Context) {
         selectedDeviceInDemo = modes.selectedDevice.map { id -> id?.takeIf { CredentialStore.hasConfirmedRecord(credentialDir, it) } }.flowOn(Dispatchers.IO),
         onboardingFactory = { purpose -> OnboardingViewModel.factory(purpose, ::onboardingController) },
         switchToDevice = { id -> appScope.launch { modes.enterDevice(id) } },
-        switchToDemo = { appScope.launch { modes.enterDemo() } },
+        switchToDemo = if (DeviceFeatures.demoSwitch(context)) ({ appScope.launch { modes.enterDemo() }; Unit }) else null,
         forget = { (mode as? ResolvedMode.Device)?.deviceId?.let(::forget) },
         forgetNotice = forgetNotice,
         dismissForgetNotice = { forgetNotice.value = null },
@@ -374,8 +374,8 @@ class AppContainer(private val context: Context) {
         phonesFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->
             { PhonesViewModel.factory { PhonesController(deviceUi(id).device) } }
         },
-        // BENCH ONLY: debug builds (bench_tools_enabled), DEVICE mode
-        benchPumpFactory = (mode as? ResolvedMode.Device)?.deviceId?.takeIf { DeviceFeatures.benchTools(context) }?.let { id ->
+        // Pump settings and readiness (DEVICE mode, both builds; release shows neutral texts, debug the BENCH ones)
+        benchPumpFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->
             { cz.nowass.dispenser.ui.devices.BenchPumpViewModel.factory { cz.nowass.dispenser.data.onboarding.BenchPumpController(deviceUi(id).device) } }
         },
     )

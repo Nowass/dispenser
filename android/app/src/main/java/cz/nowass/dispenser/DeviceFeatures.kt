@@ -3,14 +3,14 @@ package cz.nowass.dispenser
 import android.content.Context
 
 /**
- * Whether this build offers the BLE device features (pairing, joining by invitation, recovery, phones,
- * invitations): set per build type in app/build.gradle.kts (`device_features_enabled`). Debug: on.
- * Release: off until hardware acceptance (v0.5.0-beta.2 decision A1); Settings then keeps the disabled
- * "coming later" placeholder and nothing ever asks for a Bluetooth or camera permission.
+ * Per-build-type feature switches (app/build.gradle.kts resValues).
+ * - [enabled]: the BLE device features (pairing, joining by invitation, recovery, phones, invitations,
+ *   pump settings and readiness, automatic connection). Debug and release (daily-use app, 2026-11-22).
+ * - [demoSwitch]: switching from an owned device back to DEMO (simulation): a developer tool, debug only.
+ * The pump settings screen is the same in both builds; release replaces its BENCH texts (src/release/res).
  */
 object DeviceFeatures {
     fun enabled(context: Context): Boolean = context.resources.getBoolean(R.bool.device_features_enabled)
 
-    /** BENCH ONLY tools (pump configuration/readiness for the GPIO bring-up): debug builds only, never release. */
-    fun benchTools(context: Context): Boolean = context.resources.getBoolean(R.bool.bench_tools_enabled)
+    fun demoSwitch(context: Context): Boolean = context.resources.getBoolean(R.bool.demo_switch_enabled)
 }

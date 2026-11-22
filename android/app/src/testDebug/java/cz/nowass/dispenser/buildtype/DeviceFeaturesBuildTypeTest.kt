@@ -18,7 +18,9 @@ class DeviceFeaturesBuildTypeTest {
     }
 
     @Test
-    fun bench_tools_in_debug() {
-        assertTrue("debug builds offer the BENCH ONLY pump configuration", DeviceFeatures.benchTools(ApplicationProvider.getApplicationContext()))
+    fun demo_switch_and_bench_texts_in_debug() {
+        val ctx = ApplicationProvider.getApplicationContext<android.content.Context>()
+        assertTrue("debug builds keep the switch back to DEMO", DeviceFeatures.demoSwitch(ctx))
+        assertTrue("debug builds keep the BENCH pump screen texts", ctx.getString(cz.nowass.dispenser.R.string.settings_device_bench_pump).startsWith("BENCH"))
     }
 }

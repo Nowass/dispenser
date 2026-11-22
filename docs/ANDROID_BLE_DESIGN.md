@@ -1546,7 +1546,7 @@ itself; the manual paths (screens calling `connect()`, onboarding) are unchanged
 
 - **When:** the first activity start (foreground) in DEVICE mode with a confirmed enrollment, a CDM
   address and a usable credential (`AutoConnector`, `AppContainer.startAutoConnect` follows mode,
-  address and credential health). Never in DEMO, never in release builds (no BLE device features).
+  address and credential health). Never in DEMO; builds without the BLE device features never start it.
 - **Discovery:** one bounded window of 90 s. `AndroidDeviceScanner`: low-latency scan filtered by
   the service UUID `36b60001-…` AND the associated address, stopped on the first match, timeout,
   failure, background or cancellation. Needs `BLUETOOTH_SCAN` (`neverForLocation`, optional); without
@@ -1570,6 +1570,28 @@ itself; the manual paths (screens calling `connect()`, onboarding) are unchanged
   expiry and retry, repeated foreground transitions, background, reconnect after disconnect,
   permissions, Bluetooth on during the search, authentication failure, transient failures, direct
   fallback, DEMO isolation); manifest checks in `OnboardingUiTest`.
+
+## 16e. Daily-use app: release build with the device features (2026-11-22)
+
+The release build (`cz.nowass.dispenser`, release signing key) becomes the everyday app; the debug
+build (`cz.nowass.dispenser.debug`, debug key) stays the development app. They are separate
+installations with separate data and Keystore identities.
+
+| | debug (`.debug`) | release |
+|---|---|---|
+| BLE device features (pairing, invitation, phones, automatic connection) | yes | yes (was off, decision A1) |
+| Pump settings, calibration, readiness | "BENCH ONLY – pumpa" texts | same screen and controller, neutral texts (`src/release/res`) |
+| Switch from an owned device back to DEMO | yes | no (`demo_switch_enabled`) |
+| DEMO before any device is paired | yes | yes (unchanged first-run behavior; no switch back afterwards) |
+| App name | "Dispenser DEBUG" | "Dispenser" |
+
+Access to the already-owned device: the release app is a new phone for the device. It joins with the
+existing owner invitation (ADD, XXpsk3 with the setup code and the invitation token): DEBUG app →
+Telefony / Pozvat další telefon → "Zkopírovat pozvánku pro aplikaci na tomto telefonu" (clipboard,
+marked sensitive) → release app → Připojit pomocí pozvánky → "Vložit pozvánku ze schránky" (read once
+and cleared; any other clipboard content is ignored and kept) → setup code from the label → button.
+No key is copied between the apps, nothing is reset or claimed. Tests: `OnboardingUiTest` (paste,
+copy, DEMO switch visibility), `DeviceFeaturesBuildTypeTest` per build type.
 
 ## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
 

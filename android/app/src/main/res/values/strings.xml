@@ -514,7 +514,7 @@
     <string name="settings_device_bench_pump">BENCH: nastavení pumpy</string>
     <string name="bench_title">BENCH ONLY – pumpa</string>
     <string name="bench_warning">Pouze pro testy na stole (debug build). Firmware řídí jen signál GPIO bez připojené zátěže; tyto hodnoty nejsou kalibrace skutečné pumpy. READY povolí plánované dávky (signál GPIO). Všechny kontroly firmwaru platí dál.</string>
-    <string name="bench_not_connected">Zařízení není připojeno. Stiskněte RESET a zkuste to znovu.</string>
+    <string name="bench_not_connected">Zařízení není připojeno. Stiskněte tlačítko na dávkovači a zkuste to znovu.</string>
     <string name="bench_reload">Načíst znovu ze zařízení</string>
     <string name="bench_state_ready">Stav: READY (plánované dávky povoleny)</string>
     <string name="bench_state_not_ready">Stav: NOT READY (SERVICE_REQUIRED)</string>
@@ -696,6 +696,10 @@
     <string name="invite_name_field">Název nového telefonu (nepovinné)</string>
     <string name="invite_create">Vytvořit pozvánku</string>
     <string name="invite_working">Vytváření pozvánky…</string>
+    <string name="invite_copy">Zkopírovat pozvánku pro aplikaci na tomto telefonu</string>
+    <string name="invite_copy_label">Pozvánka Dispenser</string>
+    <string name="invite_copied">Zkopírováno. V druhé aplikaci zvolte Připojit pomocí pozvánky → Vložit pozvánku ze schránky (platí do uvedeného času, jen jednou).</string>
+    <string name="onboarding_invitation_paste">Vložit pozvánku ze schránky</string>
     <string name="invite_show_hint">Načtěte tento QR kód novým telefonem (Připojit pomocí pozvánky). Kód nesdílejte.</string>
     <string name="invite_expires">Platí do %1$s</string>
     <string name="invite_expired">Pozvánka vypršela.</string>
