@@ -21,25 +21,43 @@ if(dsp_endpoint_error)
     message(FATAL_ERROR "Dispenser endpoint guard: ${dsp_endpoint_error}")
 endif()
 
-# M1.10c.2a: the security layer is build-only until the ESP32-C3 hardware RNG acceptance
-# (M1.10c.2b) has passed; never together with the production endpoint.
-if(CONFIG_DSP_BLE_SECURITY AND CONFIG_DSP_APP_ALLOW_PRODUCTION)
-    message(FATAL_ERROR "CONFIG_DSP_BLE_SECURITY is build-only until the M1.10c.2b hardware RNG "
-            "acceptance passes; it cannot be combined with CONFIG_DSP_APP_ALLOW_PRODUCTION")
+# Production endpoint together with the BLE stack and the GPIO pump: only in the explicitly selected
+# MVP PILOT profile (CONFIG_DSP_APP_PILOT_PRODUCTION, owner decision 2026-11-22 after R5 v3 acceptance
+# and the combined BLE + HTTPS bench verification; HARDWARE_ACCEPTANCE 8a.3, 8h). Everything else
+# stays as before: without the pilot profile these remain refused with the production endpoint.
+# The pilot profile itself requires the GPIO3 wake button (the only service-window trigger) and
+# never allows the bring-up power-on window or the RNG-gate diagnostic (checked below).
+if(CONFIG_DSP_APP_PILOT_PRODUCTION AND NOT CONFIG_DSP_APP_ALLOW_PRODUCTION)
+    message(FATAL_ERROR "CONFIG_DSP_APP_PILOT_PRODUCTION requires CONFIG_DSP_APP_ALLOW_PRODUCTION")
+endif()
+if(CONFIG_DSP_APP_PILOT_PRODUCTION AND (CONFIG_DSP_BUTTON_WAKE_GPIO LESS 0 OR NOT CONFIG_DSP_BLE_SECURITY))
+    message(FATAL_ERROR "the pilot production profile needs the wake button (service window) and the "
+            "BLE security layer")
 endif()
 
-# M1.10d.1: the BLE transport and the bring-up window are build-only until M1.10c.2b and M1.10d.2.
-if((CONFIG_DSP_BLE_TRANSPORT OR CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW) AND CONFIG_DSP_APP_ALLOW_PRODUCTION)
-    message(FATAL_ERROR "CONFIG_DSP_BLE_TRANSPORT / CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW are build-only "
-            "until the M1.10c.2b and M1.10d.2 hardware acceptance pass; they cannot be combined with "
-            "CONFIG_DSP_APP_ALLOW_PRODUCTION")
+# M1.10c.2a: the security layer with the production endpoint only in the pilot profile.
+if(CONFIG_DSP_BLE_SECURITY AND CONFIG_DSP_APP_ALLOW_PRODUCTION AND NOT CONFIG_DSP_APP_PILOT_PRODUCTION)
+    message(FATAL_ERROR "CONFIG_DSP_BLE_SECURITY with CONFIG_DSP_APP_ALLOW_PRODUCTION needs the explicit "
+            "pilot profile CONFIG_DSP_APP_PILOT_PRODUCTION")
 endif()
 
-# Bench GPIO pump control signal: never together with the production endpoint (no reviewed
-# driver circuit, CPU-independent hardware cutoff or watchdog acceptance yet).
-if(CONFIG_DSP_PUMP_GPIO AND CONFIG_DSP_APP_ALLOW_PRODUCTION)
-    message(FATAL_ERROR "CONFIG_DSP_PUMP_GPIO is a bench-only control signal; it cannot be combined "
-            "with CONFIG_DSP_APP_ALLOW_PRODUCTION")
+# M1.10d.1: the BLE transport with the production endpoint only in the pilot profile; the bring-up
+# power-on window NEVER with the production endpoint.
+if(CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW AND CONFIG_DSP_APP_ALLOW_PRODUCTION)
+    message(FATAL_ERROR "CONFIG_DSP_BLE_BRINGUP_POWER_ON_WINDOW is build-only; it cannot be combined with "
+            "CONFIG_DSP_APP_ALLOW_PRODUCTION (also not in the pilot profile)")
+endif()
+if(CONFIG_DSP_BLE_TRANSPORT AND CONFIG_DSP_APP_ALLOW_PRODUCTION AND NOT CONFIG_DSP_APP_PILOT_PRODUCTION)
+    message(FATAL_ERROR "CONFIG_DSP_BLE_TRANSPORT with CONFIG_DSP_APP_ALLOW_PRODUCTION needs the explicit "
+            "pilot profile CONFIG_DSP_APP_PILOT_PRODUCTION")
+endif()
+
+# GPIO pump control signal with the production endpoint only in the pilot profile (its fail-safe
+# build requirements stay enforced in dsp_esp_pump_gpio.c: IRAM ISR cutoff, interrupt and panicking
+# task watchdogs, panic reboot without OCD awareness).
+if(CONFIG_DSP_PUMP_GPIO AND CONFIG_DSP_APP_ALLOW_PRODUCTION AND NOT CONFIG_DSP_APP_PILOT_PRODUCTION)
+    message(FATAL_ERROR "CONFIG_DSP_PUMP_GPIO with CONFIG_DSP_APP_ALLOW_PRODUCTION needs the explicit "
+            "pilot profile CONFIG_DSP_APP_PILOT_PRODUCTION")
 endif()
 
 # RNG-gate diagnostic (M1.10c.2b evidence; docs/ANDROID_BLE_DESIGN.md Appendix B): a separate,

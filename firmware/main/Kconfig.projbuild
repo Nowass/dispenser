@@ -113,6 +113,20 @@ config DSP_APP_ALLOW_PRODUCTION
         Separate explicit approval for DSP_APP_NOTIFY_URL pointing to the
         production Worker. Leave off during hardware bring-up.
 
+config DSP_APP_PILOT_PRODUCTION
+    bool "MVP PILOT production profile (BLE + GPIO pump with the production endpoint)"
+    default n
+    depends on DSP_APP_ALLOW_PRODUCTION
+    help
+        Explicit owner decision for the personal-use MVP: allows the production
+        notification endpoint together with the BLE security layer, the NimBLE
+        transport and the GPIO pump driver, which are otherwise refused with
+        DSP_APP_ALLOW_PRODUCTION. Requires the wake button and the BLE security
+        layer; the bring-up power-on window and the RNG-gate diagnostic stay
+        refused. Basis: R5 v3 accepted, combined BLE + HTTPS image bench-verified
+        against staging (HARDWARE_ACCEPTANCE 8a.3, 8h). Open items (R4 RECOVERY,
+        R7, R8, G-tests, 8b) are listed in docs/KNOWN_ISSUES.md.
+
 config DSP_BLE_SECURITY
     bool "Link the BLE security layer (BUILD-ONLY until M1.10c.2b hardware acceptance)"
     default n

@@ -1,0 +1,13 @@
+# NORMAL firmware, MVP PILOT PRODUCTION profile: queued HTTPS notifications (RESERVOIR_LOW,
+# RESERVOIR_BLOCKED, BATTERY_LOW, device/dosing errors) to the PRODUCTION Worker, with BLE security,
+# the NimBLE transport and the GPIO pump driver (owner decision 2026-11-22; HARDWARE_ACCEPTANCE 8i).
+#   -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble.defaults;sdkconfig.notify-production.defaults;
+#                         sdkconfig.pumpgpio.defaults;sdkconfig.button.defaults;sdkconfig.battery.defaults"
+# Identical to sdkconfig.notify-staging.defaults except the endpoint and the two explicit production
+# switches. No bring-up fragment (refused with production): the GPIO3 button opens the service window.
+# The device needs the production DEVICE_API_TOKEN in nvs_sec (owner-provisioned).
+CONFIG_DSP_APP_WIFI_TIME=n
+CONFIG_DSP_APP_CONNECTIVITY=y
+CONFIG_DSP_APP_NOTIFY_URL="https://dispenser-notify.nowassek.workers.dev/api/v1/events"
+CONFIG_DSP_APP_ALLOW_PRODUCTION=y
+CONFIG_DSP_APP_PILOT_PRODUCTION=y
