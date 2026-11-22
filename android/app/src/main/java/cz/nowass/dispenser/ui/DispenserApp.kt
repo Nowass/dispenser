@@ -171,6 +171,8 @@ fun DispenserApp(
         simulation?.lowStockPolicy ?: cz.nowass.dispenser.domain.simulation.LowStockPolicy(),
     /** Pairing, mode switch and "Forget device"; null keeps the earlier placeholder (previews, tests). */
     deviceAdmin: DeviceAdminUi? = null,
+    /** DEVICE mode (debug builds): automatic connection status and retry; null in DEMO, previews and tests. */
+    autoConnect: cz.nowass.dispenser.ui.components.AutoConnectUi? = null,
 ) {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -233,17 +235,23 @@ fun DispenserApp(
         topBar = {
             if (inEditor) return@Scaffold
             // DEMO badge is persistent on every screen: all data in A1 is simulated.
-            AppHeader(
-                brand = stringResource(R.string.app_brand),
-                title = if (current == TopLevelDestination.DASHBOARD) {
-                    customName ?: stringResource(R.string.dashboard_title)
-                } else {
-                    stringResource(current.labelRes)
-                },
-                showDemoBadge = isDemo,
-                simulationClock = simulationClockText,
-                connection = if (isDemo) null else device?.connection ?: cz.nowass.dispenser.domain.ConnectionState.DISCONNECTED,
-            )
+            androidx.compose.foundation.layout.Column {
+                AppHeader(
+                    brand = stringResource(R.string.app_brand),
+                    title = if (current == TopLevelDestination.DASHBOARD) {
+                        customName ?: stringResource(R.string.dashboard_title)
+                    } else {
+                        stringResource(current.labelRes)
+                    },
+                    showDemoBadge = isDemo,
+                    simulationClock = simulationClockText,
+                    connection = if (isDemo) null else device?.connection ?: cz.nowass.dispenser.domain.ConnectionState.DISCONNECTED,
+                )
+                if (!isDemo && autoConnect != null) {
+                    val autoStatus by autoConnect.status.collectAsStateWithLifecycle()
+                    cz.nowass.dispenser.ui.components.AutoConnectBanner(autoStatus, autoConnect.retry)
+                }
+            }
         },
         bottomBar = {
             if (inEditor) return@Scaffold

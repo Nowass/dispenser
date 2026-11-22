@@ -28,6 +28,8 @@ class MainActivity : ComponentActivity() {
         container.startStorageRecovery()
         // Restore the persisted mode (DEVICE only with a confirmed enrollment, also while disconnected).
         container.startModeResolution()
+        // Automatic foreground connection follows the resolved mode (DEVICE only; debug builds).
+        container.startAutoConnect()
         val deviceFeatures = DeviceFeatures.enabled(this)
         setContent {
             DispenserTheme {
@@ -56,6 +58,10 @@ class MainActivity : ComponentActivity() {
                             backupViewModelFactory = BackupViewModel.factory(container.backup, container.documents, container.clock),
                             // Release builds offer no BLE device feature (DeviceFeatures): the "coming later" placeholder.
                             deviceAdmin = remember(resolved) { if (deviceFeatures) container.deviceAdmin(resolved) else null },
+                            // automatic foreground connection: DEVICE mode only, never in DEMO
+                            autoConnect = remember(resolved) {
+                                if (deviceFeatures && !sources.isDemo) cz.nowass.dispenser.ui.components.AutoConnectUi(container.autoConnector.status, container.autoConnector::retry) else null
+                            },
                         )
                     }
                 }

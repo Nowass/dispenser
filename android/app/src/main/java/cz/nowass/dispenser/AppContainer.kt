@@ -24,7 +24,11 @@ import cz.nowass.dispenser.data.local.DispenserDatabase
 import cz.nowass.dispenser.data.local.RoomScheduleStore
 import cz.nowass.dispenser.data.local.simulation.RoomSimulationStore
 import cz.nowass.dispenser.data.local.simulation.SimulationDatabase
+import cz.nowass.dispenser.data.device.AutoConnectTarget
+import cz.nowass.dispenser.data.device.AutoConnector
 import cz.nowass.dispenser.data.device.CredentialSeqAllocator
+import cz.nowass.dispenser.device.transport.AndroidDeviceScanner
+import cz.nowass.dispenser.device.transport.missingScanPermission
 import cz.nowass.dispenser.data.device.DeviceDispenserRepository
 import cz.nowass.dispenser.data.device.DeviceUiRepository
 import cz.nowass.dispenser.data.device.UnavailablePhoneTimeSource
@@ -60,6 +64,9 @@ import cz.nowass.dispenser.device.transport.AndroidDeviceAssociator
 import cz.nowass.dispenser.ui.DeviceAdminUi
 import cz.nowass.dispenser.ui.onboarding.OnboardingViewModel
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -221,6 +228,50 @@ class AppContainer(private val context: Context) {
     }
 
     /**
+     * Automatic foreground connection to the owned device (DEVICE mode, debug builds with the BLE device
+     * features). Only an existing enrollment is used: never a claim, invitation or credential change.
+     * Activity start/stop is forwarded by [DispenserApplication]; [startAutoConnect] follows the mode,
+     * the associated address and the credential health.
+     */
+    val autoConnector: AutoConnector = AutoConnector(
+        scope = appScope,
+        target = target@{
+            if (!DeviceFeatures.enabled(context)) return@target null
+            val id = (modes.mode.value as? ResolvedMode.Device)?.deviceId ?: return@target null
+            val address = addresses.value[id] ?: return@target null
+            if (healths.get(id).state.value.recoveryRequired) return@target null
+            AutoConnectTarget(deviceUi(id).device, address)
+        },
+        readiness = { prerequisites.check() },
+        scanner = AndroidDeviceScanner(context.applicationContext),
+        missingScanPermission = { missingScanPermission(context.applicationContext) },
+    )
+
+    val autoConnectCallbacks: android.app.Application.ActivityLifecycleCallbacks = object : android.app.Application.ActivityLifecycleCallbacks {
+        override fun onActivityStarted(activity: android.app.Activity) = autoConnector.activityStarted()
+        override fun onActivityStopped(activity: android.app.Activity) = autoConnector.activityStopped()
+        override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: android.os.Bundle?) = Unit
+        override fun onActivityResumed(activity: android.app.Activity) = Unit
+        override fun onActivityPaused(activity: android.app.Activity) = Unit
+        override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: android.os.Bundle) = Unit
+        override fun onActivityDestroyed(activity: android.app.Activity) = Unit
+    }
+
+    /** Re-evaluates the automatic connection whenever the mode, the address or the credential health changes. */
+    private val autoConnectStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Once per process, from the activity (like [startModeResolution]): never from Application.onCreate. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun startAutoConnect() {
+        if (!DeviceFeatures.enabled(context) || !autoConnectStarted.compareAndSet(false, true)) return
+        appScope.launch {
+            combine(modes.mode, addresses) { m, a -> (m as? ResolvedMode.Device)?.deviceId?.takeIf { a.containsKey(it) } }
+                .flatMapLatest { id -> if (id == null) flowOf(null) else healths.get(id).state }
+                .collect { autoConnector.refresh() }
+        }
+    }
+
+    /**
      * Exactly one repository per device for the process lifetime (review of 4d7e3b2): the repository's
      * operation reservations are instance-local, so a second instance for the same device must never
      * exist. Reused across mode changes and session replacement.
@@ -372,5 +423,6 @@ class DispenserApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         registerActivityLifecycleCallbacks(container.backgroundGrace.callbacks)
+        registerActivityLifecycleCallbacks(container.autoConnectCallbacks)
     }
 }

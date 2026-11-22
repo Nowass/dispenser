@@ -1539,6 +1539,38 @@ The DEVICE-mode History tab reads the device's own log with GET_HISTORY (BLE_PRO
   NotSent; invalid arguments never sent), `ModeShellTest` (DEVICE tab, disconnected, no simulation
   text).
 
+## 16d. Automatic foreground connection (debug builds, 2026-11-21)
+
+After the GPIO3 wake button (firmware 2ab4212) the app connects to the already-owned device by
+itself; the manual paths (screens calling `connect()`, onboarding) are unchanged.
+
+- **When:** the first activity start (foreground) in DEVICE mode with a confirmed enrollment, a CDM
+  address and a usable credential (`AutoConnector`, `AppContainer.startAutoConnect` follows mode,
+  address and credential health). Never in DEMO, never in release builds (no BLE device features).
+- **Discovery:** one bounded window of 90 s. `AndroidDeviceScanner`: low-latency scan filtered by
+  the service UUID `36b60001-…` AND the associated address, stopped on the first match, timeout,
+  failure, background or cancellation. Needs `BLUETOOTH_SCAN` (`neverForLocation`, optional); without
+  it, and always on API 26–30, the window uses repeated direct connects to the address instead
+  (each bounded by the 15 s transport connect timeout). The match is only a locator: the device is
+  authenticated by the IK handshake with the pinned key, as before.
+- **Connect:** `DeviceRepository.connect()` (IK session, journal resolution, status read); nothing
+  else is sent automatically. Authentication failures are never retried; two transient failures of an
+  advertising device end the window ("Připojení se nezdařilo — Zkusit znovu").
+- **Lifecycle:** one job; foreground transitions while it runs or while a session is live start
+  nothing (the live session is reused). Background cancels the search at once; the session itself is
+  still closed by the 30 s background grace (4.4, unchanged). An unexpected disconnect in the
+  foreground starts one new window. Bluetooth off / permission missing are polled without consuming
+  the window and resume by themselves.
+- **UI:** one line under the header (DEVICE mode): "Připojování… Pokud dávkovač spí, stiskněte na něm
+  tlačítko." / "Připojování…" / "Dávkovač není dostupný — stiskněte tlačítko" + Zkusit znovu /
+  "Připojení se nezdařilo" + Zkusit znovu / "Bluetooth je vypnutý" + Zapnout / "Chybí oprávnění
+  Bluetooth" + Povolit; optional "Rychlejší hledání" asks for `BLUETOOTH_SCAN`. "Připojeno" is the
+  existing connection chip.
+- **Tests:** `AutoConnectorTest` (virtual time: already advertising, advertising later, window
+  expiry and retry, repeated foreground transitions, background, reconnect after disconnect,
+  permissions, Bluetooth on during the search, authentication failure, transient failures, direct
+  fallback, DEMO isolation); manifest checks in `OnboardingUiTest`.
+
 ## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
 
 Implemented and tested, uncommitted, awaiting the onboarding/security review. QR scanning and

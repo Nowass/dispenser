@@ -441,6 +441,17 @@
     <string name="connection_connected">Připojeno</string>
     <string name="connection_connecting">Připojování…</string>
     <string name="connection_disconnected">Nepřipojeno</string>
+    <!-- Automatic foreground connection (DEVICE mode) -->
+    <string name="auto_connect_searching">Připojování… Pokud dávkovač spí, stiskněte na něm tlačítko.</string>
+    <string name="auto_connect_unavailable">Dávkovač není dostupný — stiskněte tlačítko</string>
+    <string name="auto_connect_failed">Připojení se nezdařilo</string>
+    <string name="auto_connect_failed_auth">Připojení se nezdařilo (ověření zařízení selhalo)</string>
+    <string name="auto_connect_retry">Zkusit znovu</string>
+    <string name="auto_connect_bluetooth_off">Bluetooth je vypnutý</string>
+    <string name="auto_connect_enable">Zapnout</string>
+    <string name="auto_connect_permission">Chybí oprávnění Bluetooth</string>
+    <string name="auto_connect_grant">Povolit</string>
+    <string name="auto_connect_grant_scan">Rychlejší hledání</string>
     <string name="connection_chip_description">Zařízení: %1$s</string>
     <string name="freshness_unknown">nenačteno</string>
     <string name="freshness_live">živě</string>

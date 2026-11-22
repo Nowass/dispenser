@@ -152,9 +152,11 @@ class OnboardingUiTest {
         val info = ctx.packageManager.getPackageInfo(ctx.packageName, PackageManager.GET_PERMISSIONS or PackageManager.GET_CONFIGURATIONS)
         val requested = info.requestedPermissions.orEmpty().toSet()
         assertTrue("android.permission.BLUETOOTH_CONNECT" in requested)
+        // automatic foreground connection: filtered scan, neverForLocation (no location permission below)
+        assertTrue("android.permission.BLUETOOTH_SCAN" in requested)
         assertTrue("android.permission.CAMERA (scanner, asked when opened)", "android.permission.CAMERA" in requested)
         for (p in listOf("android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION",
-            "android.permission.ACCESS_BACKGROUND_LOCATION", "android.permission.BLUETOOTH_SCAN",
+            "android.permission.ACCESS_BACKGROUND_LOCATION",
             // no telemetry transport (ML Kit was replaced by ZXing, M1.10e.4c)
             "android.permission.ACCESS_NETWORK_STATE", "android.permission.RECEIVE_BOOT_COMPLETED", "android.permission.WAKE_LOCK")) {
             assertFalse("$p is not requested (merged manifest)", p in requested)
@@ -269,15 +271,21 @@ class OnboardingUiTest {
         assertEquals("30", attr("android.permission.BLUETOOTH", "maxSdkVersion"))
         assertEquals("30", attr("android.permission.BLUETOOTH_ADMIN", "maxSdkVersion"))
         assertEquals("", attr("android.permission.BLUETOOTH_CONNECT", "maxSdkVersion"))
+        // automatic connection: the scan permission is never used for location
+        assertEquals("neverForLocation", attr("android.permission.BLUETOOTH_SCAN", "usesPermissionFlags"))
+        assertTrue(perms.none { it.getAttributeNS(ns, "name").contains("LOCATION") })
     }
 
     @Test
-    fun only_the_onboarding_ever_asks_for_a_runtime_permission() {
+    fun only_the_onboarding_and_the_auto_connect_banner_ask_for_a_runtime_permission() {
         val src = File(checkNotNull(System.getProperty("dsp.source.dir")))
         val askers = src.walk().filter { it.isFile && it.extension == "kt" }
             .filter { f -> listOf("RequestPermission()", "RequestMultiplePermissions()", "requestPermissions(").any { it in f.readText() } }
             .map { it.relativeTo(src).path }.toList()
-        assertEquals(listOf("cz/nowass/dispenser/ui/onboarding/OnboardingScreen.kt"), askers)
+        assertEquals(
+            listOf("cz/nowass/dispenser/ui/components/AutoConnectBanner.kt", "cz/nowass/dispenser/ui/onboarding/OnboardingScreen.kt"),
+            askers.sorted(),
+        )
     }
 
     @Test

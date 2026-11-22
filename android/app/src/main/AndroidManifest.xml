@@ -9,10 +9,17 @@
         Bluetooth (M1.10e.4b, docs/ANDROID_BLE_DESIGN.md 4.1). DEVICE mode only; DEMO never asks for any
         Bluetooth or location permission. API 31+: BLUETOOTH_CONNECT (runtime) for GATT to the device
         associated through the Companion Device Manager; CDM association itself needs no location or
-        scan permission. API 26-30: the legacy install-time permissions. The fallback scan
-        (BLUETOOTH_SCAN neverForLocation / ACCESS_FINE_LOCATION on 26-30) is not part of this step.
+        scan permission. API 26-30: the legacy install-time permissions.
+        API 31+: BLUETOOTH_SCAN with neverForLocation (optional, runtime) for the automatic foreground
+        connection: a bounded scan filtered by the Dispenser service UUID and the associated address, never
+        in the background and never used to derive location. Without it (and always on API 26-30, where a
+        scan would need location access) the app uses direct connects to the associated address instead.
     -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
 
