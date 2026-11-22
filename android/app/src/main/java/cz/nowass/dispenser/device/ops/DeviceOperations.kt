@@ -1,5 +1,6 @@
 package cz.nowass.dispenser.device.ops
 
+import cz.nowass.dispenser.ble.protocol.BleProtocol
 import cz.nowass.dispenser.device.session.DeviceEvent
 import cz.nowass.dispenser.device.session.DeviceSessionManager
 import cz.nowass.dispenser.device.session.OpenRequest
@@ -18,6 +19,8 @@ object MessageType {
     const val GET_STATUS = 0x10
     const val GET_DIAGNOSTICS = 0x11
     const val ACK_REJECTIONS = 0x12
+    /** Firmware >= 0.2.0 only: older firmware closes the session on an unknown encrypted type. */
+    const val GET_BATTERY = 0x13
     const val GET_CONFIG = 0x20
     const val SET_CONFIG = 0x21
     const val LIST_SCHEDULES = 0x30
@@ -42,6 +45,8 @@ object MessageType {
 interface LiveSession {
     val generation: Long
     val isOpen: Boolean
+    /** The device's public Info record read when this connection was set up (null = unknown). */
+    val info: BleProtocol.Info? get() = null
     suspend fun request(type: Int, fields: Map<String, Any>, retries: Int): RequestResult
 }
 
@@ -61,6 +66,7 @@ class ManagerSessionPort(private val manager: DeviceSessionManager) : SessionPor
     private class Live(val s: SecureSession) : LiveSession {
         override val generation: Long get() = s.generation
         override val isOpen: Boolean get() = s.isOpen
+        override val info: BleProtocol.Info? get() = s.info
         override suspend fun request(type: Int, fields: Map<String, Any>, retries: Int) = s.request(type, fields, retries)
         override fun equals(other: Any?) = other is Live && other.s === s
         override fun hashCode() = System.identityHashCode(s)

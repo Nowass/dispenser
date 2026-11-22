@@ -2,6 +2,8 @@ package cz.nowass.dispenser.data.device
 
 import cz.nowass.dispenser.ble.protocol.BleHeader
 import cz.nowass.dispenser.ble.protocol.BleProtocol
+import cz.nowass.dispenser.device.ops.BatteryRecord
+import cz.nowass.dispenser.device.ops.BatteryState
 import cz.nowass.dispenser.device.ops.ConfigRecord
 import cz.nowass.dispenser.device.ops.DeviceErrorCode
 import cz.nowass.dispenser.device.ops.DeviceOperations
@@ -75,6 +77,8 @@ class DeviceDispenserRepository(
     private val diagS = MutableStateFlow<Stamped<DiagnosticsRecord>?>(null)
     private val schedulesS = MutableStateFlow<Stamped<DeviceSchedules>?>(null)
     private val phonesS = MutableStateFlow<Stamped<List<PhoneRecord>>?>(null)
+    /** Stamped with the device's measurement time (read time - age), not the read time. */
+    private val batteryS = MutableStateFlow<Stamped<BatteryRecord>?>(null)
 
     override val connection: StateFlow<SessionState> get() = port.state
     override val events: SharedFlow<DeviceEvent> get() = port.events
@@ -100,6 +104,7 @@ class DeviceDispenserRepository(
     override fun diagnostics() = fresh(diagS)
     override fun schedules() = fresh(schedulesS)
     override fun phones() = fresh(phonesS)
+    override fun battery() = fresh(batteryS)
     override fun pendingOperations(): Flow<List<PendingOp>> = journal.observe(deviceId)
 
     /** The live authenticated session of THIS device, if any. */
@@ -145,6 +150,7 @@ class DeviceDispenserRepository(
         if (!complete) {
             complete = resolvePending(s)
             readStatus(s)
+            readBattery(s)
             if (complete) resolvedGeneration = s.generation
         }
         return ConnectOutcome.Connected(s.generation, unresolvedCount(), complete)
@@ -173,7 +179,24 @@ class DeviceDispenserRepository(
 
     private suspend fun readStatus(s: LiveSession) = read(s, M.GET_STATUS, decode = Records::status) { v, b, ss -> keep(statusS, KEY_STATUS, v, b, ss) }
 
-    override suspend fun refreshStatus(): OpResult<StatusRecord> = live { readStatus(it) }
+    override suspend fun refreshStatus(): OpResult<StatusRecord> = live { s ->
+        readStatus(s).also { if (it is OpResult.Ok) readBattery(s) }
+    }
+
+    /**
+     * GET_BATTERY only to firmware that provides it ([firmwareHasBattery]): older firmware closes the
+     * session on an unknown encrypted type, so it is never asked and reports UNSUPPORTED instead.
+     */
+    private suspend fun readBattery(s: LiveSession): OpResult<BatteryRecord> {
+        if (!firmwareHasBattery(s.info)) {
+            val v = BatteryRecord(BatteryState.UNSUPPORTED, null, 0)
+            batteryS.value = Stamped(v, nowMs(), s.generation) // not cached: says nothing about a later firmware
+            return OpResult.Ok(v)
+        }
+        return read(s, M.GET_BATTERY, decode = Records::battery) { v, b, ss ->
+            keep(batteryS, KEY_BATTERY, v, b, ss, readAtMs = nowMs() - v.ageSeconds.coerceIn(0, MAX_BATTERY_AGE_S) * 1000)
+        }
+    }
 
     override suspend fun refreshDiagnostics(): OpResult<DiagnosticsRecord> = live { read(it, M.GET_DIAGNOSTICS, decode = Records::diagnostics) { v, b, s -> keep(diagS, KEY_DIAG, v, b, s) } }
 
@@ -242,8 +265,11 @@ class DeviceDispenserRepository(
         return OpResult.Refused(LocalRefusal.Unavailable("schedule set kept changing while being read"))
     }
 
-    private suspend fun <V> keep(flow: MutableStateFlow<Stamped<V>?>, key: String, value: V, body: ByteArray, s: LiveSession) {
-        val now = nowMs()
+    private suspend fun <V> keep(
+        flow: MutableStateFlow<Stamped<V>?>, key: String, value: V, body: ByteArray, s: LiveSession,
+        readAtMs: Long = nowMs(),
+    ) {
+        val now = readAtMs
         flow.value = Stamped(value, now, s.generation)
         try {
             cache.put(deviceId, key, CacheEntry(body, now))
@@ -682,6 +708,7 @@ class DeviceDispenserRepository(
             load(diagS, cache.get(deviceId, KEY_DIAG)) { Records.diagnostics(dec(M.GET_DIAGNOSTICS, it)) }
             load(phonesS, cache.get(deviceId, KEY_PHONES)) { Records.phones(dec(M.PHONES_LIST, it)) }
             load(schedulesS, cache.get(deviceId, KEY_SCHEDULES), ::unpackSchedules)
+            load(batteryS, cache.get(deviceId, KEY_BATTERY)) { Records.battery(dec(M.GET_BATTERY, it)) }
         } catch (e: Exception) {
             // no offline view; nothing else depends on it
         }
@@ -728,5 +755,12 @@ class DeviceDispenserRepository(
         private const val KEY_DIAG = "diagnostics"
         private const val KEY_PHONES = "phones"
         private const val KEY_SCHEDULES = "schedules"
+        private const val KEY_BATTERY = "battery"
+        /** Bound on the device-reported age (a service window lasts minutes). */
+        private const val MAX_BATTERY_AGE_S = 86_400L
+
+        /** GET_BATTERY exists from firmware 0.2.0 (Info record fw version; unknown = no). */
+        fun firmwareHasBattery(info: BleProtocol.Info?): Boolean =
+            info != null && (info.fwMajor > 0 || info.fwMinor >= 2)
     }
 }

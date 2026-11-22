@@ -439,8 +439,33 @@ JNIEXPORT jboolean JNICALL FS(reset)(JNIEnv *env, jclass cls, jbyteArray device_
     return JNI_TRUE;
 }
 
+/* The Info record's firmware version (version.txt, as the firmware image): clients gate optional
+ * requests on it (GET_BATTERY from 0.2.0). device_id stays zero (device_tag 0, as before). */
+static dsp_app_identity_t FS_IDENTITY;
+static void fs_identity_init(void)
+{
+    unsigned v[3] = {0, 0, 0};
+    const char *p = DSP_FW_VERSION;
+    for (int i = 0; i < 3 && *p != '\0'; i++) {
+        while (*p >= '0' && *p <= '9') {
+            v[i] = v[i] * 10u + (unsigned)(*p - '0');
+            p++;
+        }
+        if (*p != '.') {
+            break;
+        }
+        p++;
+    }
+    memset(&FS_IDENTITY, 0, sizeof FS_IDENTITY);
+    FS_IDENTITY.fw_major = (uint8_t)v[0];
+    FS_IDENTITY.fw_minor = (uint8_t)v[1];
+    FS_IDENTITY.fw_patch = (uint16_t)v[2];
+}
+
 static void fs_transport_init(void)
 {
+    fs_identity_init();
+    CFG.identity = &FS_IDENTITY;
     dsp_ble_tr_init(&TR, &FS_RADIO, &app, &TRP);
     BLE2 = TRP;
     BLE2.start = e2e_start;

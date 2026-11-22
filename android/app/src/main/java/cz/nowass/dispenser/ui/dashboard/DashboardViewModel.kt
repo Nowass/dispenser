@@ -1,5 +1,8 @@
 package cz.nowass.dispenser.ui.dashboard
 
+import cz.nowass.dispenser.domain.BatteryEstimate
+import cz.nowass.dispenser.domain.BatteryReading
+import cz.nowass.dispenser.domain.BatteryUnavailable
 import cz.nowass.dispenser.domain.Freshness
 
 import androidx.lifecycle.ViewModel
@@ -61,10 +64,19 @@ data class ReservoirUi(
 )
 
 data class BatteryUi(
+    /** DEMO: the simulated value; DEVICE: the estimate from [millivolts] (null = unknown). */
     val percent: Int?,
     val isSimulated: Boolean,
     val tone: StatusTone,
-)
+    /** DEVICE: the measured battery voltage; [percent] is then an estimate derived from it. */
+    val millivolts: Int? = null,
+    /** DEVICE: why no voltage is available (null = never read, or measured). */
+    val unavailable: BatteryUnavailable? = null,
+    /** Freshness of the battery value (Live/Cached carry the measurement time). */
+    val freshness: Freshness = Freshness.NotApplicable,
+) {
+    val isEstimate: Boolean get() = millivolts != null
+}
 
 /** One day of the dashboard week strip. Only real upcoming occurrences are counted. */
 data class DayPreviewUi(
@@ -127,15 +139,35 @@ class DashboardViewModel(repository: DispenserRepository) : ViewModel() {
                         },
                     )
                 },
-                battery = BatteryUi(
-                    percent = device.batteryPercent,
-                    isSimulated = isDemo,
-                    // No battery thresholds are approved yet; only distinguish unknown.
-                    tone = if (device.batteryPercent == null) StatusTone.Unknown else StatusTone.Normal,
-                ),
+                battery = batteryUi(device, isDemo),
                 week = weekPreview(schedules, device),
                 freshness = device.freshness,
             )
+        }
+
+        /**
+         * DEMO keeps its simulated percentage. DEVICE: the measured voltage with an estimated
+         * percentage, or the reason it is unavailable. No battery thresholds are approved yet (no
+         * low-battery tone), and no charging state is shown (no charger telemetry exists).
+         */
+        internal fun batteryUi(device: DeviceStatus, isDemo: Boolean): BatteryUi {
+            val freshness = if (device.battery != null) device.batteryFreshness else device.freshness
+            return when (val b = device.battery) {
+                is BatteryReading.Measured -> BatteryUi(
+                    percent = BatteryEstimate.percent(b.millivolts),
+                    isSimulated = false,
+                    tone = StatusTone.Normal,
+                    millivolts = b.millivolts,
+                    freshness = freshness,
+                )
+                is BatteryReading.Unavailable -> BatteryUi(null, false, StatusTone.Unknown, unavailable = b.reason, freshness = freshness)
+                null -> BatteryUi(
+                    percent = device.batteryPercent,
+                    isSimulated = isDemo,
+                    tone = if (device.batteryPercent == null) StatusTone.Unknown else StatusTone.Normal,
+                    freshness = freshness,
+                )
+            }
         }
 
         /**

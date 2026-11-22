@@ -32,6 +32,16 @@
     <string name="dashboard_battery_a11y">Baterie: %1$d %%, simulace</string>
     <string name="dashboard_battery_a11y_unknown">Baterie: stav neznámý</string>
     <string name="dashboard_battery_simulated_note">Simulovaná hodnota, nejde o měření.</string>
+    <string name="dashboard_battery_estimate">≈ %1$d %%</string>
+    <string name="dashboard_battery_measured">Naměřeno %1$s</string>
+    <string name="dashboard_battery_estimate_note">Procenta jsou přibližný odhad z napětí.</string>
+    <string name="dashboard_battery_a11y_measured">Baterie: přibližně %1$d %%, naměřeno %2$s</string>
+    <string name="dashboard_battery_unavailable">Nedostupné</string>
+    <string name="dashboard_battery_reason_not_measured">Zařízení napětí baterie nezměřilo.</string>
+    <string name="dashboard_battery_reason_failed">Měření napětí v zařízení selhalo.</string>
+    <string name="dashboard_battery_reason_out_of_range">Naměřené napětí je mimo rozsah článku. Zkontrolujte zapojení děliče.</string>
+    <string name="dashboard_battery_reason_unstable">Měření bylo nestabilní. Zkuste to znovu.</string>
+    <string name="dashboard_battery_reason_firmware">Firmware zařízení měření baterie zatím nepodporuje.</string>
 
     <string name="dashboard_estimate_label">odhad</string>
     <string name="dashboard_simulated_label">simulace</string>

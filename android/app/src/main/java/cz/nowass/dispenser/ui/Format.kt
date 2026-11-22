@@ -26,6 +26,13 @@ object Format {
             minimumFractionDigits = 0
         }.format(value)
 
+    /** Battery voltage from millivolts, e.g. 3970 -> "3,97 V" (two decimals, Czech comma). */
+    fun volts(millivolts: Int): String =
+        NumberFormat.getNumberInstance(CZECH).apply {
+            maximumFractionDigits = 2
+            minimumFractionDigits = 2
+        }.format(millivolts / 1000.0) + "\u00A0V"
+
     /**
      * Lossless value for an editable amount field: no rounding, no grouping,
      * Czech decimal comma (e.g. 12.25 -> "12,25", 10.0 -> "10").

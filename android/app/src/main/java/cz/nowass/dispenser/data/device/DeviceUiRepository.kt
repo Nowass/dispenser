@@ -3,11 +3,15 @@ package cz.nowass.dispenser.data.device
 import cz.nowass.dispenser.data.CommandResult
 import cz.nowass.dispenser.data.DispenserRepository
 import cz.nowass.dispenser.data.ScheduleWriteResult
+import cz.nowass.dispenser.device.ops.BatteryRecord
+import cz.nowass.dispenser.device.ops.BatteryState
 import cz.nowass.dispenser.device.ops.DeviceErrorCode
 import cz.nowass.dispenser.device.ops.LocalRefusal
 import cz.nowass.dispenser.device.ops.OpResult
 import cz.nowass.dispenser.device.ops.StatusRecord
 import cz.nowass.dispenser.device.session.SessionState
+import cz.nowass.dispenser.domain.BatteryReading
+import cz.nowass.dispenser.domain.BatteryUnavailable
 import cz.nowass.dispenser.domain.ConnectionState
 import cz.nowass.dispenser.domain.DEFAULT_ZONE
 import cz.nowass.dispenser.domain.DataSource
@@ -89,9 +93,9 @@ class DeviceUiRepository(
 
     override fun observeDevice(): Flow<DeviceStatus> =
         combine(
-            device.connection, device.status(), phoneNow(), access,
+            device.connection, combine(device.status(), device.battery(), ::Pair), phoneNow(), access,
             device.pendingOperations().map { rows -> rows.count { it.unresolved } }.distinctUntilChanged(),
-        ) { state, status, now, access, unresolved ->
+        ) { state, (status, battery), now, access, unresolved ->
             DeviceStatus(
                 source = DataSource.DEVICE,
                 connection = if (access.recoveryRequired) ConnectionState.RECOVERY_REQUIRED else connectionOf(state),
@@ -103,8 +107,20 @@ class DeviceUiRepository(
                 zone = DEFAULT_ZONE,
                 simulationActive = false,
                 freshness = status.freshness(),
+                battery = battery.valueOrNull?.let(::batteryReading),
+                batteryFreshness = battery.freshness(),
             )
         }
+
+    private fun batteryReading(r: BatteryRecord): BatteryReading = when (r.state) {
+        BatteryState.VALID -> r.millivolts?.let { BatteryReading.Measured(it) }
+            ?: BatteryReading.Unavailable(BatteryUnavailable.OUT_OF_RANGE)
+        BatteryState.NOT_MEASURED -> BatteryReading.Unavailable(BatteryUnavailable.NOT_MEASURED)
+        BatteryState.ADC_FAILED, BatteryState.NO_CALIBRATION -> BatteryReading.Unavailable(BatteryUnavailable.MEASUREMENT_FAILED)
+        BatteryState.OUT_OF_RANGE -> BatteryReading.Unavailable(BatteryUnavailable.OUT_OF_RANGE)
+        BatteryState.UNSTABLE -> BatteryReading.Unavailable(BatteryUnavailable.UNSTABLE)
+        BatteryState.UNSUPPORTED -> BatteryReading.Unavailable(BatteryUnavailable.FIRMWARE_UNSUPPORTED)
+    }
 
     override fun observeSchedules(): Flow<List<Schedule>> =
         device.schedules().map { f -> f.valueOrNull?.schedules?.map { it.schedule }.orEmpty() }.distinctUntilChanged()

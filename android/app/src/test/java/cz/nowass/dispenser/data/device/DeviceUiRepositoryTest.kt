@@ -51,6 +51,36 @@ class DeviceUiRepositoryTest {
     }
 
     @Test
+    fun battery_telemetry_maps_to_a_reading_with_its_own_freshness() = runTest {
+        val measuredAt = Instant.parse("2026-11-19T09:59:55Z")
+        fake.authenticated()
+        fake.statusF.value = Fresh.Live(FakeDeviceRepository.status(), readAt, 7)
+        fake.batteryF.value = Fresh.Live(cz.nowass.dispenser.device.ops.BatteryRecord(cz.nowass.dispenser.device.ops.BatteryState.VALID, 3970, 5), measuredAt, 7)
+        var d = repo.observeDevice().first()
+        assertEquals(cz.nowass.dispenser.domain.BatteryReading.Measured(3970), d.battery)
+        assertEquals(Freshness.Live(measuredAt), d.batteryFreshness)
+        assertEquals(Freshness.Live(readAt), d.freshness) // the status record keeps its own time
+        val cases = mapOf(
+            cz.nowass.dispenser.device.ops.BatteryState.NOT_MEASURED to cz.nowass.dispenser.domain.BatteryUnavailable.NOT_MEASURED,
+            cz.nowass.dispenser.device.ops.BatteryState.ADC_FAILED to cz.nowass.dispenser.domain.BatteryUnavailable.MEASUREMENT_FAILED,
+            cz.nowass.dispenser.device.ops.BatteryState.NO_CALIBRATION to cz.nowass.dispenser.domain.BatteryUnavailable.MEASUREMENT_FAILED,
+            cz.nowass.dispenser.device.ops.BatteryState.OUT_OF_RANGE to cz.nowass.dispenser.domain.BatteryUnavailable.OUT_OF_RANGE,
+            cz.nowass.dispenser.device.ops.BatteryState.UNSTABLE to cz.nowass.dispenser.domain.BatteryUnavailable.UNSTABLE,
+            cz.nowass.dispenser.device.ops.BatteryState.UNSUPPORTED to cz.nowass.dispenser.domain.BatteryUnavailable.FIRMWARE_UNSUPPORTED,
+        )
+        for ((state, reason) in cases) {
+            fake.batteryF.value = Fresh.Cached(cz.nowass.dispenser.device.ops.BatteryRecord(state, null, 0), measuredAt)
+            d = repo.observeDevice().first()
+            assertEquals("$state", cz.nowass.dispenser.domain.BatteryReading.Unavailable(reason), d.battery)
+            assertEquals(Freshness.Cached(measuredAt), d.batteryFreshness)
+        }
+        fake.batteryF.value = Fresh.Unknown
+        d = repo.observeDevice().first()
+        assertNull(d.battery)
+        assertEquals(Freshness.Unknown, d.batteryFreshness)
+    }
+
+    @Test
     fun live_values_only_while_connected_cached_values_keep_their_read_time() = runTest {
         fake.authenticated()
         fake.statusF.value = Fresh.Live(FakeDeviceRepository.status(), readAt, 7)

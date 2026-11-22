@@ -48,6 +48,10 @@ class FakeDevicePort(val deviceId: String = "a0b1c2d3e4f5") : SessionPort {
     var setRevision = 1L
     var config = ConfigRecord(1, 200_000, 150_000, 20, 24, 0, 1000, 0, 5000, 20000, 10000, 1, 30000)
     var phones = mutableListOf(phone(0, "A", true))
+    /** The Info record of the connection (firmware version); null = unknown (no GET_BATTERY). */
+    var info: BleProtocol.Info? = info(0, 2, 0)
+    /** GET_BATTERY answer: wire state, millivolts, age in seconds. */
+    var battery = Triple(0L, 3970L, 5L)
 
     // ---- scripting ----
     val faults = mutableMapOf<Int, Fault>()
@@ -64,6 +68,7 @@ class FakeDevicePort(val deviceId: String = "a0b1c2d3e4f5") : SessionPort {
     inner class Session(override val generation: Long) : LiveSession {
         @Volatile var open = true
         override val isOpen: Boolean get() = open
+        override val info: BleProtocol.Info? get() = this@FakeDevicePort.info
 
         override suspend fun request(type: Int, fields: Map<String, Any>, retries: Int): RequestResult {
             if (!open) return RequestResult.NotSent("closed")
@@ -123,6 +128,13 @@ class FakeDevicePort(val deviceId: String = "a0b1c2d3e4f5") : SessionPort {
     @Suppress("UNCHECKED_CAST")
     private fun handle(type: Int, f: Map<String, Any>): RequestResult = when (type) {
         M.GET_STATUS -> ok(statusFields())
+        M.GET_BATTERY -> if (!DeviceDispenserRepository.firmwareHasBattery(info)) {
+            // firmware < 0.2.0: an unknown encrypted type closes the session (never answered)
+            close()
+            RequestResult.Uncertain("session closed by old firmware", 1)
+        } else {
+            ok(mapOf("battery" to mapOf("state" to battery.first, "battery_mv" to battery.second, "age_s" to battery.third)))
+        }
         M.GET_DIAGNOSTICS -> ok(mapOf("diag" to mapOf("notify_storage_ok" to true, "tx_diag" to 0L, "tx_diag_status" to 0L,
             "rejections_unread" to 0L, "rejections_total" to 0L, "clock_trust" to 1L, "clock_reason" to 0L, "last_sync_utc" to 0L, "last_wake_reason" to 0L)))
         M.GET_CONFIG -> ok(mapOf("config" to Records.configFields(config)))
@@ -241,3 +253,6 @@ class TestSeqAllocator : ManualSeqAllocator {
         return high
     }
 }
+
+/** An Info record with the given firmware version (other fields as a claimed v1 device). */
+fun info(major: Int, minor: Int, patch: Int) = BleProtocol.Info(1, 1, 1, 0, 0x06, major, minor, patch, 0x1234)

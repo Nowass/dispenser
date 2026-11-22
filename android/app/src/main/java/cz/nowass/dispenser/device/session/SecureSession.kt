@@ -75,6 +75,8 @@ class SecureSession private constructor(
     val closed: StateFlow<String?> = closedState.asStateFlow()
     val generation: Long get() = link.generation
     val isOpen: Boolean get() = closedState.value == null
+    /** The device's Info record of this connection (firmware version; null if the link has none). */
+    val info: BleProtocol.Info? get() = link.info
     /** Responses that matched no waiter (duplicates after a retransmission; diagnostics). */
     val discardedResponses = AtomicInteger(0)
 

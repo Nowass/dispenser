@@ -15,6 +15,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 set(FW_ROOT "${CMAKE_CURRENT_LIST_DIR}/../..")
 file(STRINGS "${FW_ROOT}/version.txt" DSP_FW_VERSION)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${FW_ROOT}/version.txt")
 
 include("${FW_ROOT}/third_party/noise-c/noise_c_deps.cmake")
 dsp_noise_c_host()

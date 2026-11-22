@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -30,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cz.nowass.dispenser.R
 import cz.nowass.dispenser.data.MockSeed
+import cz.nowass.dispenser.domain.BatteryUnavailable
 import cz.nowass.dispenser.ui.Format
 import cz.nowass.dispenser.ui.czechPluralStringResource
 import java.time.LocalDate
@@ -114,12 +116,12 @@ private fun StatusCards(state: DashboardUiState.Ready, onOpenReservoir: () -> Un
                 horizontalArrangement = Arrangement.spacedBy(Spacing.m),
             ) {
                 ReservoirCard(state, onOpenReservoir, Modifier.weight(1f).fillMaxHeight())
-                BatteryCard(state.battery, Modifier.weight(1f).fillMaxHeight(), freshnessLabel(state.freshness, state.now.toInstant(), state.now.zone))
+                BatteryCard(state.battery, Modifier.weight(1f).fillMaxHeight(), freshnessLabel(state.battery.freshness, state.now.toInstant(), state.now.zone))
             }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(Spacing.m)) {
                 ReservoirCard(state, onOpenReservoir, Modifier.fillMaxWidth())
-                BatteryCard(state.battery, Modifier.fillMaxWidth(), freshnessLabel(state.freshness, state.now.toInstant(), state.now.zone))
+                BatteryCard(state.battery, Modifier.fillMaxWidth(), freshnessLabel(state.battery.freshness, state.now.toInstant(), state.now.zone))
             }
         }
     }
@@ -192,6 +194,10 @@ private fun ReservoirCard(state: DashboardUiState.Ready, onOpen: () -> Unit, mod
     }
 }
 
+const val BATTERY_VALUE_TEST_TAG = "battery_value"
+const val BATTERY_VOLTAGE_TEST_TAG = "battery_voltage"
+const val BATTERY_REASON_TEST_TAG = "battery_reason"
+
 @Composable
 private fun BatteryCard(battery: BatteryUi, modifier: Modifier, freshness: String? = null) {
     val accent = battery.tone.accent(normal = DispenserTheme.extendedColors.battery)
@@ -203,22 +209,59 @@ private fun BatteryCard(battery: BatteryUi, modifier: Modifier, freshness: Strin
         tags = if (battery.isSimulated) listOf(stringResource(R.string.dashboard_simulated_label)) else listOfNotNull(freshness),
         modifier = modifier,
     ) {
+        val volts = battery.millivolts?.let { Format.volts(it) }
         Text(
-            battery.percent?.let { stringResource(R.string.unit_percent, it) }
-                ?: stringResource(R.string.dashboard_battery_unknown),
+            when {
+                battery.percent != null && battery.isEstimate -> stringResource(R.string.dashboard_battery_estimate, battery.percent)
+                battery.percent != null -> stringResource(R.string.unit_percent, battery.percent)
+                battery.unavailable != null -> stringResource(R.string.dashboard_battery_unavailable)
+                else -> stringResource(R.string.dashboard_battery_unknown)
+            },
             style = MaterialTheme.typography.headlineMedium,
             color = MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.testTag(BATTERY_VALUE_TEST_TAG),
         )
         MetricProgress(
             fraction = battery.percent?.let { it / 100f },
-            accessibilityLabel = battery.percent?.let {
-                stringResource(if (battery.isSimulated) R.string.dashboard_battery_a11y else R.string.dashboard_battery_a11y_device, it)
-            }
-                ?: stringResource(R.string.dashboard_battery_a11y_unknown),
+            accessibilityLabel = when {
+                battery.percent != null && volts != null -> stringResource(R.string.dashboard_battery_a11y_measured, battery.percent, volts)
+                battery.percent != null ->
+                    stringResource(if (battery.isSimulated) R.string.dashboard_battery_a11y else R.string.dashboard_battery_a11y_device, battery.percent)
+                else -> stringResource(R.string.dashboard_battery_a11y_unknown)
+            },
             color = accent,
         )
+        if (volts != null) {
+            Text(
+                stringResource(R.string.dashboard_battery_measured, volts),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.testTag(BATTERY_VOLTAGE_TEST_TAG),
+            )
+            Text(
+                stringResource(R.string.dashboard_battery_estimate_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        battery.unavailable?.let { reason ->
+            Text(
+                stringResource(
+                    when (reason) {
+                        BatteryUnavailable.NOT_MEASURED -> R.string.dashboard_battery_reason_not_measured
+                        BatteryUnavailable.MEASUREMENT_FAILED -> R.string.dashboard_battery_reason_failed
+                        BatteryUnavailable.OUT_OF_RANGE -> R.string.dashboard_battery_reason_out_of_range
+                        BatteryUnavailable.UNSTABLE -> R.string.dashboard_battery_reason_unstable
+                        BatteryUnavailable.FIRMWARE_UNSUPPORTED -> R.string.dashboard_battery_reason_firmware
+                    },
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(BATTERY_REASON_TEST_TAG),
+            )
+        }
         if (battery.isSimulated) {
             Text(
                 stringResource(R.string.dashboard_battery_simulated_note),

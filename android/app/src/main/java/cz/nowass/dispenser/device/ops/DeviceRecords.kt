@@ -55,6 +55,28 @@ data class StatusRecord(
     val manualFloor: Long,
 )
 
+/**
+ * Battery telemetry (7.7, GET_BATTERY, firmware >= 0.2.0). [millivolts] is the device's calibrated
+ * measurement and is non-null only for [BatteryState.VALID]; every other state is "no voltage",
+ * never 0 V. [ageSeconds]: how long before the response the device measured.
+ */
+data class BatteryRecord(
+    val state: BatteryState,
+    val millivolts: Int?,
+    val ageSeconds: Long,
+)
+
+/** Wire states of the Battery record, plus [UNSUPPORTED] for firmware without GET_BATTERY. */
+enum class BatteryState(val wire: Int) {
+    VALID(0), NOT_MEASURED(1), ADC_FAILED(2), NO_CALIBRATION(3), OUT_OF_RANGE(4), UNSTABLE(5),
+    /** App-side only: the firmware predates GET_BATTERY (never sent on the wire). */
+    UNSUPPORTED(-1);
+
+    companion object {
+        fun of(wire: Int): BatteryState = entries.firstOrNull { it.wire == wire && it != UNSUPPORTED } ?: ADC_FAILED
+    }
+}
+
 /** Diagnostics (7.3). */
 data class DiagnosticsRecord(
     val notifyStorageOk: Boolean,
@@ -247,6 +269,14 @@ object Records {
     fun diagnostics(body: Map<String, Any>): DiagnosticsRecord = body.rec("diag").let { m ->
         DiagnosticsRecord(m.bool("notify_storage_ok"), m.int("tx_diag"), m.int("tx_diag_status"), m.int("rejections_unread"),
             m.int("rejections_total"), trust(m.int("clock_trust")), m.int("clock_reason"), m.long("last_sync_utc"), m.int("last_wake_reason"))
+    }
+
+    fun battery(body: Map<String, Any>): BatteryRecord = body.rec("battery").let { m ->
+        val state = BatteryState.of(m.int("state"))
+        val mv = m.int("battery_mv")
+        // a VALID state without a voltage is not a measurement (never shown as 0 V)
+        if (state == BatteryState.VALID && mv > 0) BatteryRecord(state, mv, m.long("age_s"))
+        else BatteryRecord(if (state == BatteryState.VALID) BatteryState.OUT_OF_RANGE else state, null, 0)
     }
 
     fun config(body: Map<String, Any>): ConfigRecord = configRecord(body.rec("config"))

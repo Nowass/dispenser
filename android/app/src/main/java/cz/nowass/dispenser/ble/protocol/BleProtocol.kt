@@ -116,6 +116,8 @@ object BleProtocol {
         f("clock_reason", Kind.U8), f("last_sync_utc", Kind.I64), f("last_wake_reason", Kind.U8),
         f("", Kind.Reserved(6)),
     )
+    /** Battery telemetry (7.7, firmware >= 0.2.0): state 0 VALID .. 5 UNSTABLE. */
+    val BATTERY = listOf(f("state", range(0, 5)), f("battery_mv", Kind.U16), f("age_s", Kind.U32))
     val CONFIG = listOf(
         f("revision", Kind.U32), f("reservoir_capacity_ul", Kind.U32), f("reservoir_remaining_ul", Kind.U32),
         f("low_stock_percent", Kind.U8), f("time_sync_interval_h", Kind.U16), f("notify_mask", Kind.U8),
@@ -164,6 +166,7 @@ object BleProtocol {
         TypeSpec(0x10, "GET_STATUS", SecurityClass.ENCRYPTED, E, STATUS_BODY, null),
         TypeSpec(0x11, "GET_DIAGNOSTICS", SecurityClass.ENCRYPTED, E, listOf(f("diag", Kind.Record(DIAGNOSTICS))), null),
         TypeSpec(0x12, "ACK_REJECTIONS", SecurityClass.ENCRYPTED, E, E, null),
+        TypeSpec(0x13, "GET_BATTERY", SecurityClass.ENCRYPTED, E, listOf(f("battery", Kind.Record(BATTERY))), null),
         TypeSpec(0x20, "GET_CONFIG", SecurityClass.ENCRYPTED, E, listOf(f("config", Kind.Record(CONFIG))), null),
         TypeSpec(0x21, "SET_CONFIG", SecurityClass.ENCRYPTED,
             listOf(f("expected_revision", Kind.U32), f("field_mask", Kind.Mask(2, 0x03FF)), f("config", Kind.Record(CONFIG))),

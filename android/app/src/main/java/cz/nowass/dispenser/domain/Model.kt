@@ -132,6 +132,28 @@ sealed interface Freshness {
     data class Cached(val readAt: Instant) : Freshness
 }
 
+/**
+ * DEVICE mode: the device's battery telemetry. A [Measured] voltage is a measurement; any
+ * percentage derived from it is an estimate ([BatteryEstimate]). [Unavailable] is never 0 V / 0 %.
+ */
+sealed interface BatteryReading {
+    data class Measured(val millivolts: Int) : BatteryReading
+    data class Unavailable(val reason: BatteryUnavailable) : BatteryReading
+}
+
+enum class BatteryUnavailable {
+    /** The device has no measurement (no battery input in its build, or not measured yet). */
+    NOT_MEASURED,
+    /** The ADC or its calibration failed. */
+    MEASUREMENT_FAILED,
+    /** Not a credible single-cell voltage (divider disconnected, wrong wiring). */
+    OUT_OF_RANGE,
+    /** The samples disagreed too much. */
+    UNSTABLE,
+    /** The device firmware predates battery telemetry. */
+    FIRMWARE_UNSUPPORTED,
+}
+
 /** Snapshot of the (demo or physical) dispenser. */
 data class DeviceStatus(
     val source: DataSource,
@@ -149,4 +171,8 @@ data class DeviceStatus(
     val access: DeviceAccess? = null,
     /** DEVICE mode: unresolved journal rows of the selected device (never hidden, never dropped). */
     val unresolvedOperations: Int = 0,
+    /** DEVICE mode: battery telemetry; null = never read (or DEMO, which keeps [batteryPercent]). */
+    val battery: BatteryReading? = null,
+    /** Freshness of [battery] (Live/Cached carry the device's measurement time). */
+    val batteryFreshness: Freshness = Freshness.NotApplicable,
 )

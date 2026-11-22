@@ -197,6 +197,25 @@ class DeviceRepositoryFirmwareTest {
      * the app, a disconnect by the app and a close of the session itself.
      */
     @Test
+    fun battery_telemetry_against_the_real_firmware() = runBlocking {
+        val p = Phone()
+        wake()
+        p.claim()
+        val r = p.repo
+        p.connected()
+        // the simulator reports version.txt (>= 0.2.0) and has no battery port: the real dispatcher
+        // answers GET_BATTERY with NOT_MEASURED (no voltage), and the session stays usable
+        val b = r.battery().first()
+        assertTrue("$b", b is Fresh.Live)
+        assertEquals(cz.nowass.dispenser.device.ops.BatteryState.NOT_MEASURED, b.valueOrNull?.state)
+        assertEquals(null, b.valueOrNull?.millivolts)
+        assertTrue(r.refreshStatus() is OpResult.Ok)
+        assertTrue(r.battery().first() is Fresh.Live)
+        assertTrue(r.status().first() is Fresh.Live)
+        assertTrue(r.refreshConfig() is OpResult.Ok)
+    }
+
+    @Test
     fun values_are_never_live_after_the_session_closes() = runBlocking {
         val p = Phone()
         wake()

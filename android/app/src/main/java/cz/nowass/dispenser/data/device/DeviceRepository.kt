@@ -1,5 +1,7 @@
 package cz.nowass.dispenser.data.device
 
+import cz.nowass.dispenser.device.ops.BatteryRecord
+import cz.nowass.dispenser.device.ops.BatteryState
 import cz.nowass.dispenser.device.ops.ConfigRecord
 import cz.nowass.dispenser.device.ops.DiagnosticsRecord
 import cz.nowass.dispenser.device.ops.HistoryPageRecord
@@ -19,6 +21,7 @@ import cz.nowass.dispenser.domain.ScheduleDraft
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOf
 import java.time.Instant
 
 /**
@@ -92,6 +95,12 @@ interface DeviceRepository {
     fun diagnostics(): Flow<Fresh<DiagnosticsRecord>>
     fun schedules(): Flow<Fresh<DeviceSchedules>>
     fun phones(): Flow<Fresh<List<PhoneRecord>>>
+    /**
+     * Battery telemetry (GET_BATTERY), read with the status at every new session and on
+     * [refreshStatus]. [BatteryState.UNSUPPORTED] for firmware older than 0.2.0 (never asked: such
+     * firmware would close the session). Unknown until read; never polled.
+     */
+    fun battery(): Flow<Fresh<BatteryRecord>> = flowOf(Fresh.Unknown)
 
     /** Journal rows: unresolved ("result unknown — connect to check"), awaiting the user, or resolved until acknowledged. */
     fun pendingOperations(): Flow<List<PendingOp>>
@@ -101,6 +110,7 @@ interface DeviceRepository {
     /** graceful = encrypted END_SESSION (ends the device's service window); else just disconnect. */
     suspend fun disconnect(graceful: Boolean)
 
+    /** GET_STATUS, then the battery telemetry (when the firmware provides it). */
     suspend fun refreshStatus(): OpResult<StatusRecord>
     suspend fun refreshDiagnostics(): OpResult<DiagnosticsRecord>
     suspend fun ackRejections(): OpResult<Unit>

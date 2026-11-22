@@ -297,6 +297,7 @@ val buildFirmwareSim = tasks.register<Exec>("buildFirmwareSim") {
     dependsOn(configureFirmwareSim)
     inputs.dir(rootProject.layout.projectDirectory.dir("../firmware/components"))
     inputs.dir(rootProject.layout.projectDirectory.dir("../firmware/test/host"))
+    inputs.file(rootProject.layout.projectDirectory.file("../firmware/version.txt")) // the Info record's fw version
     inputs.dir(fwsimSrc)
     outputs.file(fwsimDir.map { it.file("libdsp_fwsim.so") })
     commandLine(cmakeExe.get(), "--build", fwsimDir.get().asFile.absolutePath)

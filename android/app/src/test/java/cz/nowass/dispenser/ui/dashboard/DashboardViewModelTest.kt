@@ -151,4 +151,59 @@ class DashboardViewModelTest {
         assertEquals(StatusTone.Blocked, DashboardViewModel.toUiState(seed.device, seed.schedules, blocked).reservoir!!.tone)
         assertFalse(DashboardViewModel.toUiState(seed.device, seed.schedules, blocked).reservoir!!.coversNextDose)
     }
+
+    // ---- battery telemetry (DEVICE) -------------------------------------------------------------
+
+    private fun deviceStatus(battery: cz.nowass.dispenser.domain.BatteryReading?, percent: Int? = null) =
+        MockSeed.default().device.copy(
+            source = DataSource.DEVICE,
+            batteryPercent = percent,
+            battery = battery,
+            batteryFreshness = cz.nowass.dispenser.domain.Freshness.Live(java.time.Instant.EPOCH),
+            freshness = cz.nowass.dispenser.domain.Freshness.Unknown,
+        )
+
+    @Test
+    fun measuredBattery_showsVoltageAndEstimatedPercent() {
+        val b = DashboardViewModel.batteryUi(deviceStatus(cz.nowass.dispenser.domain.BatteryReading.Measured(3970)), isDemo = false)
+        assertEquals(3970, b.millivolts)
+        assertEquals(73, b.percent)
+        assertTrue(b.isEstimate)
+        assertFalse(b.isSimulated)
+        assertEquals(StatusTone.Normal, b.tone)
+        assertEquals(null, b.unavailable)
+        // the battery's own freshness (its measurement), not the status record's
+        assertEquals(cz.nowass.dispenser.domain.Freshness.Live(java.time.Instant.EPOCH), b.freshness)
+    }
+
+    @Test
+    fun unavailableBattery_isNeitherZeroNorAPercentage() {
+        for (reason in cz.nowass.dispenser.domain.BatteryUnavailable.entries) {
+            val b = DashboardViewModel.batteryUi(deviceStatus(cz.nowass.dispenser.domain.BatteryReading.Unavailable(reason)), isDemo = false)
+            assertEquals(null, b.percent)
+            assertEquals(null, b.millivolts)
+            assertEquals(reason, b.unavailable)
+            assertEquals(StatusTone.Unknown, b.tone)
+            assertFalse(b.isEstimate)
+        }
+    }
+
+    @Test
+    fun neverReadBattery_keepsTheLegacyUnknown() {
+        val b = DashboardViewModel.batteryUi(deviceStatus(null), isDemo = false)
+        assertEquals(null, b.percent)
+        assertEquals(null, b.unavailable)
+        assertEquals(StatusTone.Unknown, b.tone)
+        // without a battery reading the card shows the status record's freshness
+        assertEquals(cz.nowass.dispenser.domain.Freshness.Unknown, b.freshness)
+    }
+
+    @Test
+    fun demoBattery_isUnchanged() {
+        val b = DashboardViewModel.toUiState(MockSeed.default().device, MockSeed.default().schedules, null).battery
+        assertEquals(78, b.percent)
+        assertTrue(b.isSimulated)
+        assertFalse(b.isEstimate)
+        assertEquals(null, b.millivolts)
+    }
 }

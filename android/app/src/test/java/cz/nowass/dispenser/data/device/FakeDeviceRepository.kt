@@ -1,5 +1,6 @@
 package cz.nowass.dispenser.data.device
 
+import cz.nowass.dispenser.device.ops.BatteryRecord
 import cz.nowass.dispenser.device.ops.ClockTrust
 import cz.nowass.dispenser.device.ops.ConfigRecord
 import cz.nowass.dispenser.device.ops.DiagnosticsRecord
@@ -33,6 +34,7 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
 
     val statusF = MutableStateFlow<Fresh<StatusRecord>>(Fresh.Unknown)
     val schedulesF = MutableStateFlow<Fresh<DeviceSchedules>>(Fresh.Unknown)
+    val batteryF = MutableStateFlow<Fresh<BatteryRecord>>(Fresh.Unknown)
 
     /** Next outcome of a schedule write / refill. */
     var writeOutcome: OpResult<ScheduleWrite> = OpResult.NotSent("not connected")
@@ -41,6 +43,7 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
 
     override fun status(): Flow<Fresh<StatusRecord>> = statusF
     override fun schedules(): Flow<Fresh<DeviceSchedules>> = schedulesF
+    override fun battery(): Flow<Fresh<BatteryRecord>> = batteryF
     override fun config(): Flow<Fresh<ConfigRecord>> = flowOf(Fresh.Unknown)
     override fun diagnostics(): Flow<Fresh<DiagnosticsRecord>> = flowOf(Fresh.Unknown)
     override fun phones(): Flow<Fresh<List<PhoneRecord>>> = flowOf(Fresh.Unknown)

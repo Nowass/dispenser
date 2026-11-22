@@ -36,6 +36,8 @@ class FrameLink(
 
     val events: Flow<LinkEvent> = out.receiveAsFlow()
     val generation: Long get() = transport.generation
+    /** The Info record the transport read during setup; null when not available. */
+    val info: BleProtocol.Info? get() = runCatching { transport.info }.getOrNull()
 
     init {
         scope.launch {

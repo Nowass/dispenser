@@ -1599,6 +1599,23 @@ debug app, pump screen without BENCH texts, no DEMO switch). Note from the run: 
 paste the screen moves on to the setup-code step; the invitation does not belong there (it is
 refused with "Kód musí začínat DSP2:").
 
+## 16f. Battery telemetry (both build types, 2026-11-22)
+
+- **Source:** the device's measured voltage (GET_BATTERY, BLE_PROTOCOL 7.7), read right after the
+  status at every new session (`connect()`) and on `refreshStatus()`; never polled, never a reason
+  to keep or open a connection. Sent only to firmware ≥ 0.2.0 (Info record; BLE_PROTOCOL 8.2): older
+  firmware would close the session, so it is never asked and the card says the firmware does not
+  support it. Cached like the other device values (`battery` key; Cached with its time offline).
+- **Time:** the value is stamped with the device's measurement time (read time − `age_s`), so the
+  card's freshness tag is the measurement, not the read.
+- **Card (dashboard, DEVICE mode):** `≈ 73 %` (estimate) above `Naměřeno 3,97 V` (measurement) and
+  the note that the percentage is an approximate estimate. Unavailable states show "Nedostupné" with
+  the reason (not measured, measurement failed, out of range, unstable, firmware without support):
+  never 0 V or 0 %. No charging state (no charger telemetry exists). DEMO keeps its simulated 78 %.
+- **Estimate:** `BatteryEstimate`, piecewise-linear over a typical 1S Li-ion resting voltage curve,
+  0 % at 3.30 V (regulator headroom) and 100 % at 4.20 V, clamped; one table to refine with real
+  discharge data. No low-battery tone or threshold yet.
+
 ## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
 
 Implemented and tested, uncommitted, awaiting the onboarding/security review. QR scanning and
