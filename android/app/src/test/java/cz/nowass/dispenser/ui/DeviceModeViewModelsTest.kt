@@ -5,6 +5,7 @@ import cz.nowass.dispenser.data.InMemoryAppSettingsRepository
 import cz.nowass.dispenser.data.AppVersion
 import cz.nowass.dispenser.data.device.DeviceSchedules
 import cz.nowass.dispenser.data.device.DeviceUiRepository
+import cz.nowass.dispenser.data.device.DeviceRepository
 import cz.nowass.dispenser.data.device.FakeDeviceRepository
 import cz.nowass.dispenser.data.device.Fresh
 import cz.nowass.dispenser.data.device.ScheduleWrite
@@ -27,6 +28,7 @@ import cz.nowass.dispenser.device.ops.DeviceValidation
 import cz.nowass.dispenser.ui.reservoir.RefillError
 import cz.nowass.dispenser.ui.reservoir.ReservoirConfigErrors
 import cz.nowass.dispenser.ui.reservoir.ReservoirViewModel
+import cz.nowass.dispenser.ui.reservoir.ThresholdOutcome
 import cz.nowass.dispenser.ui.schedule.EditorResult
 import cz.nowass.dispenser.ui.schedule.ScheduleEditorUiState
 import cz.nowass.dispenser.ui.schedule.ScheduleEditorViewModel
@@ -273,5 +275,84 @@ class DeviceModeViewModelsTest {
         vm.setEnabled("id-1", false)
         assertEquals(ScheduleWriteNotice.UNCERTAIN, vm.writeNotice.value)
         assertEquals(listOf("update id-1 3 enabled=false"), fake.calls)
+    }
+
+    // ---- LOW threshold (device config low_stock_percent) ------------------------------------------
+
+    private fun cfg(rev: Long = 34, low: Int = 20) =
+        cz.nowass.dispenser.device.ops.ConfigRecord(rev, 500_000, 480_000, low, 24, 7, 1000, 0, 5000, 20000, 10000, 1, 30000)
+
+    @Test
+    fun threshold_shows_the_device_value_and_decides_low() = runTest {
+        fake.authenticated(7)
+        fake.statusF.value = Fresh.Live(FakeDeviceRepository.status(capacityUl = 500_000, remainingUl = 480_000), readAt, 7)
+        val vm = ReservoirViewModel(repo)
+        backgroundScope.launch { vm.uiState.collect {} }
+        var s = vm.uiState.filterIsInstance<ReservoirUiState.Ready>().first { it.reservoir != null }
+        assertFalse(s.thresholdFromDevice) // not read yet: the app default, said so
+        assertEquals(1, fake.refreshConfigCalls) // read once when the screen opens
+        fake.configF.value = Fresh.Live(cfg(low = 97), readAt, 7)
+        s = vm.uiState.filterIsInstance<ReservoirUiState.Ready>().first { it.thresholdFromDevice }
+        assertEquals(97, s.lowThresholdPercent)
+        assertEquals(cz.nowass.dispenser.domain.simulation.ReservoirStatus.LOW, s.status) // 96 % < 97 %
+        fake.configF.value = Fresh.Live(cfg(low = 20), readAt, 7)
+        s = vm.uiState.filterIsInstance<ReservoirUiState.Ready>().first { it.lowThresholdPercent == 20 }
+        assertEquals(cz.nowass.dispenser.domain.simulation.ReservoirStatus.NORMAL, s.status)
+    }
+
+    @Test
+    fun threshold_change_reads_the_live_config_and_sends_only_the_low_stock_field() = runTest {
+        fake.authenticated(7)
+        fake.statusF.value = Fresh.Live(FakeDeviceRepository.status(capacityUl = 500_000, remainingUl = 480_000), readAt, 7)
+        val vm = ReservoirViewModel(repo)
+        backgroundScope.launch { vm.uiState.collect {} }
+        vm.uiState.filterIsInstance<ReservoirUiState.Ready>().first()
+        // invalid input is never sent
+        for (t in listOf("0", "100", "", "abc", "9.5", "-3")) assertNull(t, vm.parseThreshold(t))
+        vm.setLowStock("100")
+        assertTrue(fake.calls.none { it.startsWith("setConfig") })
+        // valid: live read first, then SET_CONFIG with the live revision and mask F_LOW_STOCK only
+        fake.configOutcome = OpResult.Ok(cfg(rev = 34, low = 20))
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        fake.setConfigOutcome = OpResult.Ok(35)
+        vm.setLowStock("97")
+        assertEquals(listOf("setConfig 34 0x2"), fake.calls.filter { it.startsWith("setConfig") })
+        assertEquals(97, fake.lastConfig!!.lowStockPercent)
+        assertEquals(480_000L, fake.lastConfig!!.reservoirRemainingUl) // nothing else changes
+        assertEquals(500_000L, fake.lastConfig!!.reservoirCapacityUl)
+        assertEquals(ThresholdOutcome.DONE, vm.thresholdOutcome.value)
+        // the same value again: nothing is sent
+        fake.configOutcome = OpResult.Ok(cfg(rev = 35, low = 97))
+        vm.setLowStock("97")
+        assertEquals(1, fake.calls.count { it.startsWith("setConfig") })
+        assertEquals(ThresholdOutcome.DONE, vm.thresholdOutcome.value)
+        // outcomes are explicit
+        fake.configOutcome = OpResult.Ok(cfg(rev = 35, low = 97))
+        fake.setConfigOutcome = OpResult.Uncertain("lost reply", journalId = 4)
+        vm.setLowStock("20")
+        assertEquals(ThresholdOutcome.UNCERTAIN, vm.thresholdOutcome.value)
+        fake.configOutcome = OpResult.NotSent("not connected")
+        vm.setLowStock("20")
+        assertEquals(ThresholdOutcome.NOT_SENT, vm.thresholdOutcome.value)
+        gate.complete(Unit)
+    }
+
+    @Test
+    fun threshold_change_is_never_sent_twice_at_once() = runTest {
+        fake.authenticated(7)
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val slow = object : DeviceRepository by fake {
+            override suspend fun refreshConfig(): OpResult<cz.nowass.dispenser.device.ops.ConfigRecord> { gate.await(); return OpResult.Ok(cfg()) }
+        }
+        val vm = ReservoirViewModel(cz.nowass.dispenser.data.device.DeviceUiRepository(slow, java.time.Clock.fixed(readAt, java.time.ZoneOffset.UTC), clockTick = null))
+        backgroundScope.launch { vm.uiState.collect {} }
+        fake.setConfigOutcome = OpResult.Ok(35)
+        vm.setLowStock("97")
+        vm.setLowStock("98")
+        assertTrue(vm.thresholdBusy.value)
+        gate.complete(Unit)
+        kotlinx.coroutines.yield()
+        assertEquals(1, fake.calls.count { it.startsWith("setConfig") })
+        assertEquals(97, fake.lastConfig!!.lowStockPercent)
     }
 }

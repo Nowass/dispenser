@@ -58,7 +58,8 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
             batteryRefreshInFlight--
         }
     }
-    override fun config(): Flow<Fresh<ConfigRecord>> = flowOf(Fresh.Unknown)
+    val configF = MutableStateFlow<Fresh<ConfigRecord>>(Fresh.Unknown)
+    override fun config(): Flow<Fresh<ConfigRecord>> = configF
     override fun diagnostics(): Flow<Fresh<DiagnosticsRecord>> = flowOf(Fresh.Unknown)
     override fun phones(): Flow<Fresh<List<PhoneRecord>>> = flowOf(Fresh.Unknown)
     val pendingF = MutableStateFlow<List<PendingOp>>(emptyList())
@@ -96,7 +97,8 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
     override suspend fun refreshStatus(): OpResult<StatusRecord> = statusOutcome ?: no()
     override suspend fun refreshDiagnostics(): OpResult<DiagnosticsRecord> = no()
     override suspend fun ackRejections(): OpResult<Unit> = no()
-    override suspend fun refreshConfig(): OpResult<ConfigRecord> = configOutcome ?: no()
+    var refreshConfigCalls = 0
+    override suspend fun refreshConfig(): OpResult<ConfigRecord> { refreshConfigCalls++; return configOutcome ?: OpResult.NotSent("not connected") }
     override suspend fun setConfig(expectedRevision: Long, mask: Int, values: ConfigRecord): OpResult<Long> {
         calls += "setConfig $expectedRevision 0x${mask.toString(16)}"; lastConfig = values; return setConfigOutcome
     }

@@ -216,6 +216,41 @@ class DeviceRepositoryFirmwareTest {
     }
 
     @Test
+    fun low_threshold_change_opens_and_closes_the_reservoir_low_episode_on_the_real_firmware() = runBlocking {
+        val p = Phone()
+        wake()
+        p.claim()
+        val r = p.repo
+        p.connected()
+        r.prepareForDosing()
+        val cap = (r.refreshStatus() as OpResult.Ok).value.capacityUl
+        assertTrue(r.refill(cap / 2) is OpResult.Ok) // 50 % remaining
+        val ui = DeviceUiRepository(r, java.time.Clock.systemUTC(), clockTick = null)
+        var st = (r.refreshStatus() as OpResult.Ok).value
+        assertEquals(0, st.pendingNotes)
+        val before = (r.refreshConfig() as OpResult.Ok).value
+        // above the current level: the firmware queues exactly one RESERVOIR_LOW (WARNING)
+        assertEquals(cz.nowass.dispenser.data.CommandResult.Done(newEvents = 0), ui.setLowStockPercent(60))
+        val after = (r.config().first() as Fresh.Live).value
+        assertEquals(60, after.lowStockPercent)
+        assertEquals(before.reservoirRemainingUl, after.reservoirRemainingUl) // no refill, no estimate change
+        assertEquals(before.reservoirCapacityUl, after.reservoirCapacityUl)
+        st = (r.refreshStatus() as OpResult.Ok).value
+        assertEquals(1, st.pendingNotes)
+        assertEquals(1, st.highestSeverity) // WARNING
+        assertEquals(Readiness.READY, st.readiness)
+        // the same value again: nothing new
+        ui.setLowStockPercent(60)
+        assertEquals(1, (r.refreshStatus() as OpResult.Ok).value.pendingNotes)
+        // restored (50 % >= 20 % + 5): the episode closes and the undelivered event is withdrawn
+        assertEquals(cz.nowass.dispenser.data.CommandResult.Done(newEvents = 0), ui.setLowStockPercent(20))
+        st = (r.refreshStatus() as OpResult.Ok).value
+        assertEquals(0, st.pendingNotes)
+        assertEquals(Readiness.READY, st.readiness)
+        assertEquals(20, (r.config().first() as Fresh.Live).value.lowStockPercent)
+    }
+
+    @Test
     fun values_are_never_live_after_the_session_closes() = runBlocking {
         val p = Phone()
         wake()

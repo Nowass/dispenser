@@ -1624,6 +1624,18 @@ refused with "Kód musí začínat DSP2:").
   0 % at 3.30 V (regulator headroom) and 100 % at 4.20 V, clamped; one table to refine with real
   discharge data. No low-battery tone or threshold yet.
 
+## 16g. Reservoir LOW threshold (both build types, 2026-11-22)
+
+- The reservoir screen (DEVICE mode) shows the **device's own** LOW threshold (config
+  `low_stock_percent`, read when the screen opens) and decides the LOW status with it; before it is
+  read, the app default is shown and labelled "not read yet". Previously the app default was shown
+  in DEVICE mode as if it were the device's value.
+- "Změnit mez": a 1–99 % whole number; a live GET_CONFIG first (revision), then SET_CONFIG with only
+  `F_LOW_STOCK`, journaled and verified by read-back; the same value sends nothing; one request at
+  a time; explicit outcomes (confirmed, uncertain, not sent, awaiting verification, rejected, not
+  accepted). Needs a live session. The firmware re-evaluates the RESERVOIR_LOW notification at once
+  (an episode opens below the threshold and closes at threshold + 5 points); nothing else changes.
+
 ## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
 
 Implemented and tested, uncommitted, awaiting the onboarding/security review. QR scanning and

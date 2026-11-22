@@ -76,6 +76,8 @@ fun ReservoirRoute(viewModel: ReservoirViewModel, isDemo: Boolean, onBack: () ->
     val refillDone by viewModel.refillDone.collectAsStateWithLifecycle()
     val refillOutcome by viewModel.refillOutcome.collectAsStateWithLifecycle()
     val configured by viewModel.configured.collectAsStateWithLifecycle()
+    val thresholdOutcome by viewModel.thresholdOutcome.collectAsStateWithLifecycle()
+    val thresholdBusy by viewModel.thresholdBusy.collectAsStateWithLifecycle()
     ReservoirScreen(
         state, isDemo, onBack, viewModel::validateRefill, viewModel::refill,
         refillConfirmed = refillDone,
@@ -84,6 +86,10 @@ fun ReservoirRoute(viewModel: ReservoirViewModel, isDemo: Boolean, onBack: () ->
         validateConfigure = viewModel::validateConfigure,
         onConfigure = viewModel::configure,
         configureConfirmed = configured,
+        thresholdOutcome = thresholdOutcome,
+        thresholdBusy = thresholdBusy,
+        parseThreshold = viewModel::parseThreshold,
+        onSetThreshold = viewModel::setLowStock,
     )
 }
 
@@ -100,9 +106,14 @@ fun ReservoirScreen(
     validateConfigure: (String, String) -> ReservoirConfigErrors = { _, _ -> ReservoirConfigErrors(RefillError.NOT_ACTIVE, null) },
     onConfigure: (String, String) -> Unit = { _, _ -> },
     configureConfirmed: Boolean = false,
+    thresholdOutcome: ThresholdOutcome? = null,
+    thresholdBusy: Boolean = false,
+    parseThreshold: (String) -> Int? = { null },
+    onSetThreshold: (String) -> Unit = {},
 ) {
     var showRefill by rememberSaveable { mutableStateOf(false) }
     var showConfigure by rememberSaveable { mutableStateOf(false) }
+    var showThreshold by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         Row(
             Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = Spacing.xs),
@@ -128,6 +139,9 @@ fun ReservoirScreen(
                 verticalArrangement = Arrangement.spacedBy(Spacing.m),
             ) {
                 LevelCard(state)
+                if (state.configurable) {
+                    ThresholdRow(state, thresholdBusy, thresholdOutcome, onEdit = { showThreshold = true })
+                }
                 if (state.reservoir == null && state.configurable) {
                     // DEVICE mode, capacity unknown: initialize (capacity + current amount)
                     Text(stringResource(R.string.reservoir_configure_hint), style = MaterialTheme.typography.bodyMedium)
@@ -216,6 +230,14 @@ fun ReservoirScreen(
             onConfirm = { onRefill(it); showRefill = false },
         )
     }
+    if (showThreshold && ready?.configurable == true) {
+        ThresholdDialog(
+            initial = ready.lowThresholdPercent.toString(),
+            parse = parseThreshold,
+            onDismiss = { showThreshold = false },
+            onConfirm = { onSetThreshold(it); showThreshold = false },
+        )
+    }
     if (showConfigure && ready?.configurable == true) {
         ConfigureDialog(
             initialCapacity = reservoir?.let { Format.mlInput(Volume.microlitresToMl(it.capacityUl)) } ?: "",
@@ -225,6 +247,80 @@ fun ReservoirScreen(
             onConfirm = { c, r -> onConfigure(c, r); showConfigure = false },
         )
     }
+}
+
+const val RESERVOIR_THRESHOLD_EDIT_TEST_TAG = "reservoir_threshold_edit"
+const val RESERVOIR_THRESHOLD_OUTCOME_TEST_TAG = "reservoir_threshold_outcome"
+const val RESERVOIR_THRESHOLD_FIELD_TEST_TAG = "reservoir_threshold_field"
+
+/** DEVICE mode: the device's LOW threshold and its change (SET_CONFIG, verified by read-back). */
+@Composable
+private fun ThresholdRow(state: ReservoirUiState.Ready, busy: Boolean, outcome: ThresholdOutcome?, onEdit: () -> Unit) = SectionCard {
+    Text(stringResource(R.string.threshold_title), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+    Text(
+        if (state.thresholdFromDevice) stringResource(R.string.threshold_device_value, state.lowThresholdPercent)
+        else stringResource(R.string.threshold_not_read, state.lowThresholdPercent),
+        style = MaterialTheme.typography.bodyMedium,
+    )
+    OutlinedButton(
+        onClick = onEdit,
+        enabled = !state.refillNeedsConnection && !busy,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(RESERVOIR_THRESHOLD_EDIT_TEST_TAG),
+    ) { Text(stringResource(R.string.threshold_change)) }
+    if (state.refillNeedsConnection) {
+        Text(stringResource(R.string.threshold_needs_connection), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (busy) {
+        Text(stringResource(R.string.threshold_saving), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    } else if (outcome != null) {
+        Text(
+            stringResource(
+                when (outcome) {
+                    ThresholdOutcome.DONE -> R.string.threshold_done
+                    ThresholdOutcome.UNCERTAIN -> R.string.threshold_uncertain
+                    ThresholdOutcome.NOT_SENT -> R.string.threshold_not_sent
+                    ThresholdOutcome.AWAITING_VERIFICATION -> R.string.threshold_awaiting
+                    ThresholdOutcome.REJECTED -> R.string.threshold_rejected
+                    ThresholdOutcome.NOT_ACCEPTED -> R.string.threshold_not_accepted
+                },
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            color = when (outcome) {
+                ThresholdOutcome.DONE -> MaterialTheme.colorScheme.primary
+                ThresholdOutcome.UNCERTAIN -> DispenserTheme.extendedColors.warning
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            modifier = Modifier.testTag(RESERVOIR_THRESHOLD_OUTCOME_TEST_TAG).semantics { liveRegion = LiveRegionMode.Polite },
+        )
+    }
+}
+
+@Composable
+private fun ThresholdDialog(initial: String, parse: (String) -> Int?, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var text by rememberSaveable { mutableStateOf(initial) }
+    val valid = parse(text) != null
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.threshold_dialog_title)) },
+        text = {
+            Column(Modifier.imePadding(), verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text(stringResource(R.string.threshold_dialog_label)) },
+                    suffix = { Text("%") },
+                    singleLine = true,
+                    isError = !valid,
+                    supportingText = { Text(stringResource(if (valid) R.string.threshold_dialog_hint else R.string.threshold_dialog_error)) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth().testTag(RESERVOIR_THRESHOLD_FIELD_TEST_TAG),
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = { onConfirm(text) }, enabled = valid) { Text(stringResource(R.string.threshold_save)) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.dialog_cancel)) } },
+    )
 }
 
 @Composable

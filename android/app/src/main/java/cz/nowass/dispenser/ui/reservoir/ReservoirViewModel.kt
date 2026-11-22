@@ -46,6 +46,8 @@ sealed interface ReservoirUiState {
         val refillNeedsConnection: Boolean = false,
         /** DEVICE mode: capacity and current amount can be set (initialization / capacity change). */
         val configurable: Boolean = false,
+        /** DEVICE mode: [lowThresholdPercent] is the device's own value (false: the app default, not read yet). */
+        val thresholdFromDevice: Boolean = false,
     ) : ReservoirUiState
 }
 
@@ -62,6 +64,9 @@ enum class RefillOutcome {
     /** Refused by the phone (device limits, capacity unknown); nothing was sent. */
     NOT_ACCEPTED,
 }
+
+/** Outcome of a LOW-threshold change (DEVICE mode). */
+enum class ThresholdOutcome { DONE, UNCERTAIN, NOT_SENT, AWAITING_VERIFICATION, REJECTED, NOT_ACCEPTED }
 
 enum class RefillError { INVALID, NOT_POSITIVE, TOO_PRECISE, ABOVE_CAPACITY, NOT_ACTIVE, OUT_OF_RANGE }
 
@@ -81,11 +86,15 @@ class ReservoirViewModel(
         repository.observeDevice(),
         repository.observeSchedules(),
         repository.observeReservoir(),
-    ) { device, schedules, reservoir ->
+        repository.observeLowStockPercent(),
+    ) { device, schedules, reservoir, deviceThreshold ->
+        // DEVICE mode: the device's own threshold decides LOW (as the firmware's notification does)
+        val policy = deviceThreshold?.takeIf { it in 0..100 }?.let { LowStockPolicy(it) } ?: lowStock
         ReservoirUiState.Ready(
             reservoir = reservoir,
-            status = reservoir?.status(lowStock),
-            lowThresholdPercent = lowStock.thresholdPercent,
+            status = reservoir?.status(policy),
+            lowThresholdPercent = policy.thresholdPercent,
+            thresholdFromDevice = deviceThreshold != null,
             prediction = reservoir?.let { predictor.predict(it, device.now, schedules) },
             zone = device.zone,
             isDemo = device.source == DataSource.DEMO,
@@ -95,6 +104,36 @@ class ReservoirViewModel(
             configurable = device.source == DataSource.DEVICE,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReservoirUiState.Loading)
+
+    init {
+        viewModelScope.launch { repository.refreshReservoirSettings() } // DEVICE: the live threshold
+    }
+
+    private val _thresholdOutcome = MutableStateFlow<ThresholdOutcome?>(null)
+    val thresholdOutcome: StateFlow<ThresholdOutcome?> = _thresholdOutcome.asStateFlow()
+    private val _thresholdBusy = MutableStateFlow(false)
+    val thresholdBusy: StateFlow<Boolean> = _thresholdBusy.asStateFlow()
+
+    /** A LOW threshold (whole percent 1–99, as the firmware accepts); null = invalid. */
+    fun parseThreshold(text: String): Int? = text.trim().toIntOrNull()?.takeIf { it in 1..99 }
+
+    /** DEVICE mode: one SET_CONFIG of the LOW threshold; ignored while one is in flight. */
+    fun setLowStock(text: String) {
+        val p = parseThreshold(text) ?: return
+        if (!_thresholdBusy.compareAndSet(false, true)) return
+        _thresholdOutcome.value = null
+        viewModelScope.launch {
+            _thresholdOutcome.value = when (val r = repository.setLowStockPercent(p)) {
+                is CommandResult.Done -> ThresholdOutcome.DONE
+                CommandResult.Uncertain -> ThresholdOutcome.UNCERTAIN
+                CommandResult.AwaitingVerification -> ThresholdOutcome.AWAITING_VERIFICATION
+                is CommandResult.DeviceRejected -> ThresholdOutcome.REJECTED
+                CommandResult.NotAccepted -> ThresholdOutcome.NOT_ACCEPTED
+                CommandResult.NotSent, CommandResult.NotActive, CommandResult.AlreadyActive, is CommandResult.Rejected -> ThresholdOutcome.NOT_SENT
+            }
+            _thresholdBusy.value = false
+        }
+    }
 
     private val _refillDone = MutableStateFlow(false)
     val refillDone: StateFlow<Boolean> = _refillDone.asStateFlow()

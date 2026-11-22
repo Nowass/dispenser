@@ -75,6 +75,20 @@ interface DispenserRepository {
      */
     fun observeScheduleFreshness(): Flow<Freshness> = flowOf(Freshness.NotApplicable)
 
+    /** DEVICE mode: the device's own LOW threshold (config `low_stock_percent`) as last read; null = not read / DEMO. */
+    fun observeLowStockPercent(): Flow<Int?> = flowOf(null)
+
+    /** DEVICE mode: reads the device configuration (the LOW threshold) when a session is live; DEMO: no-op. */
+    suspend fun refreshReservoirSettings() {}
+
+    /**
+     * DEVICE mode: sets the device's LOW threshold (1–99 % of the capacity) through SET_CONFIG with only
+     * the low-stock field selected, after a live configuration read (its revision), journaled and
+     * verified by read-back. The firmware re-evaluates the reservoir LOW notification at once. Nothing
+     * else changes (no refill, no schedule, no readiness). DEMO: [CommandResult.NotActive].
+     */
+    suspend fun setLowStockPercent(percent: Int): CommandResult = CommandResult.NotActive
+
     /** DEVICE mode: the battery card can request a new measurement ([refreshBattery]). DEMO: false. */
     val batteryRefreshAvailable: Boolean get() = false
 

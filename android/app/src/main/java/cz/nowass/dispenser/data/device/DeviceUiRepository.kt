@@ -5,6 +5,7 @@ import cz.nowass.dispenser.data.CommandResult
 import cz.nowass.dispenser.data.DispenserRepository
 import cz.nowass.dispenser.data.ScheduleWriteResult
 import cz.nowass.dispenser.device.ops.BatteryRecord
+import cz.nowass.dispenser.device.ops.ConfigRecord
 import cz.nowass.dispenser.device.ops.BatteryState
 import cz.nowass.dispenser.device.ops.DeviceErrorCode
 import cz.nowass.dispenser.device.ops.LocalRefusal
@@ -73,6 +74,25 @@ class DeviceUiRepository(
 
     override val historyAvailable: Boolean get() = false
     override val batteryRefreshAvailable: Boolean get() = true
+
+    override fun observeLowStockPercent(): Flow<Int?> =
+        device.config().map { it.valueOrNull?.lowStockPercent }.distinctUntilChanged()
+
+    override suspend fun refreshReservoirSettings() {
+        if (!blocked) device.refreshConfig()
+    }
+
+    override suspend fun setLowStockPercent(percent: Int): CommandResult {
+        if (blocked) return CommandResult.NotSent
+        if (percent !in 1..99) return CommandResult.NotAccepted
+        // the live revision first (SET_CONFIG compares it); a stale value is never written blindly
+        val current = when (val r = device.refreshConfig()) {
+            is OpResult.Ok -> r.value
+            else -> return commandOf(r)
+        }
+        if (current.lowStockPercent == percent) return CommandResult.Done(newEvents = 0)
+        return commandOf(device.setConfig(current.revision, ConfigRecord.F_LOW_STOCK, current.copy(lowStockPercent = percent)))
+    }
 
     override suspend fun refreshBattery(): BatteryRefreshResult = when (val r = device.refreshBattery()) {
         is OpResult.Ok -> if (r.value.state == BatteryState.UNSUPPORTED) BatteryRefreshResult.Unsupported else BatteryRefreshResult.Refreshed
@@ -164,7 +184,7 @@ class DeviceUiRepository(
     override suspend fun configureReservoir(capacityUl: Long, remainingUl: Long): CommandResult =
         if (blocked) CommandResult.NotSent else commandOf(device.refill(remainingUl, capacityUl))
 
-    private fun commandOf(r: OpResult<StatusRecord>): CommandResult = when (r) {
+    private fun commandOf(r: OpResult<*>): CommandResult = when (r) {
         is OpResult.Ok -> CommandResult.Done(newEvents = 0)
         is OpResult.Uncertain -> CommandResult.Uncertain
         is OpResult.NotSent -> CommandResult.NotSent
