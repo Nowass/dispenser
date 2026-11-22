@@ -423,6 +423,18 @@ static void cmd(char *line)
         emit("{\"ok\":true,\"status\":%d,", (int)s);
         emit_state();
         emit("}");
+    } else if (strcmp(c, "battery") == 0 && argc >= 3) {
+        /* battery <low|ok|unknown> <mV>: an observation as the application classifies it */
+        dsp_battery_obs_t o = {strcmp(argv[1], "low") == 0  ? DSP_BATTERY_LOW
+                               : strcmp(argv[1], "ok") == 0 ? DSP_BATTERY_OK
+                                                            : DSP_BATTERY_UNKNOWN,
+                               (uint32_t)atoi(argv[2])};
+        uint32_t before = n.s.next_seq;
+        dsp_notify_status_t s = dsp_notify_observe_battery(&n, o, nclock());
+        emit("{\"ok\":true,\"status\":%d,\"seq\":%lu,", (int)s,
+             (unsigned long)(n.s.next_seq != before ? n.s.next_seq - 1 : 0));
+        emit_state();
+        emit("}");
     } else if (strcmp(c, "tick") == 0) {
         dsp_notify_status_t s = dsp_notify_tick(&n, nclock());
         emit("{\"ok\":true,\"status\":%d,", (int)s);

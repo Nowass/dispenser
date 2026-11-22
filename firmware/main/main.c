@@ -45,6 +45,11 @@
 #include "dsp_esp_notify.h"
 #include "dsp_https_transport.h"
 #endif
+#if CONFIG_DSP_NOTIFY_HTTPS_DIAGNOSTIC_BATTERY_EVENT
+#include "dsp_esp_battery.h"
+#include "dsp_notify.h"
+#include "esp_random.h"
+#endif
 
 #if CONFIG_DSP_APP_RUNTIME
 #include "dsp_app.h"
@@ -147,8 +152,67 @@ static void time_sync_diagnostic(void)
  * the health URL with the full certificate bundle. It never posts a notification, never
  * touches the dispenser NVS namespace and logs outcomes only (no SSID, passphrase or
  * token). Without provisioned credentials the radio is never started. */
+#if CONFIG_DSP_NOTIFY_HTTPS_DIAGNOSTIC_BATTERY_EVENT
+/* One BATTERY_LOW test event through the production transport, then the identical retry. */
+static const char *tx_name(dsp_tx_result_t r)
+{
+    return r == DSP_TX_ACK ? "ACK" : r == DSP_TX_UNCERTAIN ? "UNCERTAIN" : r == DSP_TX_REJECTED ? "REJECTED" : "FAILED";
+}
+static void battery_event_diagnostic(dsp_https_transport_t *https, uint64_t device_id, dsp_batt_sample_t b,
+                                     dsp_utc_t now)
+{
+    if (b.state != DSP_BATT_VALID) {
+        ESP_LOGW(TAG, "battery event diagnostic: no VALID battery measurement (state %u): nothing sent",
+                 (unsigned)b.state);
+        return;
+    }
+    dsp_note_t note;
+    memset(&note, 0, sizeof note);
+    note.seq = 1;
+    note.type = DSP_NOTE_BATTERY_LOW;
+    note.severity = DSP_SEV_WARNING;
+    note.condition = DSP_COND_BATTERY_LOW;
+    note.flags = DSP_NOTE_F_TIME_VALID;
+    note.created_at = now;
+    note.value = b.battery_mv;
+    note.value2 = 0;
+    uint32_t epoch = 0xD1A60000u | (esp_random() & 0xFFFFu);
+    if ((epoch & 0xFFFFu) == 0) {
+        epoch |= 1u;
+    }
+    char id[DSP_NOTIFY_ID_BUF_LEN];
+    (void)dsp_notify_format_id(device_id, epoch, note.seq, id, sizeof id);
+    if (!dsp_https_begin(https, 60000u)) {
+        ESP_LOGW(TAG, "battery event diagnostic: HTTPS session could not start: nothing sent");
+        return;
+    }
+    dsp_notify_transport_t tx = dsp_https_transport(https);
+    for (uint16_t attempt = 1; attempt <= 2; attempt++) {
+        note.attempts = attempt;
+        dsp_tx_detail_t d;
+        memset(&d, 0, sizeof d);
+        dsp_tx_result_t r = tx.send(tx.ctx, &note, epoch, &d);
+        ESP_LOGI(TAG, "battery event diagnostic: %s attempt %u: %s http=%u error=%u diag=0x%02x phase=%u (%u mV)",
+                 id, (unsigned)attempt, tx_name(r), (unsigned)d.http_status, (unsigned)d.error,
+                 (unsigned)d.diag, (unsigned)d.phase, (unsigned)note.value);
+        if (r != DSP_TX_ACK && r != DSP_TX_UNCERTAIN) {
+            break; /* FAILED / REJECTED: no blind retry */
+        }
+    }
+    dsp_https_end(https);
+}
+#endif
+
 static void notify_https_diagnostic(void)
 {
+#if CONFIG_DSP_NOTIFY_HTTPS_DIAGNOSTIC_BATTERY_EVENT
+    /* measured first, before the radio starts (as the application does) */
+    const dsp_battery_port_t *bp = dsp_esp_battery_port();
+    dsp_batt_sample_t batt = {DSP_BATT_NOT_MEASURED, 0};
+    if (bp != NULL && bp->measure != NULL) {
+        batt = dsp_batt_sanitize(bp->measure(bp->ctx));
+    }
+#endif
     bool secrets = dsp_esp_secrets_init();
     uint64_t device_id = 0;
     bool have_id = dsp_esp_device_id(&device_id);
@@ -190,6 +254,13 @@ static void notify_https_diagnostic(void)
         bool probed = dsp_esp_http_probe(CONFIG_DSP_NOTIFY_HEALTH_URL, &o);
         ESP_LOGI(TAG, "https diagnostic: probe=%d phase=%d status=%u", (int)probed, (int)o.phase,
                  (unsigned)o.status);
+#if CONFIG_DSP_NOTIFY_HTTPS_DIAGNOSTIC_BATTERY_EVENT
+        if (token) {
+            battery_event_diagnostic(&https, device_id, batt, port.now(port.ctx));
+        } else {
+            ESP_LOGW(TAG, "battery event diagnostic: no API token provisioned: nothing sent");
+        }
+#endif
     } else {
         ESP_LOGI(TAG, "https diagnostic: no TLS probe (wifi=%d trusted=%d): nothing sent",
                  (int)r.wifi, (int)trusted);
@@ -335,6 +406,12 @@ static void app_runtime(void)
     s_cfg.random = esp_random();
     s_cfg.max_sleep_s = CONFIG_DSP_APP_MAX_SLEEP_S;
     s_cfg.battery = dsp_esp_battery_port(); /* NULL unless CONFIG_DSP_BATTERY_ADC_GPIO >= 0 */
+#if CONFIG_DSP_BATTERY_ADC_GPIO >= 0
+    _Static_assert(CONFIG_DSP_BATTERY_LOW_MV < CONFIG_DSP_BATTERY_RECOVER_MV,
+                   "CONFIG_DSP_BATTERY_RECOVER_MV must be greater than CONFIG_DSP_BATTERY_LOW_MV");
+    s_cfg.battery_low_mv = (uint16_t)CONFIG_DSP_BATTERY_LOW_MV;
+    s_cfg.battery_recover_mv = (uint16_t)CONFIG_DSP_BATTERY_RECOVER_MV;
+#endif
 #if CONFIG_DSP_BLE_SECURITY
     /* C2: the libsodium RNG implementation is registered before any libsodium use; sodium_init
      * runs only once the hardware entropy source is active (dsp_esp_rng_ready). Without the

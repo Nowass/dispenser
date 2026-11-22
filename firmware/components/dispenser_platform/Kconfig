@@ -73,4 +73,28 @@ config DSP_BATTERY_DIVIDER_X1000
         (R1 + R2) / R2 x 1000. 2000 for two equal resistors (1 MOhm / 1 MOhm).
         May be trimmed after a comparison with a multimeter at BAT+.
 
+config DSP_BATTERY_LOW_MV
+    int "BATTERY_LOW notification: episode opens below (measured mV)"
+    range 2500 4500
+    default 3900
+    depends on DSP_BATTERY_ADC_GPIO >= 0
+    help
+        Measured battery voltage (as reported by the firmware, not the app's
+        percentage) below which a BATTERY_LOW notification episode opens,
+        confirmed by a second measurement in the same wake. Default 3900 mV:
+        conservative for the temporary 5 V relay module powered from the 1S
+        cell (a 5 V coil typically needs >= 3.75 V to pull in, plus sag while
+        the motor starts). BENCH PROPOSAL: validate the relay pull-in voltage.
+
+config DSP_BATTERY_RECOVER_MV
+    int "BATTERY_LOW notification: episode closes at or above (measured mV)"
+    range 2600 4600
+    default 4050
+    depends on DSP_BATTERY_ADC_GPIO >= 0
+    help
+        Hysteresis: an open BATTERY_LOW episode ends only when the measured
+        voltage reaches this value (confirmed by a second measurement), which
+        in practice needs a charge. Must be greater than DSP_BATTERY_LOW_MV
+        (build-time check).
+
 endmenu

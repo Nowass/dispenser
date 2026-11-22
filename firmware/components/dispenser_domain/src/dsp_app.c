@@ -149,12 +149,15 @@ static void stage_clock(dsp_app_t *app)
     stage_clock_eval(app);
 }
 
+static void battery_observe(dsp_app_t *app);
+
 static void stage_observe(dsp_app_t *app)
 {
     trace(app, DSP_STAGE_OBSERVE);
     (void)dsp_notify_observe_time(&app->notify, &app->tk, raw_now(app));
     (void)dsp_notify_tick(&app->notify, notify_clock(app));
     (void)dsp_dosing_observe_reservoir(&app->dosing, notify_clock(app));
+    battery_observe(app);
 }
 
 /* ---- Battery telemetry (runtime only) ---------------------------------------------------- */
@@ -179,6 +182,70 @@ static void battery_measure(dsp_app_t *app)
     app->batt_ms = mono_or_0(app);
     app->rep.battery_reads++;
     app->rep.battery = app->batt;
+}
+
+/* Effective BATTERY_LOW thresholds: the configured pair when low < recover inside the credible
+ * window, else the defaults. */
+static void battery_thresholds(const dsp_app_t *app, uint32_t *low, uint32_t *recover)
+{
+    uint32_t l = app->cfg->battery_low_mv;
+    uint32_t r = app->cfg->battery_recover_mv;
+    if (l == 0 && r == 0) {
+        l = DSP_APP_BATTERY_LOW_MV_DEFAULT;
+        r = DSP_APP_BATTERY_RECOVER_MV_DEFAULT;
+    }
+    if (l < DSP_BATT_MIN_MV || r > DSP_BATT_MAX_MV || l >= r) {
+        l = DSP_APP_BATTERY_LOW_MV_DEFAULT;
+        r = DSP_APP_BATTERY_RECOVER_MV_DEFAULT;
+    }
+    *low = l;
+    *recover = r;
+}
+
+/* Hysteresis on the measured voltage (never the app's percentage estimate): with no open episode
+ * LOW below the low threshold, else OK; with an open episode OK at or above the recovery
+ * threshold, else still LOW (refreshes the not yet sent payload in RAM only). Anything but a
+ * VALID measurement is UNKNOWN: nothing changes, and no voltage is ever invented. */
+static dsp_battery_obs_t battery_classify(const dsp_app_t *app, bool episode)
+{
+    dsp_battery_obs_t o = {DSP_BATTERY_UNKNOWN, 0};
+    if (!app->batt_measured || app->batt.state != DSP_BATT_VALID || app->batt.battery_mv == 0) {
+        return o;
+    }
+    uint32_t low = 0, recover = 0;
+    battery_thresholds(app, &low, &recover);
+    uint32_t mv = app->batt.battery_mv;
+    o.millivolts = mv;
+    o.status = episode ? (mv >= recover ? DSP_BATTERY_OK : DSP_BATTERY_LOW)
+                       : (mv < low ? DSP_BATTERY_LOW : DSP_BATTERY_OK);
+    return o;
+}
+
+/* BATTERY_LOW through the existing notification engine (episode, 7-day reminder, queue, IDs,
+ * delivery with the next regular sync session). Runs in OBSERVE, before any pump run and before
+ * Wi-Fi. A change of the episode state (opening or closing) needs a second, independent
+ * measurement that agrees; otherwise the wake reports UNKNOWN and nothing changes, so one
+ * disturbed measurement can neither open nor close an episode. The engine writes only when the
+ * episode state changes. */
+static void battery_observe(dsp_app_t *app)
+{
+    bool episode = (app->notify.s.cond[DSP_COND_BATTERY_LOW].flags & DSP_COND_F_ACTIVE) != 0;
+    dsp_battery_obs_t o = battery_classify(app, episode);
+    bool change = (o.status == DSP_BATTERY_LOW && !episode) || (o.status == DSP_BATTERY_OK && episode);
+    if (change) {
+        battery_measure(app); /* confirmation (no pump has run in this wake yet) */
+        dsp_battery_obs_t c = battery_classify(app, episode);
+        if (c.status == o.status) {
+            o = c; /* the confirming voltage is reported */
+        } else {
+            o.status = DSP_BATTERY_UNKNOWN;
+            o.millivolts = 0;
+        }
+    }
+    app->rep.battery_obs = (uint8_t)o.status;
+    if (o.status != DSP_BATTERY_UNKNOWN) {
+        (void)dsp_notify_observe_battery(&app->notify, o, notify_clock(app));
+    }
 }
 
 /* The end of a pump run attempt: no battery measurement within DSP_APP_BATTERY_PUMP_QUIET_MS. */

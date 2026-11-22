@@ -1,0 +1,12 @@
+# BATTERY_LOW hardware end-to-end DIAGNOSTIC image (not an application image). Use after
+# sdkconfig.defaults and sdkconfig.battery.defaults:
+#   -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.battery.defaults;sdkconfig.batterynotify.defaults"
+#
+# At boot: one battery measurement (before the radio), Wi-Fi + SNTP with the provisioned nvs_sec
+# credentials, the TLS health probe, then ONE BATTERY_LOW event (value = measured mV) POSTed to
+# CONFIG_DSP_NOTIFY_URL (default: the PRODUCTION Worker) and the identical retry (expected 201,
+# then 200 duplicate). No application runtime: no dosing, no BLE, the pump GPIO and the dispenser
+# NVS namespace are never touched. It writes ONE row to that Worker's D1 and causes ONE e-mail:
+# flash only with the owner's explicit approval, then restore the application image.
+CONFIG_DSP_NOTIFY_HTTPS_DIAGNOSTIC=y
+CONFIG_DSP_NOTIFY_HTTPS_DIAGNOSTIC_BATTERY_EVENT=y

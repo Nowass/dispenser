@@ -28,7 +28,7 @@ config DSP_TIME_SYNC_DIAGNOSTIC
         adapters. Off by default.
 
 config DSP_NOTIFY_HTTPS_DIAGNOSTIC
-    bool "HTTPS notification transport diagnostic at boot (no event is sent)"
+    bool "HTTPS notification transport diagnostic at boot (no event unless the option below)"
     default n
     help
         Reads the developer-provisioned "nvs_sec" partition (read-only), runs one
@@ -38,6 +38,23 @@ config DSP_NOTIFY_HTTPS_DIAGNOSTIC
         credentials, SSIDs or tokens. Never posts a notification, never writes
         the dispenser NVS namespace, never doses. Without provisioned
         credentials the radio is never started. Off by default.
+
+config DSP_NOTIFY_HTTPS_DIAGNOSTIC_BATTERY_EVENT
+    bool "...and send ONE BATTERY_LOW test event (writes the endpoint's D1, sends an e-mail)"
+    default n
+    depends on DSP_NOTIFY_HTTPS_DIAGNOSTIC && DSP_BATTERY_ADC_GPIO >= 0
+    help
+        Hardware end-to-end check of ESP32-C3 -> Wi-Fi -> TLS -> Worker -> D1 -> e-mail
+        for BATTERY_LOW. Measures the battery once (before the radio starts); only with
+        a VALID voltage, a trusted clock and a provisioned token it POSTs one protocol-v1
+        BATTERY_LOW event (value = the measured mV, value2 = 0) to DSP_NOTIFY_URL through
+        the production HTTPS transport, then repeats the identical event (same ID,
+        attempt 2) to prove idempotency (expected 201, then 200 duplicate). The event
+        uses a separate diagnostic storage epoch (0xD1A6xxxx, random low half), so its ID
+        never collides with the device's real notification queue. Nothing is stored on
+        the device; the dispenser NVS namespace, the pump GPIO and dosing are untouched.
+        DSP_NOTIFY_URL defaults to PRODUCTION: building this option is an explicit
+        decision to write one event to that D1 and send one e-mail. Off by default.
 
 config DSP_APP_RUNTIME
     bool "Application cycle with SIMULATED pump and deep sleep (M1.9c, opt-in)"

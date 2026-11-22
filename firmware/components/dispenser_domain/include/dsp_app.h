@@ -234,7 +234,19 @@ typedef struct {
      * older than DSP_APP_BATTERY_REFRESH_MS (never within DSP_APP_BATTERY_PUMP_QUIET_MS of a pump
      * run). Runtime memory only. */
     const dsp_battery_port_t *battery;
+    /* BATTERY_LOW notification thresholds in measured battery mV (0 = defaults below). An episode
+     * opens below battery_low_mv and closes at or above battery_recover_mv (hysteresis); a pair
+     * that is not low < recover inside the credible window falls back to the defaults. */
+    uint16_t battery_low_mv;
+    uint16_t battery_recover_mv;
 } dsp_app_config_t;
+
+/* Defaults (bench proposal, see firmware/README.md "Battery voltage"): the temporary 5 V relay
+ * module on the 1S cell is the limiting part (a 5 V coil typically needs >= 75 % = 3.75 V to pull
+ * in, the cell also sags while the motor starts), so LOW is raised well above the cell's own
+ * limit; recovery needs a charge (rest recovery after a load stays below it). */
+#define DSP_APP_BATTERY_LOW_MV_DEFAULT 3900u
+#define DSP_APP_BATTERY_RECOVER_MV_DEFAULT 4050u
 
 typedef enum {
     DSP_BLE_END_NONE = 0,
@@ -304,6 +316,7 @@ typedef struct {
     /* Battery telemetry: measurements taken in this wake and the latest one. */
     size_t battery_reads;
     dsp_batt_sample_t battery;
+    uint8_t battery_obs;        /* dsp_battery_status_t fed to the notification engine */
     size_t trace_len;
     uint8_t trace[DSP_APP_TRACE_MAX]; /* dsp_app_stage_t in execution order */
 } dsp_app_report_t;

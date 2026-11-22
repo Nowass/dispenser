@@ -183,6 +183,14 @@ static const dsp_wifi_credentials_provider_t CREDS = {NULL, creds_get};
 
 static bool http_ack = true;
 static bool http_in_session;
+/* Receiver memory like the Worker's D1 (idempotency by event ID) and BATTERY_LOW bookkeeping. */
+#define HTTP_IDS 64
+static char http_ids[HTTP_IDS][DSP_NOTIFY_ID_BUF_LEN];
+static int http_id_count;             /* distinct stored events ("D1 rows") */
+static int http_lose_next;            /* > 0: accept, then lose the response (UNCERTAIN) */
+static int battery_posts;             /* POSTs carrying a BATTERY_LOW event */
+static int battery_stored;            /* distinct BATTERY_LOW events stored */
+static char battery_last_body[512];   /* the last BATTERY_LOW body sent */
 static int http_posts, http_acks;
 static int delivered_interrupted, delivered_dosing_errors;
 /* Monotonic clock: true elapsed time (never affected by device clock steps) plus the HTTP
@@ -235,9 +243,28 @@ static void port_post(void *ctx, const char *body, size_t len, const char *token
     if (strstr(body, "interrupted") != NULL || strstr(body, "INTERRUPTED") != NULL) {
         delivered_interrupted++;
     }
-    int w = snprintf(out->body, sizeof out->body, "{\"status\":\"accepted\",\"event_id\":\"%s\"}", id);
+    bool battery = strstr(body, "\"BATTERY_LOW\"") != NULL;
+    if (battery) {
+        battery_posts++;
+        snprintf(battery_last_body, sizeof battery_last_body, "%s", body);
+    }
+    bool known = false;
+    for (int i = 0; i < http_id_count; i++) {
+        known |= strcmp(http_ids[i], id) == 0;
+    }
+    if (!known && http_id_count < HTTP_IDS) {
+        snprintf(http_ids[http_id_count++], sizeof http_ids[0], "%s", id);
+        battery_stored += battery;
+    }
+    if (http_lose_next > 0) {
+        http_lose_next--;
+        out->phase = DSP_HTTP_NO_RESPONSE; /* stored, but the acknowledgement never arrives */
+        return;
+    }
+    int w = snprintf(out->body, sizeof out->body, "{\"status\":\"%s\",\"event_id\":\"%s\"}",
+                     known ? "duplicate" : "accepted", id);
     out->body_len = (uint16_t)(w > 0 ? w : 0);
-    out->status = 201;
+    out->status = known ? 200 : 201;
     http_acks++;
 }
 static void port_close(void *ctx)
@@ -260,6 +287,7 @@ static fake_kv_t kv;
 static dsp_kv_t proxy;
 static uint32_t cfg_prev_remaining, cfg_new_remaining;
 static bool fail_notify_sets;
+static int notify_sets; /* "notify" record writes (flash wear oracle) */
 
 static dsp_kv_status_t px_get(void *ctx, const char *key, uint8_t *buf, size_t cap, size_t *len)
 {
@@ -278,8 +306,11 @@ static dsp_kv_status_t px_set(void *ctx, const char *key, const uint8_t *data, s
             cfg_new_remaining = nw.reservoir_remaining_ul;
         }
     }
-    if (fail_notify_sets && strcmp(key, "notify") == 0) {
-        return DSP_KV_ERR_WRITE;
+    if (strcmp(key, "notify") == 0) {
+        if (fail_notify_sets) {
+            return DSP_KV_ERR_WRITE;
+        }
+        notify_sets++;
     }
     if (cut_point()) {
         if (cut_after) {
@@ -1085,8 +1116,11 @@ static void world(void)
     http_ack = true;
     http_in_session = false;
     http_posts = http_acks = delivered_interrupted = delivered_dosing_errors = 0;
+    http_id_count = http_lose_next = battery_posts = battery_stored = 0;
+    battery_last_body[0] = '\0';
     mono_ms = 0;
     fail_notify_sets = false;
+    notify_sets = 0;
     memset(&pump, 0, sizeof pump);
     memset(&gp, 0, sizeof gp);
     pump.off_confirmable = true;
@@ -2593,6 +2627,279 @@ static void test_gpio_power_cut_while_active(void)
     common_invariants(); /* incl. the duplicate oracle */
 }
 
+/* ==== BATTERY_LOW notifications (battery telemetry -> existing notification engine) ======== */
+
+static struct {
+    uint16_t mv;               /* the cell's voltage, measured as VALID */
+    dsp_batt_sample_t once[8]; /* overrides for the next measurements (glitches, failures) */
+    int nonce;
+    int calls;
+    int violations;            /* measured while the pump ran or Wi-Fi was on */
+} bat;
+static dsp_batt_sample_t bat_measure(void *ctx)
+{
+    (void)ctx;
+    bat.calls++;
+    if (pump_running || wifi_on) {
+        bat.violations++;
+    }
+    if (bat.nonce > 0) {
+        dsp_batt_sample_t s = bat.once[0];
+        bat.nonce--;
+        memmove(&bat.once[0], &bat.once[1], sizeof bat.once[0] * (size_t)bat.nonce);
+        return s;
+    }
+    dsp_batt_sample_t v = {DSP_BATT_VALID, bat.mv};
+    return v;
+}
+static const dsp_battery_port_t BAT = {NULL, bat_measure};
+static void bat_once(uint8_t state, uint16_t mv)
+{
+    dsp_batt_sample_t s = {state, mv};
+    bat.once[bat.nonce++] = s;
+}
+static dsp_notify_state_t durable_notify(void)
+{
+    side_open();
+    dsp_notify_state_t ns;
+    memset(&ns, 0, sizeof ns);
+    DSP_CHECK_EQ_INT(DSP_STORAGE_OK, dsp_storage_load_notify(&side, &ns));
+    return ns;
+}
+static bool battery_episode(void)
+{
+    return (durable_notify().cond[DSP_COND_BATTERY_LOW].flags & DSP_COND_F_ACTIVE) != 0;
+}
+static void battery_world(uint16_t mv)
+{
+    world();
+    memset(&bat, 0, sizeof bat);
+    bat.mv = mv;
+    CFG.battery = &BAT; /* defaults: LOW < 3900 mV, recovery >= 4050 mV */
+    boot_and_provision(CAP, 60, true);
+}
+/* A timer wake shortly after the previous one (no sync due): only the measurement matters. */
+static void quick_wake(void)
+{
+    g_true += 10 * 60;
+    DSP_CHECK(wake(DSP_CAUSE_TIMER));
+}
+
+static void test_battery_low_episode_and_delivery(void)
+{
+    /* 1. healthy battery: nothing queued, nothing sent */
+    battery_world(4100);
+    run_until(T0 + 2 * DAY);
+    DSP_CHECK_EQ_INT(0, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+    DSP_CHECK_EQ_INT(0, battery_posts);
+    DSP_CHECK_EQ_INT(DSP_BATTERY_OK, rep.battery_obs);
+    DSP_CHECK(!battery_episode());
+
+    /* 2. the voltage falls below LOW: one event, confirmed by a second measurement */
+    bat.mv = 3850;
+    int calls = bat.calls;
+    quick_wake();
+    DSP_CHECK_EQ_INT(DSP_BATTERY_LOW, rep.battery_obs);
+    DSP_CHECK_EQ_INT(calls + 2, bat.calls); /* wake measurement + confirmation */
+    DSP_CHECK(battery_episode());
+    DSP_CHECK_EQ_INT(1, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+
+    /* 3. repeated LOW wakes: no new episode and no flash write while nothing changes */
+    int sets = notify_sets;
+    calls = bat.calls;
+    for (int i = 0; i < 4; i++) {
+        quick_wake();
+        DSP_CHECK_EQ_INT(DSP_BATTERY_LOW, rep.battery_obs);
+    }
+    DSP_CHECK_EQ_INT(calls + 4, bat.calls); /* one measurement per wake again */
+    DSP_CHECK_EQ_INT(sets, notify_sets);
+    DSP_CHECK_EQ_INT(1, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+
+    /* delivered with the next regular sync session (no extra wake for it) */
+    run_until(T0 + 4 * DAY);
+    DSP_CHECK_EQ_INT(1, battery_stored);
+    DSP_CHECK(battery_posts >= 1);
+    DSP_CHECK_EQ_INT(0, durable_events(DSP_NOTE_BATTERY_LOW, 0)); /* acknowledged: removed */
+    DSP_CHECK(strstr(battery_last_body, "\"severity\":\"WARNING\"") != NULL);
+    DSP_CHECK(strstr(battery_last_body, "\"value\":3850") != NULL);
+    DSP_CHECK(strstr(battery_last_body, "\"value2\":0") != NULL);
+    DSP_CHECK(strstr(battery_last_body, "\"reminder_no\":0") != NULL);
+    DSP_CHECK(battery_episode()); /* still low: the episode stays open */
+
+    /* 5. near the recovery threshold: hysteresis keeps the episode open */
+    bat.mv = 4000;
+    quick_wake();
+    DSP_CHECK(battery_episode());
+    bat.mv = 4049;
+    quick_wake();
+    DSP_CHECK(battery_episode());
+    /* a single high reading is not confirmed: still open */
+    bat.mv = 3990;
+    bat_once(DSP_BATT_VALID, 4150);
+    quick_wake();
+    DSP_CHECK_EQ_INT(DSP_BATTERY_UNKNOWN, rep.battery_obs);
+    DSP_CHECK(battery_episode());
+    /* confirmed recovery (charged): the episode closes, no event */
+    bat.mv = 4100;
+    quick_wake();
+    DSP_CHECK_EQ_INT(DSP_BATTERY_OK, rep.battery_obs);
+    DSP_CHECK(!battery_episode());
+    DSP_CHECK_EQ_INT(0, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+
+    /* 6. a later genuine drop opens a NEW episode with a new event ID */
+    bat.mv = 3880;
+    quick_wake();
+    DSP_CHECK(battery_episode());
+    DSP_CHECK_EQ_INT(1, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+    run_until(g_true + 2 * DAY);
+    DSP_CHECK_EQ_INT(2, battery_stored);
+    DSP_CHECK(strstr(battery_last_body, "\"value\":3880") != NULL);
+    DSP_CHECK_EQ_INT(0, bat.violations);
+    common_invariants();
+}
+
+static void test_battery_low_noise_and_invalid_data(void)
+{
+    /* 4. noise near the LOW threshold: one disturbed measurement never opens an episode */
+    battery_world(3920);
+    run_until(T0 + DAY);
+    for (int i = 0; i < 3; i++) {
+        bat_once(DSP_BATT_VALID, 3850); /* the wake measurement dips, the confirmation does not */
+        quick_wake();
+        DSP_CHECK_EQ_INT(DSP_BATTERY_UNKNOWN, rep.battery_obs);
+        DSP_CHECK(!battery_episode());
+    }
+    bat.mv = 3900; /* exactly at LOW: not low */
+    quick_wake();
+    DSP_CHECK_EQ_INT(DSP_BATTERY_OK, rep.battery_obs);
+
+    /* 7. invalid or unavailable ADC data: UNKNOWN, never a fabricated event or 0 mV */
+    static const dsp_batt_sample_t bad[] = {
+        {DSP_BATT_ADC_FAILED, 0}, {DSP_BATT_NO_CALIBRATION, 0}, {DSP_BATT_OUT_OF_RANGE, 0},
+        {DSP_BATT_UNSTABLE, 0}, {DSP_BATT_VALID, 0}, {DSP_BATT_ADC_FAILED, 3000}, {DSP_BATT_NOT_MEASURED, 0},
+    };
+    int sets = notify_sets;
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        bat_once(bad[i].state, bad[i].battery_mv);
+        quick_wake();
+        DSP_CHECK_EQ_INT(DSP_BATTERY_UNKNOWN, rep.battery_obs);
+        DSP_CHECK(!battery_episode());
+    }
+    DSP_CHECK_EQ_INT(sets, notify_sets);
+    /* an open episode is not closed by invalid data either */
+    bat.mv = 3700;
+    quick_wake();
+    DSP_CHECK(battery_episode());
+    bat_once(DSP_BATT_OUT_OF_RANGE, 0);
+    quick_wake();
+    DSP_CHECK(battery_episode());
+    bat_once(DSP_BATT_VALID, 4200); /* unconfirmed */
+    bat_once(DSP_BATT_ADC_FAILED, 0);
+    quick_wake();
+    DSP_CHECK(battery_episode());
+    DSP_CHECK_EQ_INT(1, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+    DSP_CHECK_EQ_INT(0, bat.violations);
+    /* without a battery port the engine is never fed */
+    world();
+    boot_and_provision(CAP, 60, true);
+    run_until(T0 + DAY);
+    DSP_CHECK_EQ_INT(DSP_BATTERY_UNKNOWN, rep.battery_obs);
+    DSP_CHECK_EQ_INT(0, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+    common_invariants();
+}
+
+static void test_battery_low_survives_failures(void)
+{
+    /* 8. reset and power loss: the episode and the queued event persist */
+    battery_world(4100);
+    run_until(T0 + DAY);
+    http_ack = false;
+    bat.mv = 3800;
+    quick_wake();
+    DSP_CHECK_EQ_INT(1, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+    reboot_state(true); /* power-on: RTC memory and clock lost, storage kept */
+    DSP_CHECK(wake(DSP_CAUSE_POWER_ON));
+    DSP_CHECK(battery_episode());
+    DSP_CHECK_EQ_INT(1, durable_events(DSP_NOTE_BATTERY_LOW, 0)); /* not queued twice */
+    reboot_state(false); /* CPU reset */
+    DSP_CHECK(wake(DSP_CAUSE_WATCHDOG));
+    DSP_CHECK_EQ_INT(1, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+
+    /* 9. Wi-Fi unavailable: kept for later sessions */
+    http_ack = true;
+    wifi_result = DSP_NET_ERR_NO_AP;
+    run_until(g_true + 2 * DAY);
+    DSP_CHECK_EQ_INT(0, battery_posts);
+    DSP_CHECK_EQ_INT(1, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+
+    /* 10./11. uncertain acknowledgement: the retry carries the SAME event ID and payload, the
+     * receiver answers duplicate, exactly one stored event */
+    wifi_result = DSP_NET_OK;
+    http_lose_next = 1;
+    run_until(g_true + 3 * DAY);
+    DSP_CHECK(battery_posts >= 2);
+    DSP_CHECK_EQ_INT(1, battery_stored);
+    DSP_CHECK_EQ_INT(0, durable_events(DSP_NOTE_BATTERY_LOW, 0));
+    DSP_CHECK(strstr(battery_last_body, "\"value\":3800") != NULL);
+
+    /* 12. existing reminder policy: one reminder after 7 days while still low */
+    int stored = battery_stored;
+    run_until(g_true + 8 * DAY);
+    DSP_CHECK_EQ_INT(stored + 1, battery_stored);
+    DSP_CHECK(strstr(battery_last_body, "\"reminder_no\":1") != NULL);
+    DSP_CHECK_EQ_INT(0, bat.violations);
+    common_invariants();
+}
+
+static void test_battery_low_leaves_dosing_and_reservoir_alone(void)
+{
+    /* 13./14. dosing, the sleep plan and RESERVOIR_LOW are the same with a low battery */
+    int pumps[2] = {0, 0};
+    int64_t plan[2] = {0, 0};
+    bool reservoir[2] = {false, false};
+    for (int k = 0; k < 2; k++) {
+        battery_world(k == 0 ? 4100 : 3700);
+        add_schedule(sched("a", 8, 0, 5000));
+        replan();
+        run_until(T0 + 3 * DAY);
+        pumps[k] = pump.calls;
+        plan[k] = rep.plan.sleep_s;
+        reservoir[k] = (durable_notify().cond[DSP_COND_RESERVOIR_LOW].flags & DSP_COND_F_ACTIVE) != 0;
+        DSP_CHECK_EQ_INT(k == 1, battery_episode());
+        DSP_CHECK_EQ_INT(0, bat.violations);
+        common_invariants();
+    }
+    DSP_CHECK(pumps[0] > 0);
+    DSP_CHECK_EQ_INT(pumps[0], pumps[1]);
+    DSP_CHECK(plan[0] == plan[1]);
+    DSP_CHECK_EQ_INT(reservoir[0], reservoir[1]);
+}
+
+static void test_battery_thresholds_configurable(void)
+{
+    battery_world(3950);
+    CFG.battery_low_mv = 4000;
+    CFG.battery_recover_mv = 4100;
+    quick_wake();
+    DSP_CHECK(battery_episode());
+    bat.mv = 4090;
+    quick_wake();
+    DSP_CHECK(battery_episode());
+    bat.mv = 4100;
+    quick_wake();
+    DSP_CHECK(!battery_episode());
+    /* an invalid pair falls back to the defaults (3900 / 4050) */
+    CFG.battery_low_mv = 4100;
+    CFG.battery_recover_mv = 4000;
+    bat.mv = 3950;
+    quick_wake();
+    DSP_CHECK(!battery_episode());
+    bat.mv = 3899;
+    quick_wake();
+    DSP_CHECK(battery_episode());
+    common_invariants();
+}
+
 int main(void)
 {
     DSP_RUN(test_retained_block);
@@ -2609,6 +2916,11 @@ int main(void)
     DSP_RUN(test_gpio_never_active_while_a_gate_is_closed);
     DSP_RUN(test_gpio_power_cut_while_active);
     DSP_RUN(test_critical_notification_existing_wake);
+    DSP_RUN(test_battery_low_episode_and_delivery);
+    DSP_RUN(test_battery_low_noise_and_invalid_data);
+    DSP_RUN(test_battery_low_survives_failures);
+    DSP_RUN(test_battery_low_leaves_dosing_and_reservoir_alone);
+    DSP_RUN(test_battery_thresholds_configurable);
     DSP_RUN(test_ble_interrupted_by_due_dose);
     DSP_RUN(test_ble_session_lifetime);
     DSP_RUN(test_storage_failures);

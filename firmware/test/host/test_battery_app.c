@@ -222,7 +222,8 @@ static void test_window_boundaries_are_valid(void)
     provision(true);
     with_battery(sample(DSP_BATT_VALID, DSP_BATT_MAX_MV));
     batt.next[0] = sample(DSP_BATT_VALID, DSP_BATT_MIN_MV);
-    batt.nnext = 1;
+    batt.next[1] = sample(DSP_BATT_VALID, DSP_BATT_MIN_MV); /* BATTERY_LOW confirmation */
+    batt.nnext = 2;
     clear_script();
     int a = step(g_true, op_battery());
     int b = step(g_true + 61, op_battery());

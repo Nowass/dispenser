@@ -556,6 +556,61 @@ try {
   }
 
   // ======================================================================================
+  section("1b. BATTERY_LOW (battery monitor -> engine -> Worker -> e-mail)");
+  {
+    const prefix = await fresh();
+    const ev = await h("battery low 3850");
+    check(ev.seq === 1 && ev.pending === 1 && ev.queue[0].value === 3850, "one BATTERY_LOW queued");
+    const again = await h("battery low 3840");
+    check(again.seq === 0 && again.pending === 1, "repeated LOW: no second event");
+    await h("battery unknown 0");
+    // Wi-Fi unavailable: the event stays queued
+    await h("wifi fail");
+    const s1 = await session();
+    check(s1.pending === 1, `Wi-Fi unavailable: still queued (${s1.outcome})`);
+    await h("wifi ok");
+    // the response is lost after the Worker stored it: the retry repeats the same ID
+    proxy.next({ kind: "drop_after_forward" });
+    const r1 = await deliver();
+    check(r1.exchanges[0]?.result === "UNCERTAIN" && r1.pending === 1, "lost ACK: UNCERTAIN, still queued");
+    const r2 = await deliver();
+    const x = r2.exchanges[0];
+    check(x?.status === 200 && x.result === "ACK" && r2.pending === 0, "retry answered 200 duplicate -> removed");
+    check(canonical(r1.exchanges[0].body) === canonical(x.body), "identical canonical payload on retry");
+    const body = JSON.parse(x.body);
+    check(
+      body.type === "BATTERY_LOW" && body.severity === "WARNING" && body.value === 3840 &&
+        body.value2 === 0 && body.code === null && body.reminder_no === 0,
+      "protocol v1 fields: BATTERY_LOW, WARNING, value = mV, value2 = 0",
+    );
+    const rows = rowsFor(prefix);
+    check(rows.length === 1, "exactly one D1 row");
+    const before = google.sends.length;
+    await cron();
+    check(google.sends.length === before + 1 && rowsFor(prefix)[0].delivery_status === "SENT", "one e-mail sent");
+    const mail = Buffer.from(google.sends.at(-1), "base64url").toString("utf8");
+    const [head, ...rest] = mail.split(/\r\n\r\n/);
+    const subject = (/^Subject: ((?:.*)(?:\r\n .*)*)/m.exec(head)?.[1] ?? "")
+      .split(/\r\n /)
+      .map((w) => Buffer.from(/=\?UTF-8\?B\?(.*)\?=/.exec(w)?.[1] ?? "", "base64").toString("utf8"))
+      .join("");
+    const text = Buffer.from(rest.join("").replace(/\s/g, ""), "base64").toString("utf8");
+    check(subject.includes("Slabá baterie") && subject.includes("3,84"), `battery e-mail subject (${subject})`);
+    check(text.includes("Napětí baterie: 3,84 V"), "e-mail body shows the measured voltage 3,84 V");
+    check(!/\d\s*%/.test(text), "no battery percentage in the e-mail");
+    // recovery closes the episode; a new drop opens a new one with a new ID
+    const okr = await h("battery ok 4100");
+    check(okr.pending === 0 && okr.seq === 0, "recovery: no event");
+    const ev2 = await h("battery low 3870");
+    check(ev2.seq === 2 && ev2.pending === 1, "new episode after recovery: new event");
+    const r3 = await deliver();
+    check(r3.exchanges[0]?.status === 201 && rowsFor(prefix).length === 2, "second episode stored as a new row");
+    check(immutable(prefix), "payloads immutable per event ID");
+    await cron(); // deliver the second episode here (later sections count e-mails)
+    check(rowsFor(prefix).every((r) => r.delivery_status === "SENT"), "both battery e-mails sent");
+  }
+
+  // ======================================================================================
   section("2. idempotency (lost response after successful ingestion)");
   for (const lose of ["drop_after_forward", "hang_after_forward"]) {
     const prefix = await fresh();

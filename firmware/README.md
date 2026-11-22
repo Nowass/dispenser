@@ -2346,6 +2346,27 @@ No dosing decision depends on it in this milestone (no low-battery inhibition ye
   `dsp_battery: battery: VALID 3970 mV (pad 1985 mV, spread 4 mV, divider x2000/1000)`.
 - **Clients:** GET_BATTERY is new in firmware 0.2.0; clients send it only when the Info record
   reports 0.2.0 or newer (BLE_PROTOCOL 8.2). Domain: `dsp_app_get_battery`, `test_battery_app`.
+- **BATTERY_LOW notification:** in OBSERVE (before any pump run and before Wi-Fi) the latest
+  measurement feeds the existing engine (`dsp_notify_observe_battery`: one event per episode,
+  7-day reminder, queue, stable IDs, frozen payload, delivery with the next regular sync session).
+  Hysteresis on the measured voltage: an episode opens below `CONFIG_DSP_BATTERY_LOW_MV`
+  (default 3,900 mV) and closes at or above `CONFIG_DSP_BATTERY_RECOVER_MV` (default 4,050 mV);
+  in between nothing changes. Opening or closing needs a second measurement in the same wake
+  that agrees (else UNKNOWN: one disturbed reading changes nothing). Anything but VALID is
+  UNKNOWN: never an event, never 0 mV. The engine writes the "notify" record only when the
+  episode state changes. No dosing restriction. Defaults (BENCH PROPOSAL): the temporary 5 V
+  relay module on the 1S cell is the limiting part — a 5 V coil typically needs ≥ 75 % (3.75 V)
+  to pull in, the module drops a little more and the cell sags while the motor starts; the ADC
+  read ~2 % low on the bench (4.07 V vs 4.15 V at BAT+, while charging), so 3,900 mV measured is
+  about 3.95–4.0 V at the cell. Recovery at 4,050 mV practically needs a charge (no LOW/OK
+  flapping from rest recovery). Validate the relay's pull-in voltage on a bench supply.
+- **Delivery needs an HTTPS build:** the bench image (`CONFIG_DSP_APP_WIFI_TIME`) queues the event
+  but has no HTTP client (time-only sessions); delivery needs `CONFIG_DSP_APP_CONNECTIVITY`, which
+  the build refuses together with the production endpoint while BLE security/transport, the
+  bring-up window or the GPIO pump are enabled (R5 not accepted, bench-only pump). Hardware
+  end-to-end check: the diagnostic image `sdkconfig.batterynotify.defaults` (one BATTERY_LOW test
+  event with the measured voltage through the real ESP32 TLS transport, then the identical
+  retry; no application runtime).
 - **Hardware verification (pending):** compare the reported voltage with a multimeter **at BAT+**
   (a 10 MΩ meter at the 500 kΩ midpoint itself reads about 5 % low); confirm whether the 100 nF
   capacitor is fitted; check that the voltage is VALID on button and timer wakes.
