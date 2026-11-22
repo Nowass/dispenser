@@ -1612,6 +1612,14 @@ refused with "Kód musí začínat DSP2:").
   the note that the percentage is an approximate estimate. Unavailable states show "Nedostupné" with
   the reason (not measured, measurement failed, out of range, unstable, firmware without support):
   never 0 V or 0 %. No charging state (no charger telemetry exists). DEMO keeps its simulated 78 %.
+- **Manual refresh (tap):** the whole card is a button ("Změřit baterii znovu") in DEVICE mode:
+  one GET_BATTERY over the live session (never a connect), a small spinner meanwhile, further taps
+  ignored (ViewModel guard + repository lock: never two requests). The device takes a new ADC
+  sample unless one is < 2 s old or a pump run ended < 2 s ago; the card shows "Změřeno dnes v
+  HH:MM:SS", always the device's sample time (read time − `age_s`), so a cached answer never gets
+  a new timestamp. Voltage, estimate and time change together, only through the device's answer.
+  Not connected: "Nelze změřit: dávkovač není připojený…" (nothing sent); failure: the previous
+  value stays with "Nové měření se nezdařilo. Zobrazená hodnota je starší."
 - **Estimate:** `BatteryEstimate`, piecewise-linear over a typical 1S Li-ion resting voltage curve,
   0 % at 3.30 V (regulator headroom) and 100 % at 4.20 V, clamped; one table to refine with real
   discharge data. No low-battery tone or threshold yet.

@@ -231,7 +231,7 @@ typedef struct {
     uint8_t event_pump_flags;
     /* Battery telemetry (optional; NULL = none, GET_BATTERY then answers NOT_MEASURED). Measured
      * once per wake before any dosing, Wi-Fi or BLE activity, and refreshed on GET_BATTERY when
-     * older than DSP_APP_BATTERY_REFRESH_MS (never within DSP_APP_BATTERY_PUMP_QUIET_MS of a pump
+     * at least DSP_APP_BATTERY_REFRESH_MS old (never within DSP_APP_BATTERY_PUMP_QUIET_MS of a pump
      * run). Runtime memory only. */
     const dsp_battery_port_t *battery;
     /* BATTERY_LOW notification thresholds in measured battery mV (0 = defaults below). An episode
@@ -567,11 +567,12 @@ dsp_app_op_result_t dsp_app_get_diagnostics(dsp_app_t *app, const dsp_app_auth_t
                                             dsp_ble_diag_rec_t *out);
 dsp_app_op_result_t dsp_app_ack_rejections(dsp_app_t *app, const dsp_app_auth_t *auth);
 /* Battery telemetry (GET_BATTERY, docs/BLE_PROTOCOL.md 7.7). The latest measurement of this wake
- * (taken before any dosing); re-measured first when it is older than DSP_APP_BATTERY_REFRESH_MS
+ * (taken before any dosing); re-measured first (a new ADC sample, e.g. the app's manual refresh)
+ * when it is at least DSP_APP_BATTERY_REFRESH_MS old
  * and no pump run ended within DSP_APP_BATTERY_PUMP_QUIET_MS. age_s: seconds since that
  * measurement (0 unless VALID). Without a battery port: NOT_MEASURED. Same preconditions as
  * GET_STATUS; nothing is stored. */
-#define DSP_APP_BATTERY_REFRESH_MS 60000u
+#define DSP_APP_BATTERY_REFRESH_MS 2000u /* minimum interval between samples */
 #define DSP_APP_BATTERY_PUMP_QUIET_MS 2000u
 typedef struct {
     dsp_batt_sample_t sample;

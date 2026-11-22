@@ -41,6 +41,13 @@
     <string name="dashboard_battery_reason_failed">Měření napětí v zařízení selhalo.</string>
     <string name="dashboard_battery_reason_out_of_range">Naměřené napětí je mimo rozsah článku. Zkontrolujte zapojení děliče.</string>
     <string name="dashboard_battery_reason_unstable">Měření bylo nestabilní. Zkuste to znovu.</string>
+    <string name="dashboard_battery_measured_at_today">Změřeno dnes v %1$s</string>
+    <string name="dashboard_battery_measured_at_date">Změřeno %1$s v %2$s</string>
+    <string name="dashboard_battery_refresh_action">Změřit baterii znovu</string>
+    <string name="dashboard_battery_refresh_hint">Klepnutím změříte znovu.</string>
+    <string name="dashboard_battery_refreshing">Měřím…</string>
+    <string name="dashboard_battery_refresh_not_connected">Nelze změřit: dávkovač není připojený. Probuďte ho tlačítkem a počkejte na připojení.</string>
+    <string name="dashboard_battery_refresh_failed">Nové měření se nezdařilo. Zobrazená hodnota je starší.</string>
     <string name="dashboard_battery_reason_firmware">Firmware zařízení měření baterie zatím nepodporuje.</string>
 
     <string name="dashboard_estimate_label">odhad</string>

@@ -42,6 +42,10 @@ object Format {
 
     fun time(at: ZonedDateTime): String = time.format(at)
 
+    private val timeSeconds = DateTimeFormatter.ofPattern("HH:mm:ss", CZECH)
+    /** e.g. "19:24:05" (battery measurement times: a refresh within a minute stays visible). */
+    fun timeWithSeconds(at: ZonedDateTime): String = timeSeconds.format(at)
+
     enum class RelativeDay { TODAY, TOMORROW, OTHER }
 
     fun relativeDay(at: ZonedDateTime, now: ZonedDateTime): RelativeDay {

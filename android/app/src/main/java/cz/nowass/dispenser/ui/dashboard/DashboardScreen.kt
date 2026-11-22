@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
@@ -35,6 +36,7 @@ import cz.nowass.dispenser.domain.BatteryUnavailable
 import cz.nowass.dispenser.ui.Format
 import cz.nowass.dispenser.ui.czechPluralStringResource
 import java.time.LocalDate
+import java.time.ZonedDateTime
 import cz.nowass.dispenser.ui.components.freshnessLabel
 import cz.nowass.dispenser.ui.components.MetricProgress
 import cz.nowass.dispenser.ui.components.StatusCard
@@ -59,7 +61,7 @@ fun DashboardRoute(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    DashboardScreen(state, onOpenCalendar, modifier, onOpenReservoir)
+    DashboardScreen(state, onOpenCalendar, modifier, onOpenReservoir, onRefreshBattery = viewModel::refreshBattery)
 }
 
 @Composable
@@ -68,6 +70,8 @@ fun DashboardScreen(
     onOpenCalendar: (LocalDate?) -> Unit,
     modifier: Modifier = Modifier,
     onOpenReservoir: () -> Unit = {},
+    /** DEVICE: battery card tap (a new measurement); ignored by the ViewModel while one runs. */
+    onRefreshBattery: () -> Unit = {},
 ) {
     when (state) {
         DashboardUiState.Loading -> Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -81,7 +85,7 @@ fun DashboardScreen(
             verticalArrangement = Arrangement.spacedBy(Spacing.m),
         ) {
             NextDose(state)
-            StatusCards(state, onOpenReservoir)
+            StatusCards(state, onOpenReservoir, onRefreshBattery)
             Week(state, onOpenCalendar)
         }
     }
@@ -108,7 +112,7 @@ private fun NextDose(state: DashboardUiState.Ready) {
 }
 
 @Composable
-private fun StatusCards(state: DashboardUiState.Ready, onOpenReservoir: () -> Unit) {
+private fun StatusCards(state: DashboardUiState.Ready, onOpenReservoir: () -> Unit, onRefreshBattery: () -> Unit) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         if (maxWidth >= TwoColumnMinWidth) {
             Row(
@@ -116,12 +120,12 @@ private fun StatusCards(state: DashboardUiState.Ready, onOpenReservoir: () -> Un
                 horizontalArrangement = Arrangement.spacedBy(Spacing.m),
             ) {
                 ReservoirCard(state, onOpenReservoir, Modifier.weight(1f).fillMaxHeight())
-                BatteryCard(state.battery, Modifier.weight(1f).fillMaxHeight(), freshnessLabel(state.battery.freshness, state.now.toInstant(), state.now.zone))
+                BatteryCard(state.battery, Modifier.weight(1f).fillMaxHeight(), freshnessLabel(state.battery.freshness, state.now.toInstant(), state.now.zone), state.now, onRefreshBattery)
             }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(Spacing.m)) {
                 ReservoirCard(state, onOpenReservoir, Modifier.fillMaxWidth())
-                BatteryCard(state.battery, Modifier.fillMaxWidth(), freshnessLabel(state.battery.freshness, state.now.toInstant(), state.now.zone))
+                BatteryCard(state.battery, Modifier.fillMaxWidth(), freshnessLabel(state.battery.freshness, state.now.toInstant(), state.now.zone), state.now, onRefreshBattery)
             }
         }
     }
@@ -197,9 +201,19 @@ private fun ReservoirCard(state: DashboardUiState.Ready, onOpen: () -> Unit, mod
 const val BATTERY_VALUE_TEST_TAG = "battery_value"
 const val BATTERY_VOLTAGE_TEST_TAG = "battery_voltage"
 const val BATTERY_REASON_TEST_TAG = "battery_reason"
+const val BATTERY_CARD_TEST_TAG = "battery_card"
+const val BATTERY_MEASURED_AT_TEST_TAG = "battery_measured_at"
+const val BATTERY_REFRESHING_TEST_TAG = "battery_refreshing"
+const val BATTERY_REFRESH_MESSAGE_TEST_TAG = "battery_refresh_message"
 
 @Composable
-private fun BatteryCard(battery: BatteryUi, modifier: Modifier, freshness: String? = null) {
+private fun BatteryCard(
+    battery: BatteryUi,
+    modifier: Modifier,
+    freshness: String? = null,
+    now: ZonedDateTime? = null,
+    onRefresh: () -> Unit = {},
+) {
     val accent = battery.tone.accent(normal = DispenserTheme.extendedColors.battery)
     StatusCard(
         title = stringResource(R.string.dashboard_battery),
@@ -207,7 +221,9 @@ private fun BatteryCard(battery: BatteryUi, modifier: Modifier, freshness: Strin
         tone = battery.tone,
         accent = accent,
         tags = if (battery.isSimulated) listOf(stringResource(R.string.dashboard_simulated_label)) else listOfNotNull(freshness),
-        modifier = modifier,
+        onClick = if (battery.refreshable) onRefresh else null,
+        onClickLabel = if (battery.refreshable) stringResource(R.string.dashboard_battery_refresh_action) else null,
+        modifier = modifier.testTag(BATTERY_CARD_TEST_TAG),
     ) {
         val volts = battery.millivolts?.let { Format.volts(it) }
         Text(
@@ -246,6 +262,17 @@ private fun BatteryCard(battery: BatteryUi, modifier: Modifier, freshness: Strin
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        val measuredAt = battery.measuredAt
+        if (measuredAt != null && now != null) {
+            val at = measuredAt.atZone(now.zone)
+            Text(
+                if (at.toLocalDate() == now.toLocalDate()) stringResource(R.string.dashboard_battery_measured_at_today, Format.timeWithSeconds(at))
+                else stringResource(R.string.dashboard_battery_measured_at_date, Format.date(at.toLocalDate()), Format.time(at)),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.testTag(BATTERY_MEASURED_AT_TEST_TAG),
+            )
+        }
         battery.unavailable?.let { reason ->
             Text(
                 stringResource(
@@ -261,6 +288,33 @@ private fun BatteryCard(battery: BatteryUi, modifier: Modifier, freshness: Strin
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.testTag(BATTERY_REASON_TEST_TAG),
             )
+        }
+        if (battery.refreshing) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Spacing.s),
+                modifier = Modifier.testTag(BATTERY_REFRESHING_TEST_TAG),
+            ) {
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = accent)
+                Text(stringResource(R.string.dashboard_battery_refreshing), style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        } else if (battery.refreshMessage != null) {
+            Text(
+                stringResource(
+                    when (battery.refreshMessage) {
+                        BatteryRefreshMessage.NOT_CONNECTED -> R.string.dashboard_battery_refresh_not_connected
+                        BatteryRefreshMessage.FAILED -> R.string.dashboard_battery_refresh_failed
+                        BatteryRefreshMessage.UNSUPPORTED -> R.string.dashboard_battery_reason_firmware
+                    },
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.testTag(BATTERY_REFRESH_MESSAGE_TEST_TAG),
+            )
+        } else if (battery.refreshable) {
+            Text(stringResource(R.string.dashboard_battery_refresh_hint), style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (battery.isSimulated) {
             Text(

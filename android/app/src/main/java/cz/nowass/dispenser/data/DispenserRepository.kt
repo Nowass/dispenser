@@ -75,6 +75,16 @@ interface DispenserRepository {
      */
     fun observeScheduleFreshness(): Flow<Freshness> = flowOf(Freshness.NotApplicable)
 
+    /** DEVICE mode: the battery card can request a new measurement ([refreshBattery]). DEMO: false. */
+    val batteryRefreshAvailable: Boolean get() = false
+
+    /**
+     * DEVICE mode: asks the connected device for a new battery measurement (GET_BATTERY; the device
+     * takes a new ADC sample unless one was taken within 2 s or a pump run just ended, and always
+     * reports the sample's real age). Never connects by itself. DEMO: [BatteryRefreshResult.Unsupported].
+     */
+    suspend fun refreshBattery(): BatteryRefreshResult = BatteryRefreshResult.Unsupported
+
     /** False when the source keeps no local event history ([observeHistory]); DEVICE mode reads [deviceHistory]. */
     val historyAvailable: Boolean get() = true
 
@@ -123,4 +133,16 @@ sealed interface ScheduleWriteResult {
 
     /** A device limit the phone checks before sending (name length, timezone, ranges); nothing was sent. */
     data class DeviceLimit(val problems: Set<String>) : ScheduleWriteResult
+}
+
+/** Outcome of a user-requested battery measurement (the value itself arrives through observeDevice). */
+enum class BatteryRefreshResult {
+    /** The device answered; the reading (and its measurement time) is updated. */
+    Refreshed,
+    /** No live session: nothing was sent (the device must be awake and connected). */
+    NotConnected,
+    /** Sent but not answered, refused, or the session ended: the previous value stays, marked stale. */
+    Failed,
+    /** No battery telemetry here (DEMO, or firmware older than 0.2.0). */
+    Unsupported,
 }

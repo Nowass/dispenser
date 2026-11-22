@@ -44,6 +44,20 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
     override fun status(): Flow<Fresh<StatusRecord>> = statusF
     override fun schedules(): Flow<Fresh<DeviceSchedules>> = schedulesF
     override fun battery(): Flow<Fresh<BatteryRecord>> = batteryF
+    /** Scripted battery refresh (the card tap); counts calls and in-flight overlaps. */
+    var batteryRefresh: suspend () -> OpResult<BatteryRecord> = { OpResult.NotSent("not connected") }
+    var batteryRefreshCalls = 0
+    var batteryRefreshInFlight = 0
+    var batteryRefreshOverlaps = 0
+    override suspend fun refreshBattery(): OpResult<BatteryRecord> {
+        batteryRefreshCalls++
+        if (++batteryRefreshInFlight > 1) batteryRefreshOverlaps++
+        try {
+            return batteryRefresh()
+        } finally {
+            batteryRefreshInFlight--
+        }
+    }
     override fun config(): Flow<Fresh<ConfigRecord>> = flowOf(Fresh.Unknown)
     override fun diagnostics(): Flow<Fresh<DiagnosticsRecord>> = flowOf(Fresh.Unknown)
     override fun phones(): Flow<Fresh<List<PhoneRecord>>> = flowOf(Fresh.Unknown)

@@ -183,6 +183,17 @@ class DeviceDispenserRepository(
         readStatus(s).also { if (it is OpResult.Ok) readBattery(s) }
     }
 
+    private val batteryRefresh = Mutex()
+
+    override suspend fun refreshBattery(): OpResult<BatteryRecord> {
+        if (!batteryRefresh.tryLock()) return OpResult.Refused(LocalRefusal.InProgress) // never overlapping
+        return try {
+            live { readBattery(it) }
+        } finally {
+            batteryRefresh.unlock()
+        }
+    }
+
     /**
      * GET_BATTERY only to firmware that provides it ([firmwareHasBattery]): older firmware closes the
      * session on an unknown encrypted type, so it is never asked and reports UNSUPPORTED instead.

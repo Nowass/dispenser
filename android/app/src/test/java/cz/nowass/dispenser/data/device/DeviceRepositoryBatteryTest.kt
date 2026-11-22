@@ -5,6 +5,7 @@ import cz.nowass.dispenser.device.ops.BatteryState
 import cz.nowass.dispenser.device.ops.MessageType as M
 import cz.nowass.dispenser.device.ops.OpResult
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -131,5 +132,67 @@ class DeviceRepositoryBatteryTest {
         assertTrue(r.status().first() is Fresh.Live)
         assertEquals(Fresh.Unknown, r.battery().first())
         assertTrue(dev.live0() != null)
+    }
+
+    // ---- manual refresh (battery card tap) ------------------------------------------------------
+
+    @Test
+    fun manual_refresh_sends_one_get_battery_and_takes_the_devices_sample_time() = runTest {
+        val r = repo()
+        r.connect()
+        assertEquals(1, dev.count(M.GET_BATTERY))
+        dev.battery = Triple(0L, 4160L, 0L) // the device took a new sample
+        val res = r.refreshBattery()
+        assertTrue("$res", res is OpResult.Ok)
+        assertEquals(2, dev.count(M.GET_BATTERY))
+        assertEquals(1, dev.count(M.GET_STATUS)) // only GET_BATTERY
+        val b = r.battery().first() as Fresh.Live
+        assertEquals(4160, b.value.millivolts)
+        assertEquals(Instant.ofEpochMilli(now), b.readAt) // age 0: measured now
+        // a cached device answer (age 40 s) is never stamped as a new measurement
+        dev.battery = Triple(0L, 4160L, 40L)
+        r.refreshBattery()
+        assertEquals(Instant.ofEpochMilli(now - 40_000), (r.battery().first() as Fresh.Live).readAt)
+    }
+
+    @Test
+    fun manual_refresh_while_disconnected_sends_nothing_and_keeps_the_value() = runTest {
+        val r = repo()
+        r.connect()
+        val before = r.battery().first()
+        dev.close()
+        val res = r.refreshBattery()
+        assertTrue("$res", res is OpResult.NotSent)
+        assertEquals(1, dev.count(M.GET_BATTERY))
+        assertEquals(before.valueOrNull, r.battery().first().valueOrNull)
+        assertTrue(r.battery().first() is Fresh.Cached) // shown as stored, with its old time
+    }
+
+    @Test
+    fun failed_refresh_keeps_the_previous_reading_and_time() = runTest {
+        val r = repo()
+        r.connect()
+        val before = r.battery().first() as Fresh.Live
+        dev.rejects[M.GET_BATTERY] = Triple(14, 0L, 0L)
+        val res = r.refreshBattery()
+        assertTrue("$res", res is OpResult.Rejected)
+        val after = r.battery().first() as Fresh.Live
+        assertEquals(before.value, after.value)
+        assertEquals(before.readAt, after.readAt) // no fabricated timestamp
+    }
+
+    @Test
+    fun overlapping_refreshes_never_send_two_requests() = runTest {
+        val r = repo()
+        r.connect()
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        dev.hooks[M.GET_BATTERY] = { gate.await() }
+        val first = backgroundScope.async { r.refreshBattery() }
+        runCurrent()
+        val second = r.refreshBattery() // while the first is in flight
+        assertTrue("$second", second is OpResult.Refused)
+        gate.complete(Unit)
+        assertTrue(first.await() is OpResult.Ok)
+        assertEquals(2, dev.count(M.GET_BATTERY)) // connect + one refresh
     }
 }

@@ -110,6 +110,8 @@ interface DeviceRepository {
     /** graceful = encrypted END_SESSION (ends the device's service window); else just disconnect. */
     suspend fun disconnect(graceful: Boolean)
 
+    /** A user-requested battery measurement (GET_BATTERY only); one at a time (else Refused(InProgress)). */
+    suspend fun refreshBattery(): OpResult<BatteryRecord> = OpResult.NotSent("not supported")
     /** GET_STATUS, then the battery telemetry (when the firmware provides it). */
     suspend fun refreshStatus(): OpResult<StatusRecord>
     suspend fun refreshDiagnostics(): OpResult<DiagnosticsRecord>

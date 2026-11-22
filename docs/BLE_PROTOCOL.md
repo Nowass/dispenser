@@ -270,7 +270,8 @@ battery_mv u16 | age_s u32`.
 - `age_s`: seconds between the measurement and the response (0 unless VALID).
 - NOT_MEASURED: the build has no battery input. The device measures once per wake (power-on,
   button, timer) before any dosing, Wi-Fi or BLE activity, and re-measures on GET_BATTERY when the
-  value is older than 60 s and no pump run ended within the last 2 s. Runtime memory only (never
+  value is at least 2 s old and no pump run ended within the last 2 s (so a client's request is a
+  new ADC sample unless one was just taken; `age_s` always tells the sample's real age). Runtime memory only (never
   stored); no wake is ever added for it. The record carries no charger state.
 
 ## 8. Versioning and negotiation

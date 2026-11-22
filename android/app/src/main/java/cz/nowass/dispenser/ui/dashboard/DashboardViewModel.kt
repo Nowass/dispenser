@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import cz.nowass.dispenser.data.BatteryRefreshResult
 import cz.nowass.dispenser.data.DispenserRepository
 import cz.nowass.dispenser.domain.DataSource
 import cz.nowass.dispenser.domain.DeviceStatus
@@ -21,10 +22,12 @@ import cz.nowass.dispenser.domain.simulation.ReservoirState
 import cz.nowass.dispenser.domain.simulation.ReservoirStatus
 import cz.nowass.dispenser.domain.Schedule
 import cz.nowass.dispenser.ui.components.StatusTone
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZonedDateTime
@@ -74,9 +77,19 @@ data class BatteryUi(
     val unavailable: BatteryUnavailable? = null,
     /** Freshness of the battery value (Live/Cached carry the measurement time). */
     val freshness: Freshness = Freshness.NotApplicable,
+    /** DEVICE: when the shown reading was physically measured (null = never read). */
+    val measuredAt: Instant? = null,
+    /** DEVICE: the card requests a new measurement when tapped. */
+    val refreshable: Boolean = false,
+    /** A requested measurement is in progress (further taps are ignored). */
+    val refreshing: Boolean = false,
+    /** Outcome of the last requested measurement that did not succeed (null after a success). */
+    val refreshMessage: BatteryRefreshMessage? = null,
 ) {
     val isEstimate: Boolean get() = millivolts != null
 }
+
+enum class BatteryRefreshMessage { NOT_CONNECTED, FAILED, UNSUPPORTED }
 
 /** One day of the dashboard week strip. Only real upcoming occurrences are counted. */
 data class DayPreviewUi(
@@ -86,18 +99,50 @@ data class DayPreviewUi(
     val totalMl: Double,
 )
 
-class DashboardViewModel(repository: DispenserRepository) : ViewModel() {
+class DashboardViewModel(private val repository: DispenserRepository) : ViewModel() {
+
+    private data class Refresh(val refreshing: Boolean = false, val message: BatteryRefreshMessage? = null)
+    private val refresh = MutableStateFlow(Refresh())
 
     val uiState: StateFlow<DashboardUiState> = combine(
         repository.observeDevice(),
         repository.observeSchedules(),
         repository.observeReservoir(),
-        ::toUiState,
-    ).stateIn(
+        refresh,
+    ) { device, schedules, reservoir, r ->
+        val s = toUiState(device, schedules, reservoir)
+        s.copy(
+            battery = s.battery.copy(
+                refreshable = repository.batteryRefreshAvailable && !s.isDemo,
+                refreshing = r.refreshing,
+                refreshMessage = r.message,
+            ),
+        )
+    }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = DashboardUiState.Loading,
     )
+
+    /**
+     * Battery card tap (DEVICE): one GET_BATTERY over the live session. Ignored while one is in
+     * progress (no overlapping BLE requests) and in DEMO. The reading and its measurement time
+     * change only through the device's answer; a failure keeps the previous value (shown stale).
+     */
+    fun refreshBattery() {
+        if (!repository.batteryRefreshAvailable) return
+        val current = refresh.value
+        if (current.refreshing || !refresh.compareAndSet(current, current.copy(refreshing = true))) return
+        viewModelScope.launch {
+            val message = when (repository.refreshBattery()) {
+                BatteryRefreshResult.Refreshed -> null
+                BatteryRefreshResult.NotConnected -> BatteryRefreshMessage.NOT_CONNECTED
+                BatteryRefreshResult.Failed -> BatteryRefreshMessage.FAILED
+                BatteryRefreshResult.Unsupported -> BatteryRefreshMessage.UNSUPPORTED
+            }
+            refresh.value = Refresh(refreshing = false, message = message)
+        }
+    }
 
     companion object {
         internal const val WEEK_DAYS = 7
@@ -152,6 +197,11 @@ class DashboardViewModel(repository: DispenserRepository) : ViewModel() {
          */
         internal fun batteryUi(device: DeviceStatus, isDemo: Boolean): BatteryUi {
             val freshness = if (device.battery != null) device.batteryFreshness else device.freshness
+            val measuredAt = when (val f = device.batteryFreshness) {
+                is Freshness.Live -> f.readAt
+                is Freshness.Cached -> f.readAt
+                else -> null
+            }.takeIf { device.battery != null }
             return when (val b = device.battery) {
                 is BatteryReading.Measured -> BatteryUi(
                     percent = BatteryEstimate.percent(b.millivolts),
@@ -159,6 +209,7 @@ class DashboardViewModel(repository: DispenserRepository) : ViewModel() {
                     tone = StatusTone.Normal,
                     millivolts = b.millivolts,
                     freshness = freshness,
+                    measuredAt = measuredAt,
                 )
                 is BatteryReading.Unavailable -> BatteryUi(null, false, StatusTone.Unknown, unavailable = b.reason, freshness = freshness)
                 null -> BatteryUi(

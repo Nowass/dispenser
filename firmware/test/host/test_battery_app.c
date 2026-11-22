@@ -127,29 +127,33 @@ static void test_measured_before_the_scheduled_dose(void)
 static void test_get_battery_cache_refresh_and_age(void)
 {
     provision(true);
-    with_battery(sample(DSP_BATT_VALID, 3950));
+    with_battery(sample(DSP_BATT_VALID, 3940));
     batt.next[0] = sample(DSP_BATT_VALID, 3970); /* the wake's measurement */
-    batt.nnext = 1;
+    batt.next[1] = sample(DSP_BATT_VALID, 3950); /* the first manual refresh */
+    batt.nnext = 2;
     clear_script();
     dsp_utc_t t0 = g_true;
-    int a = step(t0, op_battery());
-    int b = step(t0 + 30, op_battery());
-    int c = step(t0 + 61, op_battery()); /* older than 60 s: measured again */
-    int d = step(t0 + 62, op_battery());
+    int a = step(t0, op_battery());      /* right after the wake's sample: returned with its age */
+    int b = step(t0 + 1, op_battery());  /* < 2 s: the same sample, age 1 (never a new timestamp) */
+    int c = step(t0 + 2, op_battery());  /* >= 2 s: a NEW ADC sample (manual refresh) */
+    int d = step(t0 + 3, op_battery());  /* repeated tap within 2 s: no new sample, real age */
+    int e = step(t0 + 30, op_battery()); /* a later refresh: new sample again */
     DSP_CHECK(session());
     DSP_CHECK_EQ_INT(DSP_OP_OK, sc.res[a].r.status);
     DSP_CHECK_EQ_INT(DSP_BATT_VALID, sc.res[a].batt.sample.state);
     DSP_CHECK_EQ_INT(3970, sc.res[a].batt.sample.battery_mv);
     DSP_CHECK_EQ_INT(0, (int)sc.res[a].batt.age_s);
-    DSP_CHECK_EQ_INT(3970, sc.res[b].batt.sample.battery_mv); /* cached */
-    DSP_CHECK_EQ_INT(30, (int)sc.res[b].batt.age_s);
-    DSP_CHECK_EQ_INT(3950, sc.res[c].batt.sample.battery_mv); /* refreshed */
+    DSP_CHECK_EQ_INT(3970, sc.res[b].batt.sample.battery_mv);
+    DSP_CHECK_EQ_INT(1, (int)sc.res[b].batt.age_s);
+    DSP_CHECK_EQ_INT(3950, sc.res[c].batt.sample.battery_mv);
     DSP_CHECK_EQ_INT(0, (int)sc.res[c].batt.age_s);
     DSP_CHECK_EQ_INT(3950, sc.res[d].batt.sample.battery_mv);
     DSP_CHECK_EQ_INT(1, (int)sc.res[d].batt.age_s);
-    DSP_CHECK_EQ_INT(2, batt.calls);
-    DSP_CHECK_EQ_INT(2, (int)rep.battery_reads);
-    DSP_CHECK_EQ_INT(0, (int)sc.res[a].writes + (int)sc.res[c].writes); /* nothing stored */
+    DSP_CHECK_EQ_INT(3940, sc.res[e].batt.sample.battery_mv);
+    DSP_CHECK_EQ_INT(0, (int)sc.res[e].batt.age_s);
+    DSP_CHECK_EQ_INT(3, batt.calls);
+    DSP_CHECK_EQ_INT(3, (int)rep.battery_reads);
+    DSP_CHECK_EQ_INT(0, (int)sc.res[a].writes + (int)sc.res[c].writes + (int)sc.res[e].writes); /* nothing stored */
     DSP_CHECK_EQ_INT(0, batt.violations);
     invariants();
 }

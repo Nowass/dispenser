@@ -1,5 +1,6 @@
 package cz.nowass.dispenser.data.device
 
+import cz.nowass.dispenser.data.BatteryRefreshResult
 import cz.nowass.dispenser.data.CommandResult
 import cz.nowass.dispenser.data.DispenserRepository
 import cz.nowass.dispenser.data.ScheduleWriteResult
@@ -71,6 +72,14 @@ class DeviceUiRepository(
 ) : DispenserRepository {
 
     override val historyAvailable: Boolean get() = false
+    override val batteryRefreshAvailable: Boolean get() = true
+
+    override suspend fun refreshBattery(): BatteryRefreshResult = when (val r = device.refreshBattery()) {
+        is OpResult.Ok -> if (r.value.state == BatteryState.UNSUPPORTED) BatteryRefreshResult.Unsupported else BatteryRefreshResult.Refreshed
+        is OpResult.NotSent -> BatteryRefreshResult.NotConnected
+        // a refused overlap, a device error or an uncertain outcome: the previous value is kept
+        is OpResult.Refused, is OpResult.Rejected, is OpResult.Uncertain -> BatteryRefreshResult.Failed
+    }
     override val deviceHistory: DeviceHistorySource = DeviceHistoryLoader(device)
     override val writesRequireConnection: Boolean get() = true
 

@@ -9,6 +9,7 @@ import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -205,5 +206,68 @@ class DashboardViewModelTest {
         assertTrue(b.isSimulated)
         assertFalse(b.isEstimate)
         assertEquals(null, b.millivolts)
+    }
+
+    // ---- manual battery refresh -------------------------------------------------------------------
+
+    private class RefreshRepo(val fake: cz.nowass.dispenser.data.device.FakeDeviceRepository = cz.nowass.dispenser.data.device.FakeDeviceRepository()) {
+        val ui = cz.nowass.dispenser.data.device.DeviceUiRepository(fake, java.time.Clock.fixed(java.time.Instant.parse("2026-11-22T18:00:00Z"), java.time.ZoneOffset.UTC), clockTick = null)
+    }
+
+    private suspend fun DashboardViewModel.battery() = uiState.filterIsInstance<DashboardUiState.Ready>().first().battery
+
+    @Test
+    fun batteryTap_requestsOneMeasurement_andIgnoresTapsWhileRunning() = runTest {
+        val r = RefreshRepo()
+        val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+        r.fake.batteryRefresh = { gate.await(); cz.nowass.dispenser.device.ops.OpResult.Ok(cz.nowass.dispenser.device.ops.BatteryRecord(cz.nowass.dispenser.device.ops.BatteryState.VALID, 4160, 0)) }
+        val vm = DashboardViewModel(r.ui)
+        val job = backgroundScope.launch { vm.uiState.collect {} }
+        assertTrue(vm.battery().refreshable)
+        vm.refreshBattery()
+        vm.refreshBattery()
+        vm.refreshBattery()
+        assertTrue(vm.battery().refreshing)
+        assertEquals(1, r.fake.batteryRefreshCalls)
+        gate.complete(Unit)
+        kotlinx.coroutines.yield()
+        assertFalse(vm.battery().refreshing)
+        assertEquals(null, vm.battery().refreshMessage)
+        assertEquals(0, r.fake.batteryRefreshOverlaps)
+        vm.refreshBattery() // a later tap is a new request
+        assertEquals(2, r.fake.batteryRefreshCalls)
+        job.cancel()
+    }
+
+    @Test
+    fun batteryTap_failure_keepsTheValueAndSaysItIsStale() = runTest {
+        val r = RefreshRepo()
+        val measured = java.time.Instant.parse("2026-11-22T17:59:00Z")
+        r.fake.authenticated()
+        r.fake.batteryF.value = cz.nowass.dispenser.data.device.Fresh.Live(
+            cz.nowass.dispenser.device.ops.BatteryRecord(cz.nowass.dispenser.device.ops.BatteryState.VALID, 4050, 0), measured, 7)
+        r.fake.batteryRefresh = { cz.nowass.dispenser.device.ops.OpResult.Uncertain("timeout") }
+        val vm = DashboardViewModel(r.ui)
+        val job = backgroundScope.launch { vm.uiState.collect {} }
+        vm.refreshBattery()
+        val b = vm.battery()
+        assertEquals(BatteryRefreshMessage.FAILED, b.refreshMessage)
+        assertEquals(4050, b.millivolts)
+        assertEquals(measured, b.measuredAt) // the old measurement time, never "now"
+        // disconnected: nothing sent, explained
+        r.fake.batteryRefresh = { cz.nowass.dispenser.device.ops.OpResult.NotSent("not connected") }
+        vm.refreshBattery()
+        assertEquals(BatteryRefreshMessage.NOT_CONNECTED, vm.battery().refreshMessage)
+        assertEquals(measured, vm.battery().measuredAt)
+        job.cancel()
+    }
+
+    @Test
+    fun demoBattery_isNotRefreshable() = runTest {
+        val vm = DashboardViewModel(MockDispenserRepository())
+        val b = vm.uiState.filterIsInstance<DashboardUiState.Ready>().first().battery
+        assertFalse(b.refreshable)
+        vm.refreshBattery() // ignored
+        assertFalse(vm.uiState.filterIsInstance<DashboardUiState.Ready>().first().battery.refreshing)
     }
 }
