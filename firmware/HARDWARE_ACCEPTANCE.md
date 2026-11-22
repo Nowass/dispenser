@@ -208,6 +208,41 @@ app-only writes at 0x30000 with backups (`backup-20261122-combined/`), evidence
   TLS-wake heap minimum and stack mark (log lost before sleep), R4 RECOVERY and distinct
   ephemerals/session IDs, R8, energy measurements.
 
+### 8i. First PRODUCTION e-mail from the normal pilot firmware (**BENCH VERIFIED** 2026-11-23)
+
+Image `normal-pilot-production-e217c16` (`0f0708f0…50276708`, 1,426,016 B, pilot profile, endpoint
+`dispenser-notify.nowassek.workers.dev` only), pump motor disconnected (owner-confirmed), owner
+approvals for token provisioning, flashing and exactly one real event. Evidence
+`~/dispenser-hw-evidence/production-pilot-20261123/` (flash log, decoded state), private backups and
+raw console logs in `backup-20261123-production/`.
+
+- **Token:** the owner's production token candidate was rejected (401; method checked against
+  staging with the bench token: 400). The owner rotated `DEVICE_API_TOKEN` **manually in the
+  Cloudflare dashboard** with a newly generated 64-hex token (local 0600 file, clipboard copy, never
+  printed); no other secret, Worker code, D1 or cron changed. New token verified with an
+  authenticated malformed-JSON POST: 400 `malformed_json`, nothing stored.
+- **nvs_sec:** regenerated from the bench credentials with only `api_token` replaced; verified
+  against the device's current `nvs_sec`: same key set, Wi-Fi and setup code byte-identical,
+  `api_token` = new token. Written at 0x28000 together with the app at 0x30000 (read-back verified);
+  `nvs` and `otadata` byte-identical; the unencrypted image file deleted afterwards.
+- **Preflight (decoded):** READY, config rev 37 (LOW threshold 97 % set by the owner at 96 %
+  remaining), schedules rev 55 / 0, exactly one undelivered RESERVOIR_LOW (seq 2, WARNING,
+  attempts 0).
+- **Delivery (owner RESET, power-on boot):** `App version 0.2.0-dev`, battery VALID 4,050 mV,
+  Wi-Fi in 1.6 s, SNTP in 4.6 s, `Certificate validated` (bundle) 2.8 s after the session opened.
+  Production D1: exactly one row `dsp-e072a11e1f34-9767b4bc-2` (RESERVOIR_LOW), PENDING, then
+  **SENT 2026-11-22 23:50:36 UTC** by the cron; **owner confirmed one e-mail received**. No second
+  row afterwards.
+- **After:** button wake (`cause=BUTTON`), BLE service window, app connected, battery tap (VALID
+  4,054–4,066 mV, app 4.05 V), LOW threshold restored to 20 % by the owner. No panic/abort in the
+  capture. **Production pilot firmware kept installed.**
+- **First attempt note:** the console logger's RTS pulse did not restart the chip while the flasher
+  stub was running (no boot, nothing sent); the owner's RESET started it.
+- **Not covered:** the device sleeping after that BLE wake was not captured (capture ended with the
+  window still open); device-side retry; TLS-wake heap minimum; everything listed as deferred in
+  KNOWN_ISSUES (R4, R7, R8, pump G-tests, energy, ADC calibration/100 nF, notify_mask UI).
+  Rollback: 7acb644 app + `nvs_sec-before.bin` from the backup directory.
+
 ### 8g. Battery telemetry, manual refresh and BATTERY_LOW classification (**BENCH VERIFIED** 2026-11-22)
 
 - 0bed92d (2026-11-22 19:21): app-only write at 0x30000, preflight and private backups
