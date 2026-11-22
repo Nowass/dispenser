@@ -176,6 +176,21 @@ these figures are **not** target measurements.
 | 8.3 | Handshake duration (X25519 in software) for XXpsk3 and IK, and per-frame encrypt/decrypt time | timestamps (`esp_timer_get_time`) | |
 | 8.4 | Hardware RNG quality with the radio on during a BLE session (ephemeral keys) | ESP-IDF RNG notes; entropy check | |
 
+### 8g. Battery telemetry, manual refresh and BATTERY_LOW classification (**BENCH VERIFIED** 2026-11-22)
+
+- 0bed92d (2026-11-22 19:21): app-only write at 0x30000, preflight and private backups
+  (`backup-20261122-deploy-0bed92d-run2/`), NVS/nvs_sec/otadata byte-identical after the write,
+  READY kept by the owner's decision. Boot: `battery: VALID 4072 mV (pad 2036 mV, spread 4 mV)`,
+  no GPIO10 activation; owner: pump did not switch, app shows 4.07 V (multimeter 4.15 V, charging).
+- 7acb644 (2026-11-22 20:21): same procedure (`backup-20261122-deploy-7acb644/`), motor
+  disconnected. 30-min capture: clean boot (0.2.0-dev), no `E` line, no GPIO10 `ACTIVE`, VALID
+  4058–4074 mV, spread 1–9 mV; manual refreshes visible as new samples (e.g. at 23.8 s, 27.5 s,
+  35.2 s of the session); BATTERY_LOW classification OK (≥ 3,900 mV), no episode. Normal app
+  7acb644 installed by the owner over the existing app (same key), data and pairing kept; battery
+  card with measurement time and tap refresh confirmed by the owner.
+- Open: ADC accuracy (app 4.05 V vs 4.16 V multimeter while charging: one comparison), the 100 nF
+  capacitor question, a LOW episode and its delivery on hardware.
+
 ### 8f. Normal firmware with e-mail notifications: gate analysis (2026-11-22)
 
 Goal: ONE normal image (BLE + Android, GPIO3 button, GPIO10 pump, GPIO4 battery, dosing, deep

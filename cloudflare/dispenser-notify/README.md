@@ -365,6 +365,29 @@ npx wrangler d1 execute dispenser-notifications --remote --command \
   "SELECT sql FROM sqlite_master WHERE name = 'notifications'"
 ```
 
+## Staging (owner-approved 2026-11-22)
+
+An isolated copy of the same code for device integration tests: `wrangler.staging.jsonc`.
+
+| | Staging | Production |
+|---|---|---|
+| Worker / URL | `dispenser-notify-staging` / `https://dispenser-notify-staging.nowassek.workers.dev` | `dispenser-notify` |
+| D1 | `dispenser-notifications-staging` (own database, same migrations) | `dispenser-notifications` |
+| `DEVICE_API_TOKEN` | the bench device's synthetic token (already in its `nvs_sec`) | owner's production token |
+| Gmail / OAuth secrets | **none** | five secrets |
+| Cron trigger | **none**: the delivery run never executes, staging never sends e-mail | `*/5 * * * *` |
+
+Every staging command names the config explicitly (`-c wrangler.staging.jsonc`); the D1 commands
+name the staging database. Production resources are never addressed. Ongoing usage: one Worker and
+one small D1 database on the free plan; requests only when a test or the bench device posts (no
+cron, no scheduled invocations). Removal: `npx wrangler delete -c wrangler.staging.jsonc` and
+`npx wrangler d1 delete dispenser-notifications-staging`.
+
+Setup (after `npx wrangler login`): `d1 create dispenser-notifications-staging` (its ID goes into
+`wrangler.staging.jsonc`), `d1 migrations apply dispenser-notifications-staging --remote -c
+wrangler.staging.jsonc`, `deploy -c wrangler.staging.jsonc`, `secret put DEVICE_API_TOKEN -c
+wrangler.staging.jsonc` (piped from the owner-only bench secrets file, never echoed).
+
 ## Security
 
 - **Ingestion authentication:** one shared bearer token (`DEVICE_API_TOKEN`), compared in

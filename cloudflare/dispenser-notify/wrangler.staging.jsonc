@@ -1,0 +1,33 @@
+// STAGING copy of the notification backend (same code as production, src/index.ts).
+// Deploy only with an explicit config:  npx wrangler deploy -c wrangler.staging.jsonc
+// Isolation from production (wrangler.jsonc): own Worker name and workers.dev URL, own D1 database,
+// own DEVICE_API_TOKEN secret (the bench device's synthetic token, never the production token),
+// NO Gmail/OAuth secrets and NO cron trigger: the scheduled e-mail delivery never runs here, so
+// staging never sends e-mail. Ingestion (/api/v1/events), authentication, validation, D1
+// persistence and idempotency behave exactly as in production.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dispenser-notify-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+    },
+  },
+  "triggers": {
+    "crons": [],
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "dispenser-notifications-staging",
+      // filled from `npx wrangler d1 create dispenser-notifications-staging`
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+}
