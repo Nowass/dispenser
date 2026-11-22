@@ -210,7 +210,7 @@ integration suite. With the production URL the build is still refused (`CONFIG_D
 |---|---|---|
 | R1, R6 | PASS | 8a.2 (two RNG-gate runs) |
 | R2, R3 | RNG-gate parts PASS; stage-2 parts open | handshake-side counters / HELLO session ID 0 without RF not recorded on hardware |
-| **R5** | **NOT ACCEPTED** (bench deviation) | protocol v2 classified the 8 MiB run NOT ACCEPTED and forbids a statistical repeat; code review found no defect. Closing it needs an **owner decision**: either a documented investigation result, or a newly pre-registered protocol v3 with a fresh confirmatory capture (the existing RNG-gate image and `tools/rng_capture.py` apply unchanged) |
+| R5 | **ACCEPTED under protocol v3** (2026-11-22) | v2 NOT ACCEPTED is kept; v3 replication: integrity valid, C1–C3 not confirmed, 5a PASS, STS validated rows PASS, pooled v2+v3 \|Z\| = 2.24 < 3.29 (8a.3). Observations: pooled p = 0.025, template flags only in `randombytes_buf` |
 | R4 | partly evidenced, not recorded | CLAIM (2026-11-20, `claim-20261120/`), SESSION (daily use) and ADD (normal app joined by invitation, 2026-11-22) worked with the real phone; RECOVERY never run; "different ephemerals and session IDs across runs" not recorded |
 | R7 | open; instrumented | from 7acb644+: `dsp_ble: radio down: heap free …, min since boot …, app stack free min …` and `dsp_https: https session … heap …` lines give the numbers from a normal run |
 | R8 | partly observed, not recorded | doses with the app connected suspended BLE and the app reconnected with a new IK session (auto-connect); EV_SESSION_CLOSING at the 15-min maximum and the plain END_SESSION case not recorded |
@@ -227,7 +227,7 @@ integration suite. With the production URL the build is still refused (`CONFIG_D
    (no `nvs_sec` change), optionally the same Gmail sender to the owner. Then flash the combined
    staging image; it delivers real e-mails through the real ESP32 TLS stack and closes 3.2, 4.1–4.5,
    5.2, 6.1 and R7 on hardware. This is still the bench MVP (synthetic credentials).
-2. *Production:* R5 decision (above), R4 RECOVERY + recorded runs, R8, G-tests and 8b; then a
+2. *Production:* R5 is accepted (8a.3, 2026-11-22); remaining: R4 RECOVERY + recorded runs, R7, R8, G-tests and 8b; then a
    reviewed change limited to `main/CMakeLists.txt` that lifts the BLE/transport/pump refusals for
    `CONFIG_DSP_APP_ALLOW_PRODUCTION` (the bring-up window stays refused), production token
    provisioning into `nvs_sec` (approval), and the production smoke test.
@@ -261,7 +261,7 @@ option together with the production endpoint.
 | R2 | RNG routing | with the BT controller enabled, a handshake raises `dsp_esp_rng_calls()`; libsodium's internal source never used | **PASS** for the RNG-gate part 2026-11-19 (libsodium requests raise the adapter counter: 1 → 6 for 5 requests; one adapter call per 4 KiB `randombytes_buf` block); the handshake part is checked in stage 2 |
 | R3 | Refusal without RF | controller disabled: `dsp_esp_rng_ready()` false, HELLO session ID 0, HS message 0 answered HANDSHAKE_FAILED; the `abort()` path not reached | **PASS** for the RNG-gate part 2026-11-19 (ready=0, bytes=0 before the controller starts and after it stops; no abort); the HELLO / HANDSHAKE_FAILED part needs the security service (stage 2) |
 | R4 | Live handshakes over BLE | CLAIM (XXpsk3), SESSION (IK), ADD and RECOVERY with a phone (or a host peer over BLE) succeed; two runs give different ephemeral keys and session IDs | |
-| R5 | RNG quality sample | ≥ 1 MiB from `esp_fill_random` with RF on, analyzed off-device (`ent`, dieharder or a NIST STS subset); recorded | Capture integrity **PASS** (both runs). Statistical classification **NOT ACCEPTED** under the pre-registered protocol v2 (8a.2). **R5 DEVIATION ACCEPTED FOR BENCH MVP ONLY** (8a.2) |
+| R5 | RNG quality sample | ≥ 1 MiB from `esp_fill_random` with RF on, analyzed off-device (`ent`, dieharder or a NIST STS subset); recorded | v2 (2026-11-19): **NOT ACCEPTED** (5a FAIL, excess of ones in `randombytes_buf`). v3 (2026-11-22, owner-authorized replication under a sealed protocol with a pooled v2+v3 criterion): **ACCEPTED** (8a.3); remaining observations in 8a.3 |
 | R6 | PSK on target | the `test-vectors/ble_session_v1.txt` PSK vectors reproduce on the device through `dsp_psk_derive` (mbedTLS/TF-PSA-Crypto on the ESP32-C3) | **PASS** 2026-11-19 (psk 24/24, psk_not 12/12, both runs) |
 | R7 | Target resources | 8.1–8.3 with the real stack: peak heap per handshake, task stack high-water mark during a handshake and during dispatch, handshake and per-frame timing; the static estimates in the design's resource table replaced | |
 | R8 | Lifecycle on the device | pump suspension closes the security session (EV_SUSPENDING_FOR_DOSE best effort), reconnect needs a new IK handshake; EV_SESSION_CLOSING before the 15-minute maximum; a plain END_SESSION closes only its connection | |
@@ -402,6 +402,34 @@ not a security PASS and remains NOT ACCEPTED.
   security acceptance (8a) complete.
 - Full R5 acceptance remains required before any production use. R4, R7, R8 and the stage-2 parts
   of R2 and R3 remain OPEN.
+
+#### 8a.3 R5 replication under protocol v3 (2026-11-22): ACCEPTED
+
+Owner-authorized replication of the failed v2 run. Protocol v3 was sealed before any data
+(`~/dispenser-hw-evidence/rnggate-r5-v3-20261122/protocol-v3/`, `PROTOCOL.md` SHA-256
+`fb0d7275…3eebe`, 21:00:15): the v2 image, tests, thresholds and analysis code unchanged, one
+capture, plus a pooled v2+v3 bit-balance criterion (|Z| ≥ 3.2905 → not accepted) so the v2 finding
+keeps its weight. Board: the same XIAO (battery + USB, pump motor disconnected); app-only write of
+the RNG-gate image at 0x30000 with backups (`backup-20261122-r5v3/`), NVS/nvs_sec/otadata
+byte-identical before the capture and after the restore; **7acb644 restored** (verified, normal
+boot, BLE, battery taps). Evidence sealed: `capture/` and `analysis/` (`R5-CLASSIFICATION.txt`).
+
+| Part | Result |
+|---|---|
+| Integrity | VALID: capture exit 0, 0 framing/CRC errors, offline reconstruction byte-identical, 2 × 8,388,608 B, one boot; R1, R2, R3pre, R3post, R6 PASS and SUMMARY on the same boot |
+| C1–C3 (α' = 0.00167) | not confirmed (`esp_fill_random` 0.655 / 0.910 / 0.618; `randombytes_buf` 0.011 / 0.138 / 0.820) |
+| 5a | PASS: 0 of 14 p-values < 0.01 (minimum 0.108); deterministic checks pass |
+| STS 5b | validated rows PASS in both sources; `esp_fill_random` 0/188 flagged; `randombytes_buf` 1 unvalidated row (NonOverlappingTemplate #131, uniformity p 0.000013), within the limit of 2 |
+| Pooled v2+v3 | S = +25,954 over 134,217,728 bits, Z = 2.240, p = 0.025: no flag |
+
+**R5: ACCEPTED (protocol v3).** Remaining observations (recorded, not criteria): the pooled balance
+is still nominally unusual (p = 0.025; the v2 excess is diluted, not explained, and a bias half its
+size would pass with ~50 % probability); both runs flagged only NonOverlappingTemplate rows and only
+for `randombytes_buf` (different templates, unvalidated tests); conditioned output only (no
+SP 800-90B assessment). Process deviations: two script errors stopped the procedure before/after the
+write without effect on the device; one concurrent duplicate analysis produced invalid STS output,
+preserved as `analysis-attempt1-INVALID-concurrent-runs/` and not used. Recommendation: one RNG-gate
+capture after any change of the RNG path or of ESP-IDF, evaluated with the same v3 rules.
 
 ### 8b. M1.10d.2 — hardware acceptance of the NimBLE transport (OPEN)
 
