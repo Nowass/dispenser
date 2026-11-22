@@ -1593,6 +1593,12 @@ and cleared; any other clipboard content is ignored and kept) → setup code fro
 No key is copied between the apps, nothing is reset or claimed. Tests: `OnboardingUiTest` (paste,
 copy, DEMO switch visibility), `DeviceFeaturesBuildTypeTest` per build type.
 
+Bench result (2026-11-22, Galaxy S23, owner-reported): the release app joined the owned device through
+the clipboard hand-over and works for daily use (automatic connection in both orders, data equal to the
+debug app, pump screen without BENCH texts, no DEMO switch). Note from the run: after a successful
+paste the screen moves on to the setup-code step; the invitation does not belong there (it is
+refused with "Kód musí začínat DSP2:").
+
 ## 17. Implementation notes (M1.10e.4b — onboarding and device administration)
 
 Implemented and tested, uncommitted, awaiting the onboarding/security review. QR scanning and
