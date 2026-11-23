@@ -7,6 +7,23 @@ Formát vychází z [Keep a Changelog](https://keepachangelog.com/cs/1.1.0/) a v
 
 ## [Nevydáno]
 
+## [0.5.0-beta.3] – 2026-11-23
+
+Třetí beta verze aplikace pro Android, první pro každodenní používání se skutečným dávkovačem přes
+Bluetooth. Instaluje se jako aktualizace stávající aplikace; data v telefonu zůstávají zachována.
+
+### Přidáno
+- Připojení k dávkovači přes Bluetooth: zabezpečené spárování, automatické připojení při otevření aplikace, správa telefonů a pozvánky dalších telefonů (i předání pozvánky aplikaci na stejném telefonu).
+- Údaje ze zařízení: zásobník (objem a aktuální množství, mez upozornění na nízký stav), baterie (napětí, odhad nabití, ruční obnovení s časem měření) a historie událostí zařízení.
+- Nastavení pumpy a připravenosti zařízení.
+- Aktualizace firmwaru zařízení z aplikace (Nastavení → Firmware zařízení): vydání z GitHub Releases, předběžné verze firmwaru jen se zapnutým beta kanálem firmwaru. Vyžaduje firmware 0.3.0 nebo novější.
+- Zavodnění pumpy (Nastavení → Pumpa, firmware 0.3.3 a novější): první klepnutí pumpu spustí, druhé zastaví. Stav Běží/Zastaveno se zobrazuje jen podle potvrzení ze zařízení, po ztrátě spojení jako neznámý. Jedno spuštění trvá nejvýše 30 s a zařízení pumpu samo zastaví i při ztrátě spojení.
+
+### Známá omezení
+- Zavodnění neodečítá objem zásobníku a nezapisuje se do historie dávek; po zavodnění zkontrolujte nastavení zásobníku.
+- Starší firmware než 0.3.0 nelze aktualizovat z aplikace (jednou je potřeba instalace přes USB).
+- Verze pro 32bitové procesory x86 se nevydává; podporované jsou procesory ARM (32 i 64 bitů) a x86_64.
+
 ## [0.5.0-beta.2] – 2026-11-19
 
 Druhá beta verze aplikace pro Android. Aplikace dál pracuje v režimu DEMO a vaše data z verze

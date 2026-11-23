@@ -42,20 +42,24 @@ class AboutContentTest {
     @Test
     fun realChangelog_isCzech_firstRelease_isCurrentForTheBuiltVersion() {
         val c = ChangelogParser.parse(changelogFile.readText())
-        assertEquals(listOf("Nevydáno", "0.5.0-beta.2", "0.5.0-beta.1"), c.sections.map { it.label })
+        assertEquals(listOf("Nevydáno", "0.5.0-beta.3", "0.5.0-beta.2", "0.5.0-beta.1"), c.sections.map { it.label })
         assertTrue(c.sections[0].isUnreleased)
         // The empty unreleased placeholder is not shown; the release sections are, newest first.
-        assertEquals(listOf("0.5.0-beta.2", "0.5.0-beta.1"), c.visibleSections.map { it.label })
-        assertEquals("0.5.0-beta.2 – 2026-11-19", c.sections[1].title)
-        assertEquals(listOf("Změněno", "Zabezpečení a soukromí", "Známá omezení"), c.sections[1].groups.map { it.title })
+        assertEquals(listOf("0.5.0-beta.3", "0.5.0-beta.2", "0.5.0-beta.1"), c.visibleSections.map { it.label })
+        assertEquals("0.5.0-beta.3 – 2026-11-23", c.sections[1].title)
+        assertEquals(listOf("Přidáno", "Známá omezení"), c.sections[1].groups.map { it.title })
+        assertTrue(c.sections[1].groups.first().items.any { "Zavodnění pumpy" in it })
         assertTrue(c.sections[1].groups.last().items.any { "32bitové procesory x86" in it })
-        // The first release stays unchanged below it.
-        assertEquals("0.5.0-beta.1 – 2026-11-15", c.sections[2].title)
-        assertEquals(listOf("Přidáno", "Zabezpečení a soukromí", "Známá omezení"), c.sections[2].groups.map { it.title })
-        assertTrue(c.sections[2].groups.first().items.any { "prázdným seznamem rozvrhů" in it })
-        // Release and debug builds of 0.5.0-beta.2 both show it as current; 0.5.0-beta.1 still finds its own.
+        // The earlier releases stay unchanged below it.
+        assertEquals("0.5.0-beta.2 – 2026-11-19", c.sections[2].title)
+        assertEquals(listOf("Změněno", "Zabezpečení a soukromí", "Známá omezení"), c.sections[2].groups.map { it.title })
+        assertEquals("0.5.0-beta.1 – 2026-11-15", c.sections[3].title)
+        assertEquals(listOf("Přidáno", "Zabezpečení a soukromí", "Známá omezení"), c.sections[3].groups.map { it.title })
+        assertTrue(c.sections[3].groups.first().items.any { "prázdným seznamem rozvrhů" in it })
+        // Release and debug builds find their own section.
+        assertEquals("0.5.0-beta.3", c.relevantFor("0.5.0-beta.3")!!.label)
+        assertEquals("0.5.0-beta.3", c.relevantFor("0.5.0-beta.3+debug")!!.label)
         assertEquals("0.5.0-beta.2", c.relevantFor("0.5.0-beta.2")!!.label)
-        assertEquals("0.5.0-beta.2", c.relevantFor("0.5.0-beta.2+debug")!!.label)
         assertEquals("0.5.0-beta.1", c.relevantFor("0.5.0-beta.1")!!.label)
         assertEquals("0.5.0-beta.1", c.relevantFor("0.5.0-beta.1+debug")!!.label)
     }
