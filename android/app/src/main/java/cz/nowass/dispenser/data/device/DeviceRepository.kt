@@ -9,6 +9,7 @@ import cz.nowass.dispenser.device.ops.InviteRecord
 import cz.nowass.dispenser.device.ops.ManualDoseRecord
 import cz.nowass.dispenser.device.ops.OpResult
 import cz.nowass.dispenser.device.ops.PhoneRecord
+import cz.nowass.dispenser.device.ops.PrimeStatusRecord
 import cz.nowass.dispenser.device.ops.Readiness
 import cz.nowass.dispenser.device.ops.ScheduleRecord
 import cz.nowass.dispenser.device.ops.StatusRecord
@@ -129,6 +130,21 @@ interface DeviceRepository {
      */
     suspend fun startUpdate(request: StartUpdateRequest): OpResult<UpdateVerdictRecord> = OpResult.NotSent("not supported")
 
+    /**
+     * Pump priming (BLE_PROTOCOL.md 7.9, 10.9), only to firmware whose GET_UPDATE_STATUS
+     * `running_version` is >= 0.3.3 (8.4; read in this session first when not known yet). Older or
+     * unknown firmware is never asked: Refused(Unavailable([PRIME_UNSUPPORTED])). Not connected:
+     * NotSent. All three are sent once (no retry): a lost answer is Uncertain and the session closes,
+     * which stops the pump on the device (disconnect). Nothing is journaled or cached.
+     *
+     * PRIME_START: one at a time (else Refused(InProgress)); never retried.
+     */
+    suspend fun primeStart(): OpResult<PrimeStatusRecord> = OpResult.NotSent("not supported")
+    /** PRIME_STOP: no reservation (a stop never waits for another priming request of the app). */
+    suspend fun primeStop(): OpResult<PrimeStatusRecord> = OpResult.NotSent("not supported")
+    /** PRIME_STATUS: the state, and the lease heartbeat while running. */
+    suspend fun primeStatus(): OpResult<PrimeStatusRecord> = OpResult.NotSent("not supported")
+
     /** GET_STATUS, then the battery telemetry (when the firmware provides it). */
     suspend fun refreshStatus(): OpResult<StatusRecord>
     suspend fun refreshDiagnostics(): OpResult<DiagnosticsRecord>
@@ -180,5 +196,7 @@ interface DeviceRepository {
         const val HISTORY_PAGE_MAX = 4
         /** [LocalRefusal.Unavailable] reason: the firmware predates the OTA update types (< 0.3.0). */
         const val UPDATE_UNSUPPORTED = "firmware update not supported by this firmware"
+        /** [LocalRefusal.Unavailable] reason: the firmware predates pump priming (< 0.3.3 or unknown). */
+        const val PRIME_UNSUPPORTED = "pump priming not supported by this firmware"
     }
 }

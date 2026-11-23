@@ -26,6 +26,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,13 +39,16 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import cz.nowass.dispenser.R
+import cz.nowass.dispenser.data.device.PrimeController
 import cz.nowass.dispenser.data.onboarding.BenchField
 import cz.nowass.dispenser.data.onboarding.BenchFieldError
 import cz.nowass.dispenser.data.onboarding.BenchGate
@@ -160,15 +164,22 @@ class BenchPumpViewModel(private val controller: BenchPumpController) : ViewMode
             return BenchPumpForm(t(c.pumpFlowUlPerS), ml(c.maxDoseUl), ml(c.maxDailyUl), t(c.maxRuntimeMs), t(c.minIntervalS), calibrateNow = false)
         }
 
-        fun factory(controller: () -> BenchPumpController): ViewModelProvider.Factory = viewModelFactory {
+        /** Also creates the screen's [PrimeViewModel] when [prime] is given. */
+        fun factory(controller: () -> BenchPumpController, prime: (() -> PrimeController)? = null): ViewModelProvider.Factory = viewModelFactory {
             initializer { BenchPumpViewModel(controller()) }
+            if (prime != null) initializer { PrimeViewModel(prime()) }
         }
     }
 }
 
 @Composable
-fun BenchPumpRoute(viewModel: BenchPumpViewModel, onBack: () -> Unit) {
+fun BenchPumpRoute(viewModel: BenchPumpViewModel, onBack: () -> Unit, prime: PrimeViewModel? = null) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    if (prime != null) {
+        // priming never outlives the screen: leaving it or the app going to the background stops the pump
+        LifecycleEventEffect(Lifecycle.Event.ON_STOP) { prime.leave() }
+        DisposableEffect(prime) { onDispose { prime.leave() } }
+    }
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(horizontal = Spacing.xs), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.reservoir_back)) }
@@ -201,6 +212,10 @@ fun BenchPumpRoute(viewModel: BenchPumpViewModel, onBack: () -> Unit) {
                 }
                 outcomeText(state.outcome)?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
                 OutlinedButton(onClick = viewModel::load, enabled = !state.busy, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.bench_reload)) }
+            }
+            if (prime != null) {
+                val primeState by prime.state.collectAsStateWithLifecycle()
+                PrimeSection(primeState, onToggle = prime::toggle)
             }
         }
     }

@@ -321,7 +321,7 @@ static bool fs_gp_wait(void *ctx, uint32_t ms)
     return pump_run(NULL, ms) == DSP_PUMP_OK; /* may power_lost() (longjmp) like the pump */
 }
 static const dsp_pump_gpio_hw_t FS_GP_HW = {NULL, fs_gp_configure, fs_gp_set, fs_gp_read, fs_gp_hold,
-                                            fs_gp_arm, fs_gp_disarm, fs_gp_wait};
+                                            fs_gp_arm, fs_gp_disarm, fs_gp_wait, NULL, NULL};
 static dsp_pump_result_t fs_gp_run(void *ctx, uint32_t ms)
 {
     (void)ctx;
@@ -338,7 +338,7 @@ static bool fs_gp_is_off(void *ctx)
     (void)ctx;
     return fs_gp_drv_port.is_off(fs_gp_drv_port.ctx) && pump_is_off(NULL);
 }
-static const dsp_pump_port_t FS_GP_PUMP = {NULL, fs_gp_run, fs_gp_off, fs_gp_is_off};
+static const dsp_pump_port_t FS_GP_PUMP = {NULL, fs_gp_run, fs_gp_off, fs_gp_is_off, NULL, NULL, NULL, NULL}; /* no priming in the sim */
 static void fs_gp_boot(void)
 {
     fs_gp.driven = false; /* reset: undriven input, the external pull-down holds it inactive */

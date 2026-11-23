@@ -43,6 +43,11 @@ object MessageType {
     const val GET_UPDATE_STATUS = 0xB0
     /** Firmware >= 0.3.0 only; after ACCEPTED the device ends the session itself (10.8). */
     const val START_UPDATE = 0xB1
+    /** Pump priming (10.9): firmware >= 0.3.3 only (8.4, `running_version` from GET_UPDATE_STATUS). */
+    const val PRIME_START = 0xB2
+    const val PRIME_STOP = 0xB3
+    /** Status read that also renews the priming lease (sent once per second while running). */
+    const val PRIME_STATUS = 0xB4
 }
 
 /** One authenticated session as the operations see it (bound to one connection generation). */

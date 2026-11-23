@@ -87,8 +87,8 @@ android {
         minSdk = 26
         targetSdk = 37
         // SemVer versionName; versionCode strictly increasing for every published APK (docs/RELEASING.md).
-        versionCode = 6
-        versionName = "0.5.0-beta.2"
+        versionCode = 7
+        versionName = "0.5.0-beta.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

@@ -127,6 +127,16 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
         startUpdateRequests += request; startUpdateHook(); return startUpdateOutcome
     }
 
+    // pump priming: scripted answers (each call may suspend), recorded request order
+    var primeStartAnswer: suspend () -> OpResult<cz.nowass.dispenser.device.ops.PrimeStatusRecord> = { OpResult.NotSent("not connected") }
+    var primeStopAnswer: suspend () -> OpResult<cz.nowass.dispenser.device.ops.PrimeStatusRecord> = { OpResult.NotSent("not connected") }
+    var primeStatusAnswer: suspend () -> OpResult<cz.nowass.dispenser.device.ops.PrimeStatusRecord> = { OpResult.NotSent("not connected") }
+    /** "start" / "stop" / "status", in the order the requests were made. */
+    val primeCalls = mutableListOf<String>()
+    override suspend fun primeStart(): OpResult<cz.nowass.dispenser.device.ops.PrimeStatusRecord> { primeCalls += "start"; return primeStartAnswer() }
+    override suspend fun primeStop(): OpResult<cz.nowass.dispenser.device.ops.PrimeStatusRecord> { primeCalls += "stop"; return primeStopAnswer() }
+    override suspend fun primeStatus(): OpResult<cz.nowass.dispenser.device.ops.PrimeStatusRecord> { primeCalls += "status"; return primeStatusAnswer() }
+
     /** Phase C: the device's history; paged like the firmware (seq < before, newest first). */
     var historyLog: List<cz.nowass.dispenser.device.ops.HistoryEventRecord> = emptyList()
     var historyFaults = false

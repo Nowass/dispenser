@@ -58,6 +58,10 @@ class FakeDevicePort(val deviceId: String = "a0b1c2d3e4f5") : SessionPort {
     )
     /** START_UPDATE verdict; ACCEPTED (0) ends the session after the answer, like the firmware. */
     var updateVerdict = 0L
+    /** PRIME_START verdict (0 OK starts the pump); the pump state the PRIME_* answers report. */
+    var primeVerdict = 0L
+    var primeRunning = false
+    var primeStopReason = 0L
 
     // ---- scripting ----
     val faults = mutableMapOf<Int, Fault>()
@@ -68,6 +72,8 @@ class FakeDevicePort(val deviceId: String = "a0b1c2d3e4f5") : SessionPort {
     val after = mutableMapOf<Int, () -> Unit>()
     val received = mutableListOf<Pair<Int, Map<String, Any>>>()
     fun count(type: Int) = received.count { it.first == type }
+    /** The `retries` each type was last requested with. */
+    val retriesOf = mutableMapOf<Int, Int>()
     /** MANUAL_DOSE: the device suspends BLE for the pump and closes the link (normal path). */
     var doseClosesLink = true
 
@@ -80,6 +86,7 @@ class FakeDevicePort(val deviceId: String = "a0b1c2d3e4f5") : SessionPort {
             if (!open) return RequestResult.NotSent("closed")
             // the body must be encodable as a real request (the codec validates every rule)
             BleProtocol.encodeBody(type, 0, fields)
+            retriesOf[type] = retries
             hooks.remove(type)?.invoke()
             if (!open) return RequestResult.Uncertain("closed while sending", 1)
             when (faults.remove(type)) {
@@ -150,6 +157,23 @@ class FakeDevicePort(val deviceId: String = "a0b1c2d3e4f5") : SessionPort {
         } else {
             if (updateVerdict == 0L) after[M.START_UPDATE] = { close() } // ACCEPTED: the device ends the session
             ok(mapOf("verdict" to updateVerdict))
+        }
+        M.PRIME_START, M.PRIME_STOP, M.PRIME_STATUS -> {
+            val v = String(updateStatus["running_version"] as ByteArray)
+            if (!DeviceDispenserRepository.firmwareHasUpdate(info)) {
+                close()
+                RequestResult.Uncertain("session closed by old firmware", 1)
+            } else if (!DeviceDispenserRepository.firmwareHasPrime(v)) {
+                err(3) // UNKNOWN_TYPE (0.3.0 .. 0.3.2)
+            } else {
+                var verdict = 0L
+                when (type) {
+                    M.PRIME_START -> { verdict = primeVerdict; if (verdict == 0L) { primeRunning = true; primeStopReason = 0 } }
+                    M.PRIME_STOP -> if (primeRunning) { primeRunning = false; primeStopReason = 1 }
+                }
+                ok(mapOf("verdict" to verdict, "running" to primeRunning, "elapsed_ms" to 0L, "max_ms" to 30_000L,
+                    "lease_ms" to 3_000L, "stop_reason" to primeStopReason))
+            }
         }
         M.GET_DIAGNOSTICS -> ok(mapOf("diag" to mapOf("notify_storage_ok" to true, "tx_diag" to 0L, "tx_diag_status" to 0L,
             "rejections_unread" to 0L, "rejections_total" to 0L, "clock_trust" to 1L, "clock_reason" to 0L, "last_sync_utc" to 0L, "last_wake_reason" to 0L)))

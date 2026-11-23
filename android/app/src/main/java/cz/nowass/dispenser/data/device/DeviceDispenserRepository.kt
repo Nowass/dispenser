@@ -18,6 +18,7 @@ import cz.nowass.dispenser.device.ops.ManualResultState
 import cz.nowass.dispenser.device.ops.MessageType as M
 import cz.nowass.dispenser.device.ops.OpResult
 import cz.nowass.dispenser.device.ops.PhoneRecord
+import cz.nowass.dispenser.device.ops.PrimeStatusRecord
 import cz.nowass.dispenser.device.ops.Readiness
 import cz.nowass.dispenser.device.ops.Records
 import cz.nowass.dispenser.device.ops.ScheduleRecord
@@ -32,6 +33,7 @@ import cz.nowass.dispenser.device.session.OpenRequest
 import cz.nowass.dispenser.device.session.SessionFailure
 import cz.nowass.dispenser.device.session.SessionState
 import cz.nowass.dispenser.domain.ScheduleDraft
+import cz.nowass.dispenser.domain.update.SemanticVersion
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -216,11 +218,14 @@ class DeviceDispenserRepository(
 
     private fun updateUnsupported() = OpResult.Refused(LocalRefusal.Unavailable(DeviceRepository.UPDATE_UNSUPPORTED))
 
-    override suspend fun getUpdateStatus(): OpResult<UpdateStatusRecord> = live { s ->
+    override suspend fun getUpdateStatus(): OpResult<UpdateStatusRecord> = live { s -> readUpdateStatus(s) }
+
+    private suspend fun readUpdateStatus(s: LiveSession): OpResult<UpdateStatusRecord> =
         // never to firmware < 0.3.0: an unknown encrypted type would close its session
         if (!firmwareHasUpdate(s.info)) updateUnsupported()
-        else ops.call(s, M.GET_UPDATE_STATUS, decode = Records::updateStatus)
-    }
+        else ops.call(s, M.GET_UPDATE_STATUS, decode = Records::updateStatus).also { r ->
+            if (r is OpResult.Ok) primeCapability = s.generation to firmwareHasPrime(r.value.runningVersion)
+        }
 
     override suspend fun startUpdate(request: StartUpdateRequest): OpResult<UpdateVerdictRecord> {
         if (!request.valid()) return OpResult.Refused(LocalRefusal.Invalid(emptySet()))
@@ -233,6 +238,38 @@ class DeviceDispenserRepository(
             }
         }
     }
+
+    // ---- pump priming (BLE_PROTOCOL.md 7.9, 8.4, 10.9) -------------------------------------------
+
+    /** Connection generation -> whether its firmware provides priming (from GET_UPDATE_STATUS). */
+    @Volatile private var primeCapability: Pair<Long, Boolean>? = null
+
+    private fun primeUnsupported() = OpResult.Refused(LocalRefusal.Unavailable(DeviceRepository.PRIME_UNSUPPORTED))
+
+    /**
+     * Sends a priming request only after this session's running_version proved >= 0.3.3 (8.4). Sent
+     * once: a retransmission would delay a following PRIME_STOP by the whole retry window, and a lost
+     * answer closes the session, which stops the pump on the device anyway.
+     */
+    private suspend fun prime(s: LiveSession, type: Int): OpResult<PrimeStatusRecord> {
+        val known = primeCapability?.takeIf { it.first == s.generation }?.second
+        val capable = known ?: when (val r = readUpdateStatus(s)) {
+            is OpResult.Ok -> firmwareHasPrime(r.value.runningVersion)
+            is OpResult.Refused -> false
+            is OpResult.Rejected -> return r
+            is OpResult.NotSent -> return r
+            is OpResult.Uncertain -> return r
+        }
+        if (!capable) return primeUnsupported()
+        return ops.call(s, type, retries = 0, decode = Records::primeStatus)
+    }
+
+    override suspend fun primeStart(): OpResult<PrimeStatusRecord> =
+        reserved(KEY_PRIME_START, guard = { null }) { live { s -> prime(s, M.PRIME_START) } }
+
+    override suspend fun primeStop(): OpResult<PrimeStatusRecord> = live { s -> prime(s, M.PRIME_STOP) }
+
+    override suspend fun primeStatus(): OpResult<PrimeStatusRecord> = live { s -> prime(s, M.PRIME_STATUS) }
 
     override suspend fun refreshDiagnostics(): OpResult<DiagnosticsRecord> = live { read(it, M.GET_DIAGNOSTICS, decode = Records::diagnostics) { v, b, s -> keep(diagS, KEY_DIAG, v, b, s) } }
 
@@ -794,6 +831,8 @@ class DeviceDispenserRepository(
         private const val KEY_BATTERY = "battery"
         /** The one START_UPDATE reservation (single flight). */
         private const val KEY_UPDATE = "START_UPDATE"
+        /** The one PRIME_START reservation (single flight; PRIME_STOP is never reserved). */
+        private const val KEY_PRIME_START = "PRIME_START"
         /** Bound on the device-reported age (a service window lasts minutes). */
         private const val MAX_BATTERY_AGE_S = 86_400L
 
@@ -804,5 +843,14 @@ class DeviceDispenserRepository(
         /** GET_UPDATE_STATUS / START_UPDATE exist from firmware 0.3.0 (8.3; unknown = no). */
         fun firmwareHasUpdate(info: BleProtocol.Info?): Boolean =
             info != null && (info.fwMajor > 0 || info.fwMinor >= 3)
+
+        private val PRIME_MIN_VERSION = SemanticVersion(0, 3, 3)
+
+        /**
+         * PRIME_START / PRIME_STOP / PRIME_STATUS exist from firmware 0.3.3 (8.4): GET_UPDATE_STATUS
+         * `running_version` as a semantic version (a pre-release such as 0.3.3-dev is older; unknown = no).
+         */
+        fun firmwareHasPrime(runningVersion: String?): Boolean =
+            runningVersion?.let(SemanticVersion::parse)?.let { it >= PRIME_MIN_VERSION } ?: false
     }
 }

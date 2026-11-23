@@ -360,7 +360,11 @@ fun DispenserApp(
             }
             deviceAdmin?.benchPumpFactory?.let { factory ->
                 composable(BENCH_PUMP_ROUTE) {
-                    cz.nowass.dispenser.ui.devices.BenchPumpRoute(viewModel(factory = factory()), onBack = { navController.popBackStack() })
+                    val f = factory()
+                    cz.nowass.dispenser.ui.devices.BenchPumpRoute(
+                        viewModel(factory = f), onBack = { navController.popBackStack() },
+                        prime = viewModel<cz.nowass.dispenser.ui.devices.PrimeViewModel>(factory = f),
+                    )
                 }
             }
             deviceAdmin?.firmwareFactory?.let { factory ->

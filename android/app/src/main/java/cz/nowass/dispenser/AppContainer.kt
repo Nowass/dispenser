@@ -376,7 +376,13 @@ class AppContainer(private val context: Context) {
         },
         // Pump settings and readiness (DEVICE mode, both builds; release shows neutral texts, debug the BENCH ones)
         benchPumpFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->
-            { cz.nowass.dispenser.ui.devices.BenchPumpViewModel.factory { cz.nowass.dispenser.data.onboarding.BenchPumpController(deviceUi(id).device) } }
+            {
+                cz.nowass.dispenser.ui.devices.BenchPumpViewModel.factory(
+                    { cz.nowass.dispenser.data.onboarding.BenchPumpController(deviceUi(id).device) },
+                    // pump priming (firmware >= 0.3.3); the best-effort stop on leaving outlives the screen
+                    { cz.nowass.dispenser.data.device.PrimeController(deviceUi(id).device, appScope) },
+                )
+            }
         },
         // Device firmware and the owner-initiated OTA update (DEVICE mode only, both builds)
         firmwareFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->

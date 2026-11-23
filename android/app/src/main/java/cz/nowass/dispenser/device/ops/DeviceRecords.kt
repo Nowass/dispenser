@@ -131,6 +131,46 @@ data class UpdateVerdictRecord(val wire: Int) {
     val verdict: UpdateVerdict get() = UpdateVerdict.of(wire)
 }
 
+/**
+ * Pump priming state (7.9, PRIME_START / PRIME_STOP / PRIME_STATUS, firmware >= 0.3.3). [verdictWire]
+ * and [stopReasonWire] are kept as sent: unknown values decode (a refusal / an unknown stop reason).
+ */
+data class PrimeStatusRecord(
+    /** PRIME_START admission; always 0 for PRIME_STOP / PRIME_STATUS. */
+    val verdictWire: Int,
+    /** The pump output is active right now (device readback). */
+    val running: Boolean,
+    /** Running: since the start; stopped: duration of the last run in this wake (0 = none). */
+    val elapsedMs: Long,
+    /** Maximum per activation (0 = not capable). */
+    val maxMs: Long,
+    /** Heartbeat lease (the device stops after this long without PRIME_STATUS / PRIME_START). */
+    val leaseMs: Long,
+    /** Why the last run stopped (0 while running). */
+    val stopReasonWire: Int,
+) {
+    val verdict: PrimeVerdict get() = PrimeVerdict.of(verdictWire)
+    val stopReason: PrimeStopReason get() = PrimeStopReason.of(stopReasonWire)
+}
+
+/** PRIME_START `verdict` (10.9); [UNKNOWN] = any other value (a refusal). */
+enum class PrimeVerdict(val wire: Int) {
+    OK(0), NOT_CAPABLE(1), BATTERY(2), DOSE_SOON(3), RESERVOIR(4), FAULT(5), BUSY(6), UNKNOWN(-1);
+
+    companion object {
+        fun of(wire: Int): PrimeVerdict = entries.firstOrNull { it.wire == wire && it != UNKNOWN } ?: UNKNOWN
+    }
+}
+
+/** PrimeStatus `stop_reason` (7.9); [UNKNOWN] = any other value ("stopped, unknown reason"). */
+enum class PrimeStopReason(val wire: Int) {
+    NONE(0), USER(1), MAX_TIME(2), HEARTBEAT(3), DISCONNECT(4), SESSION(5), FAULT(6), DOSE(7), UNKNOWN(-1);
+
+    companion object {
+        fun of(wire: Int): PrimeStopReason = entries.firstOrNull { it.wire == wire && it != UNKNOWN } ?: UNKNOWN
+    }
+}
+
 /** Diagnostics (7.3). */
 data class DiagnosticsRecord(
     val notifyStorageOk: Boolean,
@@ -419,6 +459,11 @@ object Records {
     )
 
     fun updateVerdict(body: Map<String, Any>) = UpdateVerdictRecord(body.int("verdict"))
+
+    fun primeStatus(body: Map<String, Any>) = PrimeStatusRecord(
+        body.int("verdict"), body.bool("running"), body.long("elapsed_ms"), body.long("max_ms"),
+        body.long("lease_ms"), body.int("stop_reason"),
+    )
 
     fun startUpdateFields(r: StartUpdateRequest): Map<String, Any> = mapOf(
         "version" to r.version.toByteArray(Charsets.US_ASCII), "tag" to r.tag.toByteArray(Charsets.US_ASCII),

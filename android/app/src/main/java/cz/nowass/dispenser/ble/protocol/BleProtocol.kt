@@ -123,6 +123,11 @@ object BleProtocol {
         f("running_version", Kind.Str(1, 31, StrKind.ID)), f("capable", Kind.Bool),
         f("last_result", Kind.U8), f("last_version", Kind.Str(0, 17, StrKind.ID)),
     )
+    /** Pump priming state (7.9, firmware >= 0.3.3); verdict and stop_reason are u8 (unknown = refusal / unknown reason). */
+    val PRIME_STATUS = listOf(
+        f("verdict", Kind.U8), f("running", Kind.Bool), f("elapsed_ms", Kind.U32), f("max_ms", Kind.U32),
+        f("lease_ms", Kind.U16), f("stop_reason", Kind.U8),
+    )
     val CONFIG = listOf(
         f("revision", Kind.U32), f("reservoir_capacity_ul", Kind.U32), f("reservoir_remaining_ul", Kind.U32),
         f("low_stock_percent", Kind.U8), f("time_sync_interval_h", Kind.U16), f("notify_mask", Kind.U8),
@@ -223,6 +228,10 @@ object BleProtocol {
             listOf(f("version", Kind.Str(5, 17, StrKind.ID)), f("tag", Kind.Str(1, 40, StrKind.ID)),
                 f("size", Kind.U32), f("sha256", Kind.Bytes(32))),
             listOf(f("verdict", Kind.U8)), null),
+        // pump priming (10.9, firmware >= 0.3.3 only, section 8.4)
+        TypeSpec(0xB2, "PRIME_START", SecurityClass.ENCRYPTED, E, PRIME_STATUS, null),
+        TypeSpec(0xB3, "PRIME_STOP", SecurityClass.ENCRYPTED, E, PRIME_STATUS, null),
+        TypeSpec(0xB4, "PRIME_STATUS", SecurityClass.ENCRYPTED, E, PRIME_STATUS, null),
         TypeSpec(0x80, "EV_SESSION_CLOSING", SecurityClass.ENCRYPTED, null, null,
             listOf(f("reason", range(1, 4)), f("seconds_left", Kind.U16))),
         TypeSpec(0x81, "EV_SUSPENDING_FOR_DOSE", SecurityClass.ENCRYPTED, null, null, listOf(f("seconds_until", Kind.U16))),
