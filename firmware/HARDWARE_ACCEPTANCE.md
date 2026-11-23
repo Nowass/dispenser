@@ -208,6 +208,27 @@ app-only writes at 0x30000 with backups (`backup-20261122-combined/`), evidence
   TLS-wake heap minimum and stack mark (log lost before sleep), R4 RECOVERY and distinct
   ephemerals/session IDs, R8, energy measurements.
 
+### 8l. OTA rollback test 0.3.1 → 0.3.2 (TEST image) → 0.3.1 (**BENCH VERIFIED** 2026-11-23)
+
+Owner-initiated from the app, motor disconnected, USB power, passive console capture (control
+lines never driven; raw log private). TEST image 0.3.2 = `555b76f` + `sdkconfig.otatest.defaults`,
+`PROJECT_VER=0.3.2` (`92da25bc…a53930`, signed, otherwise the same configuration as 0.3.1),
+published as pre-release `firmware-v0.3.2-rollbacktest` (assets verified over the public API and
+HTTPS like 8k), deleted with its tag after the test.
+
+- 16:27:58 button wake on 0.3.1 (battery VALID 4,050 mV); 16:28:26 download from the GitHub release
+  path; written to the inactive slot (esp_https_ota logs `<ota_0>` at 0x30000), image and signature
+  verified against the running firmware's key digest, `update 0.3.2 verified and activated:
+  restart`.
+- 16:28:47 bootloader starts 0.3.2 from 0x30000 (`cause=SOFTWARE`), `TEST BUILD: the boot check
+  fails on purpose`, `boot check failed: rollback to the previous firmware`; the bootloader loads
+  0.3.1 from 0x1F0000 within one second. No panic, watchdog or GPIO10 activation in the capture.
+- 0.3.1 went to deep sleep (next wake 16:44 reports reset reason 8, `cause=BUTTON`); BLE window,
+  battery 4,052–4,054 mV, slept again at 16:47. App (owner): running 0.3.1, last result: update to
+  0.3.2 failed (ROLLED_BACK); data intact.
+- Note: the console tail right before deep sleep is lost (USB-Serial-JTAG goes down first).
+- Next real firmware release: 0.3.3 or later.
+
 ### 8k. First over-the-air update 0.3.0 → 0.3.1 (**BENCH VERIFIED** 2026-11-23)
 
 Owner-initiated from the Android app (APK `f43c189`), motor disconnected, USB power; no serial
