@@ -216,6 +216,29 @@ class DeviceRepositoryFirmwareTest {
     }
 
     @Test
+    fun firmware_update_types_against_the_real_firmware() = runBlocking {
+        val p = Phone()
+        wake()
+        p.claim()
+        val r = p.repo
+        p.connected()
+        // the simulator reports version.txt (>= 0.3.0) in its Info record: the real dispatcher answers
+        // GET_UPDATE_STATUS. It has no OTA port, so the device reports "unknown" and not capable.
+        val st = r.getUpdateStatus()
+        assertTrue("$st", st is OpResult.Ok)
+        val rec = (st as OpResult.Ok).value
+        assertEquals("unknown", rec.runningVersion)
+        assertFalse(rec.capable)
+        assertEquals(cz.nowass.dispenser.device.ops.UpdateResult.NONE, rec.lastResult)
+        // START_UPDATE is refused by the device (never ACCEPTED here); the session stays usable
+        val v = r.startUpdate(cz.nowass.dispenser.device.ops.StartUpdateRequest("0.0.1", "firmware-v0.0.1", 1000, ByteArray(32)))
+        assertTrue("$v", v is OpResult.Ok)
+        assertEquals(cz.nowass.dispenser.device.ops.UpdateVerdict.NOT_CAPABLE, (v as OpResult.Ok).value.verdict)
+        assertTrue(r.refreshStatus() is OpResult.Ok)
+        assertTrue(r.status().first() is Fresh.Live)
+    }
+
+    @Test
     fun low_threshold_change_opens_and_closes_the_reservoir_low_episode_on_the_real_firmware() = runBlocking {
         val p = Phone()
         wake()

@@ -378,6 +378,14 @@ class AppContainer(private val context: Context) {
         benchPumpFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->
             { cz.nowass.dispenser.ui.devices.BenchPumpViewModel.factory { cz.nowass.dispenser.data.onboarding.BenchPumpController(deviceUi(id).device) } }
         },
+        // Device firmware and the owner-initiated OTA update (DEVICE mode only, both builds)
+        firmwareFactory = (mode as? ResolvedMode.Device)?.deviceId?.let { id ->
+            {
+                cz.nowass.dispenser.ui.devices.FirmwareViewModel.factory {
+                    cz.nowass.dispenser.data.device.FirmwareUpdateController(deviceUi(id).device, firmwareChecker, settingsRepository)
+                }
+            }
+        },
     )
 
     /** Public GitHub Releases source (owner/repo from gradle.properties via resources; no credentials). */
@@ -392,6 +400,15 @@ class AppContainer(private val context: Context) {
     /** User-initiated update check; only public release metadata is requested. */
     val updateChecker: UpdateChecker by lazy {
         GitHubReleasesUpdateChecker(githubOwner, githubRepo, userAgent = "Dispenser-Android/${appVersion.name}")
+    }
+
+    /** User-initiated firmware check: the same public release list plus the manifest from the official download path. */
+    private val firmwareChecker: cz.nowass.dispenser.data.update.FirmwareUpdateChecker by lazy {
+        val releases = GitHubReleasesUpdateChecker(githubOwner, githubRepo, userAgent = "Dispenser-Android/${appVersion.name}")
+        cz.nowass.dispenser.data.update.GitHubFirmwareUpdateChecker(
+            releases = { releases.releases() },
+            manifests = cz.nowass.dispenser.data.update.HttpsManifestDownloader(userAgent = "Dispenser-Android/${appVersion.name}"),
+        )
     }
 
     /** Bundled assets: CHANGELOG.md, license data and texts. */

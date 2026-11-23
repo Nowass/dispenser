@@ -68,4 +68,27 @@ class UpdatePolicyTest {
         // Invalid entries are ignored when valid ones exist.
         assertEquals(v("0.5.0"), (UpdatePolicy.evaluate(installed, STABLE, listOf(rel("nightly"), rel("v0.5.0"))) as UpdateCheckResult.UpdateAvailable).version)
     }
+
+    @Test
+    fun firmwareOnlyRelease_neverAffectsTheAppCheck() {
+        val fwOnly = ReleaseInfo(
+            "firmware-v0.3.1", SemanticVersion.parse("firmware-v0.3.1"), false, false,
+            "https://github.com/Nowass/dispenser/releases/tag/firmware-v0.3.1", emptyList(),
+            assets = listOf(
+                ReleaseAsset("dispenser-firmware-0.3.1.bin", "https://github.com/Nowass/dispenser/releases/download/firmware-v0.3.1/dispenser-firmware-0.3.1.bin", 100),
+                ReleaseAsset("dispenser-firmware-0.3.1.json", "https://github.com/Nowass/dispenser/releases/download/firmware-v0.3.1/dispenser-firmware-0.3.1.json", 10),
+            ),
+        )
+        assertEquals(null, fwOnly.version)
+        assertEquals(true, fwOnly.isFirmwareOnly)
+        // alone: no app release at all (not InvalidMetadata)
+        assertEquals(UpdateCheckResult.NoReleases, UpdatePolicy.evaluate(installed, STABLE, listOf(fwOnly)))
+        // next to app releases: ignored, the app result is unchanged
+        assertEquals(UpdateCheckResult.UpToDate(v("0.4.0")), UpdatePolicy.evaluate(installed, STABLE, listOf(fwOnly, rel("v0.4.0"))))
+        assertEquals(v("0.5.0"), (UpdatePolicy.evaluate(installed, BETA, listOf(fwOnly, rel("v0.5.0"))) as UpdateCheckResult.UpdateAvailable).version)
+        // a release carrying an APK and firmware under a semantic tag stays an app release
+        val both = rel("v0.6.0").copy(assets = fwOnly.assets)
+        assertEquals(false, both.isFirmwareOnly)
+        assertEquals(v("0.6.0"), (UpdatePolicy.evaluate(installed, STABLE, listOf(both)) as UpdateCheckResult.UpdateAvailable).version)
+    }
 }

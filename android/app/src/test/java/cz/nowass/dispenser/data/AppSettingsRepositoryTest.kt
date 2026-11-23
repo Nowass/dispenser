@@ -55,4 +55,24 @@ class AppSettingsRepositoryTest {
         assertNull(reopened.displayName.first())
         scope2.coroutineContext.job.cancelAndJoin()
     }
+
+    @Test
+    fun betaFirmwareChannel_offByDefault_persists_andLeavesTheNameAlone() = runBlocking {
+        val file = File(tmp.root, "app_settings.preferences_pb")
+        val scope1 = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        val first = open(file, scope1)
+        assertEquals(false, first.betaFirmwareChannel.first())
+        first.setDisplayName("Obývák")
+        first.setBetaFirmwareChannel(true)
+        assertEquals(true, first.betaFirmwareChannel.first())
+        scope1.coroutineContext.job.cancelAndJoin()
+
+        val scope2 = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        val reopened = open(file, scope2)
+        assertEquals(true, reopened.betaFirmwareChannel.first())
+        assertEquals("Obývák", reopened.captureRaw()) // the backup snapshot is the name only
+        reopened.setBetaFirmwareChannel(false)
+        assertEquals(false, reopened.betaFirmwareChannel.first())
+        scope2.coroutineContext.job.cancelAndJoin()
+    }
 }

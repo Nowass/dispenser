@@ -1,0 +1,4 @@
+# TEST ONLY (docs/FIRMWARE_UPDATE.md, rollback test): an image whose boot check always fails, so the
+# bootloader returns to the previous firmware after its first wake. Never published as a normal
+# release; delete its pre-release after the test.
+CONFIG_DSP_OTA_TEST_FAIL_BOOT_CHECK=y

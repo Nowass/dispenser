@@ -52,6 +52,12 @@ class FakeDevicePort(val deviceId: String = "a0b1c2d3e4f5") : SessionPort {
     var info: BleProtocol.Info? = info(0, 2, 0)
     /** GET_BATTERY answer: wire state, millivolts, age in seconds. */
     var battery = Triple(0L, 3970L, 5L)
+    /** GET_UPDATE_STATUS answer (firmware >= 0.3.0). */
+    var updateStatus: Map<String, Any> = mapOf(
+        "running_version" to "0.3.0".toByteArray(), "capable" to true, "last_result" to 0L, "last_version" to ByteArray(0),
+    )
+    /** START_UPDATE verdict; ACCEPTED (0) ends the session after the answer, like the firmware. */
+    var updateVerdict = 0L
 
     // ---- scripting ----
     val faults = mutableMapOf<Int, Fault>()
@@ -134,6 +140,16 @@ class FakeDevicePort(val deviceId: String = "a0b1c2d3e4f5") : SessionPort {
             RequestResult.Uncertain("session closed by old firmware", 1)
         } else {
             ok(mapOf("battery" to mapOf("state" to battery.first, "battery_mv" to battery.second, "age_s" to battery.third)))
+        }
+        M.GET_UPDATE_STATUS, M.START_UPDATE -> if (!DeviceDispenserRepository.firmwareHasUpdate(info)) {
+            // firmware < 0.3.0: an unknown encrypted type closes the session (never answered)
+            close()
+            RequestResult.Uncertain("session closed by old firmware", 1)
+        } else if (type == M.GET_UPDATE_STATUS) {
+            ok(updateStatus)
+        } else {
+            if (updateVerdict == 0L) after[M.START_UPDATE] = { close() } // ACCEPTED: the device ends the session
+            ok(mapOf("verdict" to updateVerdict))
         }
         M.GET_DIAGNOSTICS -> ok(mapOf("diag" to mapOf("notify_storage_ok" to true, "tx_diag" to 0L, "tx_diag_status" to 0L,
             "rejections_unread" to 0L, "rejections_total" to 0L, "clock_trust" to 1L, "clock_reason" to 0L, "last_sync_utc" to 0L, "last_wake_reason" to 0L)))

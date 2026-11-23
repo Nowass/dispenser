@@ -2,6 +2,7 @@ package cz.nowass.dispenser.data
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
@@ -27,6 +28,14 @@ interface AppSettingsRepository {
 
     /** Writes back a value taken by [captureRaw], unchanged (rollback). */
     suspend fun restoreRaw(value: String?)
+
+    /**
+     * Beta firmware channel (docs/FIRMWARE_UPDATE.md 2): GitHub pre-releases are offered as device
+     * firmware only when the owner enabled it. Default off; independent of the app's own channel.
+     */
+    val betaFirmwareChannel: Flow<Boolean>
+
+    suspend fun setBetaFirmwareChannel(enabled: Boolean)
 }
 
 /** Validation and normalization of the display name. */
@@ -67,9 +76,17 @@ class DataStoreAppSettingsRepository(private val dataStore: DataStore<Preference
         dataStore.edit { prefs -> if (value == null) prefs.remove(KEY_DISPLAY_NAME) else prefs[KEY_DISPLAY_NAME] = value }
     }
 
+    override val betaFirmwareChannel: Flow<Boolean> =
+        dataStore.data.map { it[KEY_BETA_FIRMWARE] ?: false }.distinctUntilChanged()
+
+    override suspend fun setBetaFirmwareChannel(enabled: Boolean) {
+        dataStore.edit { prefs -> if (enabled) prefs[KEY_BETA_FIRMWARE] = true else prefs.remove(KEY_BETA_FIRMWARE) }
+    }
+
     companion object {
         const val FILE_NAME = "app_settings"
         private val KEY_DISPLAY_NAME = stringPreferencesKey("display_name")
+        private val KEY_BETA_FIRMWARE = booleanPreferencesKey("beta_firmware_channel")
     }
 }
 
@@ -83,6 +100,9 @@ class InMemoryAppSettingsRepository(initialName: String? = null) : AppSettingsRe
     }
     override suspend fun captureRaw(): String? = name.value
     override suspend fun restoreRaw(value: String?) { name.value = value }
+    private val betaFirmware = MutableStateFlow(false)
+    override val betaFirmwareChannel: Flow<Boolean> = betaFirmware.asStateFlow()
+    override suspend fun setBetaFirmwareChannel(enabled: Boolean) { betaFirmware.value = enabled }
 }
 
 /** Installed app version, shown in Settings. */

@@ -118,6 +118,7 @@ const val ONBOARDING_ROUTE = "onboarding"
 const val INVITE_ROUTE = "invite"
 const val PHONES_ROUTE = "phones"
 const val BENCH_PUMP_ROUTE = "bench_pump"
+const val FIRMWARE_ROUTE = "device_firmware"
 
 /**
  * Device administration for the shell (M1.10e.4b): pairing entry, mode switch, "Forget device". The
@@ -141,6 +142,8 @@ class DeviceAdminUi(
     val phonesFactory: (() -> androidx.lifecycle.ViewModelProvider.Factory)? = null,
     /** DEVICE mode: pump configuration and readiness (BENCH texts in debug builds). */
     val benchPumpFactory: (() -> androidx.lifecycle.ViewModelProvider.Factory)? = null,
+    /** DEVICE mode: installed firmware and the owner-initiated OTA update. */
+    val firmwareFactory: (() -> androidx.lifecycle.ViewModelProvider.Factory)? = null,
 )
 
 /**
@@ -149,7 +152,7 @@ class DeviceAdminUi(
  */
 internal fun isFullScreenRoute(route: String?): Boolean {
     val base = route?.substringBefore('?') ?: return false
-    return base in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE, BACKUP_ROUTE, ONBOARDING_ROUTE, INVITE_ROUTE, PHONES_ROUTE, BENCH_PUMP_ROUTE) || base.startsWith(ABOUT_ROUTE)
+    return base in setOf(SCHEDULE_ROUTE, RESERVOIR_ROUTE, BACKUP_ROUTE, ONBOARDING_ROUTE, INVITE_ROUTE, PHONES_ROUTE, BENCH_PUMP_ROUTE, FIRMWARE_ROUTE) || base.startsWith(ABOUT_ROUTE)
 }
 
 private const val ARG_TITLE = "title"
@@ -309,6 +312,7 @@ fun DispenserApp(
                             onPhones = admin.phonesFactory?.let { { navController.navigate(PHONES_ROUTE) { launchSingleTop = true } } },
                             onInvite = admin.inviteFactory?.let { { navController.navigate(INVITE_ROUTE) { launchSingleTop = true } } },
                             onBenchPump = admin.benchPumpFactory?.let { { navController.navigate(BENCH_PUMP_ROUTE) { launchSingleTop = true } } },
+                            onFirmware = admin.firmwareFactory?.let { { navController.navigate(FIRMWARE_ROUTE) { launchSingleTop = true } } },
                         )
                     },
                     initialTab = entry.arguments?.getString(ARG_TAB),
@@ -357,6 +361,11 @@ fun DispenserApp(
             deviceAdmin?.benchPumpFactory?.let { factory ->
                 composable(BENCH_PUMP_ROUTE) {
                     cz.nowass.dispenser.ui.devices.BenchPumpRoute(viewModel(factory = factory()), onBack = { navController.popBackStack() })
+                }
+            }
+            deviceAdmin?.firmwareFactory?.let { factory ->
+                composable(FIRMWARE_ROUTE) {
+                    cz.nowass.dispenser.ui.devices.FirmwareRoute(viewModel(factory = factory()), onBack = { navController.popBackStack() })
                 }
             }
             if (backupViewModelFactory != null) {

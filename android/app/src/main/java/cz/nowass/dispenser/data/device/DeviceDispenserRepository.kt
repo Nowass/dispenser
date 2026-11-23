@@ -23,7 +23,10 @@ import cz.nowass.dispenser.device.ops.Records
 import cz.nowass.dispenser.device.ops.ScheduleRecord
 import cz.nowass.dispenser.device.ops.SessionPort
 import cz.nowass.dispenser.device.ops.StatusRecord
+import cz.nowass.dispenser.device.ops.StartUpdateRequest
 import cz.nowass.dispenser.device.ops.TimeDecisionRecord
+import cz.nowass.dispenser.device.ops.UpdateStatusRecord
+import cz.nowass.dispenser.device.ops.UpdateVerdictRecord
 import cz.nowass.dispenser.device.session.DeviceEvent
 import cz.nowass.dispenser.device.session.OpenRequest
 import cz.nowass.dispenser.device.session.SessionFailure
@@ -206,6 +209,28 @@ class DeviceDispenserRepository(
         }
         return read(s, M.GET_BATTERY, decode = Records::battery) { v, b, ss ->
             keep(batteryS, KEY_BATTERY, v, b, ss, readAtMs = nowMs() - v.ageSeconds.coerceIn(0, MAX_BATTERY_AGE_S) * 1000)
+        }
+    }
+
+    // ---- firmware update (BLE_PROTOCOL.md 7.8, 8.3, 10.8) ---------------------------------------
+
+    private fun updateUnsupported() = OpResult.Refused(LocalRefusal.Unavailable(DeviceRepository.UPDATE_UNSUPPORTED))
+
+    override suspend fun getUpdateStatus(): OpResult<UpdateStatusRecord> = live { s ->
+        // never to firmware < 0.3.0: an unknown encrypted type would close its session
+        if (!firmwareHasUpdate(s.info)) updateUnsupported()
+        else ops.call(s, M.GET_UPDATE_STATUS, decode = Records::updateStatus)
+    }
+
+    override suspend fun startUpdate(request: StartUpdateRequest): OpResult<UpdateVerdictRecord> {
+        if (!request.valid()) return OpResult.Refused(LocalRefusal.Invalid(emptySet()))
+        return reserved(KEY_UPDATE, guard = { null }) {
+            live { s ->
+                if (!firmwareHasUpdate(s.info)) updateUnsupported()
+                // sent once: after ACCEPTED the device ends the session, so a retransmission could never
+                // be answered; a lost answer stays Uncertain (the status at the next connection tells)
+                else ops.call(s, M.START_UPDATE, Records.startUpdateFields(request), retries = 0, decode = Records::updateVerdict)
+            }
         }
     }
 
@@ -767,11 +792,17 @@ class DeviceDispenserRepository(
         private const val KEY_PHONES = "phones"
         private const val KEY_SCHEDULES = "schedules"
         private const val KEY_BATTERY = "battery"
+        /** The one START_UPDATE reservation (single flight). */
+        private const val KEY_UPDATE = "START_UPDATE"
         /** Bound on the device-reported age (a service window lasts minutes). */
         private const val MAX_BATTERY_AGE_S = 86_400L
 
         /** GET_BATTERY exists from firmware 0.2.0 (Info record fw version; unknown = no). */
         fun firmwareHasBattery(info: BleProtocol.Info?): Boolean =
             info != null && (info.fwMajor > 0 || info.fwMinor >= 2)
+
+        /** GET_UPDATE_STATUS / START_UPDATE exist from firmware 0.3.0 (8.3; unknown = no). */
+        fun firmwareHasUpdate(info: BleProtocol.Info?): Boolean =
+            info != null && (info.fwMajor > 0 || info.fwMinor >= 3)
     }
 }

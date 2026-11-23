@@ -77,6 +77,60 @@ enum class BatteryState(val wire: Int) {
     }
 }
 
+/**
+ * Firmware update state (7.8, GET_UPDATE_STATUS, firmware >= 0.3.0). [lastResultWire] is kept as
+ * sent: unknown values decode and are shown as a failure ([UpdateResult.of]).
+ */
+data class UpdateStatusRecord(
+    val runningVersion: String,
+    val capable: Boolean,
+    val lastResultWire: Int,
+    /** The version [lastResult] refers to (empty with NONE). */
+    val lastVersion: String,
+) {
+    val lastResult: UpdateResult get() = UpdateResult.of(lastResultWire)
+}
+
+/** `last_result` of the UpdateStatus record (7.8); [UNKNOWN] = any other value (treated as failed). */
+enum class UpdateResult(val wire: Int) {
+    NONE(0), INSTALLED(1), ROLLED_BACK(2), WIFI_FAILED(3), DOWNLOAD_FAILED(4), IMAGE_REJECTED(5),
+    FLASH_FAILED(6), CANCELLED(7), UNKNOWN(-1);
+
+    companion object {
+        fun of(wire: Int): UpdateResult = entries.firstOrNull { it.wire == wire && it != UNKNOWN } ?: UNKNOWN
+    }
+}
+
+/** START_UPDATE `verdict` (10.8); [UNKNOWN] = any other value (a refusal). */
+enum class UpdateVerdict(val wire: Int) {
+    ACCEPTED(0), NOT_CAPABLE(1), NOT_NEWER(2), INVALID_REQUEST(3), DOSE_SOON(4), BATTERY(5), NO_WIFI(6),
+    BUSY(7), UNKNOWN(-1);
+
+    companion object {
+        fun of(wire: Int): UpdateVerdict = entries.firstOrNull { it.wire == wire && it != UNKNOWN } ?: UNKNOWN
+    }
+}
+
+/** START_UPDATE request (10.8): one published firmware release; the device builds the URL itself. */
+class StartUpdateRequest(val version: String, val tag: String, val size: Long, val sha256: ByteArray) {
+    /** The device's wire limits (checked before sending; the device re-checks them: INVALID_REQUEST). */
+    fun valid(): Boolean = STRICT_VERSION.matches(version) && version.length in 5..17 &&
+        version.split('.').all { it.toLong() <= 65_535 } &&
+        tag.length in 1..40 && ID_CHARS.matches(tag) && size in 1..MAX_SIZE && sha256.size == 32
+
+    companion object {
+        /** The OTA slot (10.8). */
+        const val MAX_SIZE = 1_835_008L
+        private val STRICT_VERSION = Regex("^(0|[1-9][0-9]{0,4})\\.(0|[1-9][0-9]{0,4})\\.(0|[1-9][0-9]{0,4})$")
+        private val ID_CHARS = Regex("^[A-Za-z0-9._-]+$")
+    }
+}
+
+/** START_UPDATE answer; [wire] kept as sent (unknown values are refusals, [UpdateVerdict.UNKNOWN]). */
+data class UpdateVerdictRecord(val wire: Int) {
+    val verdict: UpdateVerdict get() = UpdateVerdict.of(wire)
+}
+
 /** Diagnostics (7.3). */
 data class DiagnosticsRecord(
     val notifyStorageOk: Boolean,
@@ -358,6 +412,17 @@ object Records {
                 pumpBenchGpio = flags and HistoryEventRecord.F_PUMP_BENCH_GPIO != 0,
             )
         },
+    )
+
+    fun updateStatus(body: Map<String, Any>) = UpdateStatusRecord(
+        body.str("running_version"), body.bool("capable"), body.int("last_result"), body.str("last_version"),
+    )
+
+    fun updateVerdict(body: Map<String, Any>) = UpdateVerdictRecord(body.int("verdict"))
+
+    fun startUpdateFields(r: StartUpdateRequest): Map<String, Any> = mapOf(
+        "version" to r.version.toByteArray(Charsets.US_ASCII), "tag" to r.tag.toByteArray(Charsets.US_ASCII),
+        "size" to r.size, "sha256" to r.sha256.copyOf(),
     )
 
     fun setRevision(body: Map<String, Any>): Long = body.long("set_revision")

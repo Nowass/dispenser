@@ -123,6 +123,8 @@ data class SettingsDeviceAdmin(
     val onInvite: (() -> Unit)? = null,
     /** DEVICE mode: pump configuration and readiness (null hides it). */
     val onBenchPump: (() -> Unit)? = null,
+    /** DEVICE mode: the device's firmware and its over-the-air update (null hides it). */
+    val onFirmware: (() -> Unit)? = null,
     /** The last "Forget device" outcome that needs attention (shown in either mode). */
     val forgetNotice: ForgetNotice? = null,
     val onDismissForgetNotice: () -> Unit = {},
@@ -160,6 +162,7 @@ const val SETTINGS_DEVICE_RECOVERY_TEST_TAG = "settings_device_recovery"
 const val SETTINGS_DEVICE_UNRESOLVED_TEST_TAG = "settings_device_unresolved"
 const val SETTINGS_DEVICE_CONNECT_TEST_TAG = "settings_device_connect"
 const val SETTINGS_DEVICE_FORGET_TEST_TAG = "settings_device_forget"
+const val SETTINGS_DEVICE_FIRMWARE_TEST_TAG = "settings_device_firmware"
 const val SETTINGS_SWITCH_TO_DEMO_TEST_TAG = "settings_switch_to_demo"
 const val SETTINGS_FORGET_NOTICE_TEST_TAG = "settings_forget_notice"
 
@@ -355,6 +358,9 @@ fun SettingsScreen(
                                 deviceAdmin.onPhones?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_phones)) } }
                                 deviceAdmin.onInvite?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_invite)) } }
                                 deviceAdmin.onBenchPump?.let { OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.settings_device_bench_pump)) } }
+                                deviceAdmin.onFirmware?.let {
+                                    OutlinedButton(onClick = it, modifier = Modifier.fillMaxWidth().testTag(SETTINGS_DEVICE_FIRMWARE_TEST_TAG)) { Text(stringResource(R.string.settings_device_firmware)) }
+                                }
                             }
                             deviceAdmin.onSwitchToDemo?.let { toDemo ->
                                 OutlinedButton(onClick = toDemo, modifier = Modifier.fillMaxWidth().testTag(SETTINGS_SWITCH_TO_DEMO_TEST_TAG)) {

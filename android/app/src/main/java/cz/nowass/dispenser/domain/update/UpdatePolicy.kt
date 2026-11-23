@@ -27,6 +27,24 @@ data class ReleaseInfo(
     /** Official release page (https://github.com/...); null if missing or not on github.com. */
     val releasePageUrl: String?,
     val apkAssetNames: List<String>,
+    /** Every asset (firmware selection, docs/FIRMWARE_UPDATE.md 3). */
+    val assets: List<ReleaseAsset> = emptyList(),
+    /** Release notes (Markdown as published); null when empty. */
+    val body: String? = null,
+) {
+    /**
+     * A firmware-only release: its tag is not a semantic version (`firmware-v0.3.1`) and it carries
+     * firmware assets. Never an app release (docs/FIRMWARE_UPDATE.md 2).
+     */
+    val isFirmwareOnly: Boolean get() = version == null && assets.any { FirmwareUpdatePolicy.isFirmwareAsset(it.name) }
+}
+
+/** One release asset as GitHub lists it; [digest] e.g. "sha256:<hex>" when GitHub reports one. */
+data class ReleaseAsset(
+    val name: String,
+    val downloadUrl: String?,
+    val size: Long?,
+    val digest: String? = null,
 )
 
 sealed interface UpdateCheckResult {
@@ -60,7 +78,8 @@ sealed interface UpdateCheckResult {
 object UpdatePolicy {
 
     fun evaluate(installed: SemanticVersion, channel: ReleaseChannel, releases: List<ReleaseInfo>): UpdateCheckResult {
-        val published = releases.filterNot { it.isDraft }
+        // firmware-only releases are not app releases at all (no InvalidMetadata because of them)
+        val published = releases.filterNot { it.isDraft || it.isFirmwareOnly }
         if (published.isEmpty()) return UpdateCheckResult.NoReleases
 
         // Only releases with a valid semantic version and an official release page are usable.

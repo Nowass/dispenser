@@ -118,6 +118,11 @@ object BleProtocol {
     )
     /** Battery telemetry (7.7, firmware >= 0.2.0): state 0 VALID .. 5 UNSTABLE. */
     val BATTERY = listOf(f("state", range(0, 5)), f("battery_mv", Kind.U16), f("age_s", Kind.U32))
+    /** Firmware update state (7.8, firmware >= 0.3.0); last_result is a u8 (unknown values = failed). */
+    val UPDATE_STATUS = listOf(
+        f("running_version", Kind.Str(1, 31, StrKind.ID)), f("capable", Kind.Bool),
+        f("last_result", Kind.U8), f("last_version", Kind.Str(0, 17, StrKind.ID)),
+    )
     val CONFIG = listOf(
         f("revision", Kind.U32), f("reservoir_capacity_ul", Kind.U32), f("reservoir_remaining_ul", Kind.U32),
         f("low_stock_percent", Kind.U8), f("time_sync_interval_h", Kind.U16), f("notify_mask", Kind.U8),
@@ -212,6 +217,12 @@ object BleProtocol {
         TypeSpec(0x90, "GET_HISTORY", SecurityClass.ENCRYPTED, listOf(f("before_seq", Kind.U32), f("max", range(1, 4))),
             listOf(f("newest_seq", Kind.U32), f("oldest_seq", Kind.U32), f("flags", Kind.Mask(1, 0x01)),
                 f("items", Kind.ListOf(4, HISTORY_EVENT))), null),
+        // firmware update (10.8, firmware >= 0.3.0 only); verdict is a u8 (unknown values = refusals)
+        TypeSpec(0xB0, "GET_UPDATE_STATUS", SecurityClass.ENCRYPTED, E, UPDATE_STATUS, null),
+        TypeSpec(0xB1, "START_UPDATE", SecurityClass.ENCRYPTED,
+            listOf(f("version", Kind.Str(5, 17, StrKind.ID)), f("tag", Kind.Str(1, 40, StrKind.ID)),
+                f("size", Kind.U32), f("sha256", Kind.Bytes(32))),
+            listOf(f("verdict", Kind.U8)), null),
         TypeSpec(0x80, "EV_SESSION_CLOSING", SecurityClass.ENCRYPTED, null, null,
             listOf(f("reason", range(1, 4)), f("seconds_left", Kind.U16))),
         TypeSpec(0x81, "EV_SUSPENDING_FOR_DOSE", SecurityClass.ENCRYPTED, null, null, listOf(f("seconds_until", Kind.U16))),

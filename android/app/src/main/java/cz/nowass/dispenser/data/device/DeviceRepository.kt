@@ -12,7 +12,10 @@ import cz.nowass.dispenser.device.ops.PhoneRecord
 import cz.nowass.dispenser.device.ops.Readiness
 import cz.nowass.dispenser.device.ops.ScheduleRecord
 import cz.nowass.dispenser.device.ops.StatusRecord
+import cz.nowass.dispenser.device.ops.StartUpdateRequest
 import cz.nowass.dispenser.device.ops.TimeDecisionRecord
+import cz.nowass.dispenser.device.ops.UpdateStatusRecord
+import cz.nowass.dispenser.device.ops.UpdateVerdictRecord
 import cz.nowass.dispenser.device.session.DeviceEvent
 import cz.nowass.dispenser.device.session.SessionFailure
 import cz.nowass.dispenser.device.session.SessionState
@@ -112,6 +115,20 @@ interface DeviceRepository {
 
     /** A user-requested battery measurement (GET_BATTERY only); one at a time (else Refused(InProgress)). */
     suspend fun refreshBattery(): OpResult<BatteryRecord> = OpResult.NotSent("not supported")
+    /**
+     * GET_UPDATE_STATUS (7.8), only to firmware >= 0.3.0 (Info record, BLE_PROTOCOL.md 8.3). Older or
+     * unknown firmware is never asked (it would close the session): Refused(Unavailable(
+     * [UPDATE_UNSUPPORTED])). Not connected: NotSent. Read-only, not cached.
+     */
+    suspend fun getUpdateStatus(): OpResult<UpdateStatusRecord> = OpResult.NotSent("not supported")
+
+    /**
+     * START_UPDATE (10.8), gated like [getUpdateStatus]; one at a time (else Refused(InProgress)); the
+     * request is checked against the wire limits first (Refused(Invalid)). Sent once (no retry): a
+     * lost answer is Uncertain. After ACCEPTED the device ends the session itself (expected).
+     */
+    suspend fun startUpdate(request: StartUpdateRequest): OpResult<UpdateVerdictRecord> = OpResult.NotSent("not supported")
+
     /** GET_STATUS, then the battery telemetry (when the firmware provides it). */
     suspend fun refreshStatus(): OpResult<StatusRecord>
     suspend fun refreshDiagnostics(): OpResult<DiagnosticsRecord>
@@ -161,5 +178,7 @@ interface DeviceRepository {
 
     companion object {
         const val HISTORY_PAGE_MAX = 4
+        /** [LocalRefusal.Unavailable] reason: the firmware predates the OTA update types (< 0.3.0). */
+        const val UPDATE_UNSUPPORTED = "firmware update not supported by this firmware"
     }
 }

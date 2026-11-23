@@ -115,6 +115,18 @@ class FakeDeviceRepository(override val deviceId: String = "a0b1c2d3e4f5") : Dev
     override suspend fun cancelInvite(): OpResult<Unit> { calls += "cancel"; return cancelOutcome }
     override suspend fun cancelRecovery(): OpResult<Unit> = no()
 
+    // firmware update: scripted outcomes, recorded requests
+    var updateStatusOutcome: OpResult<cz.nowass.dispenser.device.ops.UpdateStatusRecord> = OpResult.NotSent("not connected")
+    var startUpdateOutcome: OpResult<cz.nowass.dispenser.device.ops.UpdateVerdictRecord> = OpResult.NotSent("not connected")
+    /** Runs inside startUpdate before it answers (e.g. suspends to test single flight). */
+    var startUpdateHook: suspend () -> Unit = {}
+    val startUpdateRequests = mutableListOf<cz.nowass.dispenser.device.ops.StartUpdateRequest>()
+    var updateStatusCalls = 0
+    override suspend fun getUpdateStatus(): OpResult<cz.nowass.dispenser.device.ops.UpdateStatusRecord> { updateStatusCalls++; return updateStatusOutcome }
+    override suspend fun startUpdate(request: cz.nowass.dispenser.device.ops.StartUpdateRequest): OpResult<cz.nowass.dispenser.device.ops.UpdateVerdictRecord> {
+        startUpdateRequests += request; startUpdateHook(); return startUpdateOutcome
+    }
+
     /** Phase C: the device's history; paged like the firmware (seq < before, newest first). */
     var historyLog: List<cz.nowass.dispenser.device.ops.HistoryEventRecord> = emptyList()
     var historyFaults = false

@@ -39,6 +39,10 @@ object MessageType {
     const val INVITE_CANCEL = 0x73
     const val RECOVERY_CANCEL = 0x74
     const val GET_HISTORY = 0x90
+    /** Firmware >= 0.3.0 only (BLE_PROTOCOL.md 8.3): older firmware closes the session on an unknown encrypted type. */
+    const val GET_UPDATE_STATUS = 0xB0
+    /** Firmware >= 0.3.0 only; after ACCEPTED the device ends the session itself (10.8). */
+    const val START_UPDATE = 0xB1
 }
 
 /** One authenticated session as the operations see it (bound to one connection generation). */
