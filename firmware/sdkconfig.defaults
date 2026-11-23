@@ -21,3 +21,8 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 # Logging stays at the ESP-IDF default maximum (INFO): debug-level header dumps of
 # esp_http_client are compiled out. Never raise it on a provisioned device.
+
+# RTC slow clock (fw 0.3.1): internal 17.5 MHz oscillator / 256 instead of the 136 kHz RC, which
+# drifted ~5 min overnight on the bench (dose early by the device clock). ESP-IDF: better frequency
+# stability, about 5 uA more in deep sleep. No external 32 kHz crystal on the XIAO ESP32-C3.
+CONFIG_RTC_CLK_SRC_INT_8MD256=y
