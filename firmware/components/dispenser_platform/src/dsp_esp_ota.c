@@ -218,6 +218,13 @@ static dsp_ota_result_t ota_last(void *ctx, char ver[DSP_OTA_VERSION_MAX + 1])
     if (s_rtc.magic == RTC_MAGIC && s_rtc.version == RTC_VERSION && s_rtc.crc == rtc_crc() &&
         s_rtc.result <= DSP_OTA_CANCELLED) {
         memcpy(ver, s_rtc.ver, DSP_OTA_VERSION_MAX);
+        /* INSTALLED is written twice: by the old image when it activates the new one, and by the
+         * new image when it confirms its boot. Seen by an image that is NOT that version, the
+         * activation did not stick: the bootloader returned to this image (rollback). */
+        if (s_rtc.result == DSP_OTA_INSTALLED &&
+            strncmp(s_rtc.ver, esp_app_get_description()->version, DSP_OTA_VERSION_MAX) != 0) {
+            return DSP_OTA_ROLLED_BACK;
+        }
         return (dsp_ota_result_t)s_rtc.result;
     }
     const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
