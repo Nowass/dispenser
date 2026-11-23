@@ -208,6 +208,24 @@ app-only writes at 0x30000 with backups (`backup-20261122-combined/`), evidence
   TLS-wake heap minimum and stack mark (log lost before sleep), R4 RECOVERY and distinct
   ephemerals/session IDs, R8, energy measurements.
 
+### 8k. First over-the-air update 0.3.0 → 0.3.1 (**BENCH VERIFIED** 2026-11-23)
+
+Owner-initiated from the Android app (APK `f43c189`), motor disconnected, USB power; no serial
+capture.
+
+- Release: GitHub pre-release `firmware-v0.3.1` (tag → `555b76f0`), assets
+  `dispenser-firmware-0.3.1.bin` (1,511,424 B, `9cad50ba…5d801e`) and `.json` (491 B,
+  `1e0fab9c…dfb9ff9`). Verified before the update over the public API and HTTPS (one redirect to
+  `release-assets.githubusercontent.com`): GitHub digests, downloaded bytes and the local build
+  identical; manifest fields valid; app descriptor `dispenser 0.3.1`; signature valid with the
+  owner key. App selection rules on the live list: 0.3.1 offered only with the beta channel.
+- Update: the app found 0.3.1, the owner confirmed, the device accepted and installed it.
+- After (owner, app): running 0.3.1, last result **INSTALLED 0.3.1** (boot confirmed, no
+  rollback), device time trusted and correct, schedules/threshold/pairing/battery intact, BLE
+  reconnects, the device sleeps after the window.
+- Not covered: RTC clock source and deep-sleep entry seen in a serial log, long-term drift with
+  `INT_8MD256`, the rollback test (0.3.2), promotion of 0.3.1 to a stable release.
+
 ### 8j. OTA bootstrap 0.3.0 over USB (**BENCH VERIFIED** 2026-11-23)
 
 One-time USB installation of the OTA-capable firmware (docs/FIRMWARE_UPDATE.md 6), motor disconnected
@@ -225,7 +243,7 @@ region), evidence `~/dispenser-hw-evidence/ota-bootstrap-0.3.0/flash.log`.
 - APK `f43c189` (versionCode 6, same signer) installed in place by the owner; button wake, BLE
   session, battery refreshes (VALID 4,072 mV), Settings → Firmware zařízení shows 0.3.0 and the
   update check works (no firmware release published yet); the device slept after the window.
-- Not covered yet: an actual over-the-air update (0.3.1), the rollback test, the RTC clock change.
+- Not covered here: the over-the-air update itself (see 8k), the rollback test.
 
 ### 8i. First PRODUCTION e-mail from the normal pilot firmware (**BENCH VERIFIED** 2026-11-23)
 
