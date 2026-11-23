@@ -108,4 +108,25 @@ bootloader **and** the signed 0.3.0 application:
    writes `dispenser-firmware-X.Y.Z.bin` and `.json` (size and SHA-256 computed, signature and app
    descriptor checked).
 3. Create the GitHub release (stable or pre-release), attach both files, publish.
-4. In the app: Device → Firmware → Check → Update.
+4. In the app: Settings → Firmware zařízení → Zkontrolovat aktualizace → Aktualizovat.
+
+A firmware-only release uses a tag like `firmware-v0.3.1`; test or first releases go out as
+pre-releases (beta firmware channel) and are promoted to stable after a successful update.
+
+## 8. Short verification procedure (first OTA test; owner approvals, motor disconnected)
+
+1. **Bootstrap (USB):** flash bootloader + signed 0.3.0 (section 6). Boot log: `App version 0.3.0`,
+   no `dsp_ota` error. App: Firmware screen shows 0.3.0, update possible; schedules, threshold,
+   pairing and battery unchanged.
+2. **Publish 0.3.1** (pre-release `firmware-v0.3.1`, both assets). App: enable the beta firmware
+   channel, check: 0.3.1 with its notes is offered.
+3. **Update:** Aktualizovat → confirm → verdict "accepted"; the device disconnects. Optional USB
+   log: Wi-Fi, `update 0.3.1 verified and activated: restart`, `App version 0.3.1`,
+   `boot of 0.3.1 confirmed`.
+4. **After 2–3 min:** wake button, connect: running 0.3.1, last result INSTALLED 0.3.1; data intact.
+5. **Simulated failure (rollback):** publish pre-release `firmware-v0.3.2-rollbacktest` with the
+   TEST image 0.3.2 (`sdkconfig.otatest.defaults`), update as above. The 0.3.2 image boots, fails its
+   boot check on purpose and the bootloader returns to 0.3.1. Reconnect: running 0.3.1, last result
+   ROLLED_BACK 0.3.2. Delete the test pre-release afterwards.
+6. **Refusal check (optional, no flash write):** with a dose due within 15 min the verdict is
+   "dose soon" and nothing is downloaded.
