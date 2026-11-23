@@ -60,6 +60,23 @@ if(CONFIG_DSP_PUMP_GPIO AND CONFIG_DSP_APP_ALLOW_PRODUCTION AND NOT CONFIG_DSP_A
             "pilot profile CONFIG_DSP_APP_PILOT_PRODUCTION")
 endif()
 
+# Firmware update (docs/FIRMWARE_UPDATE.md): only with rollback, signed applications verified on
+# update, no plain HTTP and a GitHub release base. The test image that always fails its boot
+# check is never a normal build (it needs the explicit test fragment).
+if(CONFIG_DSP_OTA)
+    if(NOT CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE OR NOT CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT OR
+       NOT CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT)
+        message(FATAL_ERROR "CONFIG_DSP_OTA needs CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE, "
+                "CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT and CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT")
+    endif()
+    if(CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP)
+        message(FATAL_ERROR "CONFIG_DSP_OTA refuses CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP")
+    endif()
+    if(NOT CONFIG_DSP_OTA_RELEASE_BASE MATCHES "^https://github\\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/releases/download/$")
+        message(FATAL_ERROR "CONFIG_DSP_OTA_RELEASE_BASE must be https://github.com/<owner>/<repo>/releases/download/")
+    endif()
+endif()
+
 # RNG-gate diagnostic (M1.10c.2b evidence; docs/ANDROID_BLE_DESIGN.md Appendix B): a separate,
 # build-only image, never a production image. Kconfig dependencies already exclude the runtime
 # (and with it the production endpoint); this is the second, independent check. The fragment

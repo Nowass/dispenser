@@ -124,7 +124,7 @@ static void test_every_privileged_type_unauthenticated(void)
         expect_error(r, DSP_BLE_E_UNAUTHENTICATED, (uint16_t)t);
         checked++;
     }
-    DSP_CHECK_EQ_INT(26, checked); /* 34 types (GET_HISTORY since Phase C, GET_BATTERY since fw 0.2.0) - 4 events - ENROLL_RESULT - HELLO, HS, END_SESSION */
+    DSP_CHECK_EQ_INT(28, checked); /* 36 types (GET_HISTORY since Phase C, GET_BATTERY since fw 0.2.0, update types since 0.3.0) - 4 events - ENROLL_RESULT - HELLO, HS, END_SESSION */
 }
 
 static void test_encrypted_and_malformed(void)

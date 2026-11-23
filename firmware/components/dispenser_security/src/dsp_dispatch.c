@@ -400,6 +400,16 @@ void dsp_dispatch(dsp_app_t *app, const dsp_app_auth_t *auth, const dsp_ble_msg_
         /* C10: the authorized owner ends the whole service window */
         (void)ok_or_error(rsp, dsp_app_end_service_session(app, auth));
         break;
+    case DSP_BLE_T_GET_UPDATE_STATUS:
+        (void)ok_or_error(rsp, dsp_app_get_update_status(app, auth, &out->update_status_rsp));
+        break;
+    case DSP_BLE_T_START_UPDATE: {
+        uint8_t verdict = 0;
+        if (ok_or_error(rsp, dsp_app_start_update(app, auth, &in->start_update_req, &verdict))) {
+            out->start_update_rsp.verdict = verdict;
+        }
+        break;
+    }
     case DSP_BLE_T_WIFI_SET:
     case DSP_BLE_T_WIFI_GET:
     case DSP_BLE_T_WIFI_CLEAR:

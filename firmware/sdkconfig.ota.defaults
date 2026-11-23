@@ -1,0 +1,12 @@
+# Firmware update over the air (docs/FIRMWARE_UPDATE.md). Changes the BOOTLOADER (rollback) as
+# well as the application: the first OTA-capable image needs one USB installation of both.
+# - Rollback: a new image stays PENDING_VERIFY until it confirms its first complete wake.
+# - Signed applications without hardware Secure Boot (no eFuse is written): OTA images must carry
+#   an RSA-3072 Secure Boot V2 signature by the key of the running image. Builds stay unsigned;
+#   signing is a separate offline step (espsecure sign-data), the key never enters the repository.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_RSA_SCHEME=y
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=n
+CONFIG_DSP_OTA=y

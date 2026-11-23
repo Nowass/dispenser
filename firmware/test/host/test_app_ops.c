@@ -248,10 +248,11 @@ static void pump_off(void *ctx)
 {
     (void)ctx;
 }
+static bool pump_never_off; /* the pump-off confirmation fails (test_ota_app) */
 static bool pump_is_off(void *ctx)
 {
     (void)ctx;
-    return true;
+    return !pump_never_off;
 }
 static const dsp_pump_port_t PUMP = {NULL, pump_run, pump_off, pump_is_off};
 
@@ -333,6 +334,8 @@ enum {
     OP_FLOOR,
     OP_HOOK,       /* M1.10b.3: a test-specific call inside the session (hook(i)) */
     OP_BATTERY,    /* battery telemetry: dsp_app_get_battery */
+    OP_UPDATE_STATUS, /* firmware update: dsp_app_get_update_status */
+    OP_START_UPDATE,  /* firmware update: dsp_app_start_update (o.upd) */
 };
 
 typedef struct {
@@ -355,6 +358,7 @@ typedef struct {
     uint32_t volume;
     void (*hook)(int i); /* OP_HOOK */
     int a, b;            /* OP_HOOK arguments */
+    dsp_ble_start_update_req_t upd; /* OP_START_UPDATE */
 } op_t;
 
 typedef struct {
@@ -370,6 +374,8 @@ typedef struct {
     uint32_t detail;
     uint64_t floor;
     dsp_app_battery_t batt; /* OP_BATTERY */
+    dsp_ble_update_status_rsp_t ust; /* OP_UPDATE_STATUS */
+    uint8_t verdict;                 /* OP_START_UPDATE */
     int pumps;   /* pump runs during the operation */
     long writes; /* KV sets during the operation */
 } res_t;
@@ -550,6 +556,12 @@ static void exec_op(int i)
         break;
     case OP_BATTERY:
         r->r = dsp_app_get_battery(&app, auth, &r->batt);
+        break;
+    case OP_UPDATE_STATUS:
+        r->r = dsp_app_get_update_status(&app, auth, &r->ust);
+        break;
+    case OP_START_UPDATE:
+        r->r = dsp_app_start_update(&app, auth, &o->upd, &r->verdict);
         break;
     default:
         break;

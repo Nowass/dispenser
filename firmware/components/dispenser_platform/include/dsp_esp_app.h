@@ -36,6 +36,9 @@ extern "C" {
 void dsp_esp_power_port(dsp_power_port_t *out, const dsp_pump_port_t *pump,
                         const dsp_wifi_driver_t *wifi);
 
+/* Firmware update port (CONFIG_DSP_OTA; NULL otherwise). docs/FIRMWARE_UPDATE.md */
+const dsp_ota_port_t *dsp_esp_ota_port(void);
+
 /* Unconditional fail-safe outside the application cycle (e.g. invalid wiring): same path
  * as the port's fail_safe(); does not return. */
 void dsp_esp_fail_safe(uint32_t failures) __attribute__((noreturn));

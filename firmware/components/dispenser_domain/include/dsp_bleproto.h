@@ -77,6 +77,8 @@ typedef enum {
     DSP_BLE_T_FACTORY_RESET = 0x7D,
     DSP_BLE_T_END_SESSION = 0x7E,
     DSP_BLE_T_GET_HISTORY = 0x90, /* Phase C: first type of the journal range 0x90-0x9F */
+    DSP_BLE_T_GET_UPDATE_STATUS = 0xB0, /* firmware >= 0.3.0 (docs/BLE_PROTOCOL.md 7.8, 10.8) */
+    DSP_BLE_T_START_UPDATE = 0xB1,      /* firmware >= 0.3.0 */
     DSP_BLE_T_EV_SESSION_CLOSING = 0x80,
     DSP_BLE_T_EV_SUSPENDING_FOR_DOSE = 0x81,
     DSP_BLE_T_EV_BUSY = 0x82,
@@ -316,6 +318,19 @@ typedef struct {
     dsp_ble_hist_list_t items;
 } dsp_ble_get_history_rsp_t;
 #define DSP_BLE_HISTORY_F_FAULTS 0x01u
+/* Firmware update (protocol 7.8, 10.8). Versions "X.Y.Z"; tag = GitHub release tag. */
+typedef struct {
+    dsp_ble_str_t running_version;
+    bool capable;
+    uint8_t last_result; /* dsp_ota_result_t */
+    dsp_ble_str_t last_version;
+} dsp_ble_update_status_rsp_t;
+typedef struct {
+    dsp_ble_str_t version, tag;
+    uint32_t size;
+    uint8_t sha256[32];
+} dsp_ble_start_update_req_t;
+typedef struct { uint8_t verdict; } dsp_ble_start_update_rsp_t; /* dsp_ota_verdict_t */
 
 typedef union {
     dsp_ble_hello_req_t hello_req;
@@ -356,6 +371,9 @@ typedef union {
     dsp_ble_ev_confirm_t ev_confirm;
     dsp_ble_get_history_req_t get_history_req;
     dsp_ble_get_history_rsp_t get_history_rsp;
+    dsp_ble_update_status_rsp_t update_status_rsp;
+    dsp_ble_start_update_req_t start_update_req;
+    dsp_ble_start_update_rsp_t start_update_rsp;
     dsp_ble_error_body_t error;
 } dsp_ble_body_t;
 

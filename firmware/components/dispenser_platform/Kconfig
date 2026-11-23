@@ -97,4 +97,32 @@ config DSP_BATTERY_RECOVER_MV
         in practice needs a charge. Must be greater than DSP_BATTERY_LOW_MV
         (build-time check).
 
+config DSP_OTA
+    bool "Firmware update over the air (owner-initiated, GitHub Releases)"
+    default n
+    depends on DSP_APP_CONNECTIVITY && DSP_BLE_SECURITY
+    help
+        GET_UPDATE_STATUS / START_UPDATE (docs/BLE_PROTOCOL.md 10.8,
+        docs/FIRMWARE_UPDATE.md). Needs a rollback-capable bootloader
+        (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) and signed applications
+        (CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT with
+        CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT); checked at build time.
+
+config DSP_OTA_RELEASE_BASE
+    string "Release asset base URL"
+    default "https://github.com/Nowass/dispenser/releases/download/"
+    depends on DSP_OTA
+    help
+        https://github.com/<owner>/<repo>/releases/download/ (checked at build
+        time and again at run time). The device appends
+        <tag>/dispenser-firmware-<version>.bin; the phone never sends a URL.
+
+config DSP_OTA_TEST_FAIL_BOOT_CHECK
+    bool "TEST ONLY: the boot check of this image always fails (rollback test)"
+    default n
+    depends on DSP_OTA
+    help
+        An image built with this option asks the bootloader to roll back at
+        the end of its first wake. Only for the documented rollback test.
+
 endmenu

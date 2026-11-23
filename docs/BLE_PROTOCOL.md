@@ -139,13 +139,16 @@ notification (device → client).
 | 0x7D | FACTORY_RESET | enc | `confirm u32` = `0x54455352` ("RSET") | empty |
 | 0x7E | END_SESSION | plain or enc | empty | empty |
 | 0x90 | GET_HISTORY | enc | `before_seq u32, max u8 (1–4)` | `newest_seq u32, oldest_seq u32, flags u8 (bit 0 FAULTS), n u8 (0–4), n × HistoryEvent (7.6)` |
+| 0xB0 | GET_UPDATE_STATUS | enc | empty | UpdateStatus (7.8); firmware ≥ 0.3.0 only (section 8.3) |
+| 0xB1 | START_UPDATE | enc | `version str(5..17,id), tag str(1..40,id), size u32, sha256 bytes(32)` | `verdict u8` (section 10.8); firmware ≥ 0.3.0 only |
 | 0x80 | EV_SESSION_CLOSING | event, enc | `reason u8, seconds_left u16` | — |
 | 0x81 | EV_SUSPENDING_FOR_DOSE | event, enc | `seconds_until u16` | — |
 | 0x82 | EV_BUSY | event, plain | empty | — (reserved: firmware v1 never sends it, section 3) |
 | 0x83 | EV_CONFIRM_ON_DEVICE | event, enc | `action u8, seconds u8` | — |
 
 Types 0x91–0x9F (journal; 0x90 is GET_HISTORY since Phase C) and 0xA0–0xAF
-(priming/calibration) are reserved; all other unlisted types are unknown.
+(priming/calibration) are reserved; 0xB0–0xB1 are the firmware update (firmware ≥ 0.3.0), 0xB2–0xBF
+are reserved for it; all other unlisted types are unknown.
 
 Error body (any type, flags `RESPONSE|ERROR`): `code u8, detail u32, aux u32`.
 
@@ -274,6 +277,25 @@ battery_mv u16 | age_s u32`.
   new ADC sample unless one was just taken; `age_s` always tells the sample's real age). Runtime memory only (never
   stored); no wake is ever added for it. The record carries no charger state.
 
+### 7.8 UpdateStatus (firmware ≥ 0.3.0)
+
+`running_version str(1..31,id) | capable bool | last_result u8 | last_version str(0..17,id)`.
+
+- `running_version`: the version of the running application (`esp_app_desc_t.version`, e.g.
+  `0.3.0`); a client compares it with released firmware (semantic versions, `-dev` is a
+  pre-release and therefore older than the same release).
+- `capable`: the device can install an update now in principle (rollback-capable bootloader,
+  signed running application, Wi-Fi credentials configured, OTA support built in). It does not
+  reflect the momentary conditions (battery, next dose); START_UPDATE checks those.
+- `last_result` (the most recent update attempt of this power cycle, or a rollback detected at
+  boot): 0 NONE, 1 INSTALLED (this firmware was installed by an update and confirmed its boot),
+  2 ROLLED_BACK (an installed update failed its boot check; the previous firmware is running),
+  3 WIFI_FAILED, 4 DOWNLOAD_FAILED (HTTPS/connection/redirect/timeout), 5 IMAGE_REJECTED
+  (signature, project, chip, version, size or SHA-256 mismatch: nothing was activated),
+  6 FLASH_FAILED, 7 CANCELLED (the conditions were no longer met when the download would start).
+  A client treats unknown values as "failed".
+- `last_version`: the version that `last_result` refers to (empty with NONE).
+
 ## 8. Versioning and negotiation
 
 - `major` changes are incompatible. The client sends HELLO with the range of majors it supports;
@@ -316,6 +338,12 @@ it only to firmware **0.2.0 or newer**. Older firmware does not know the type, a
 in an encrypted frame closes its session without a reply; a client therefore never sends it there
 and reports the battery as unavailable. Existing clients never send it and are unaffected: no
 existing record, body or frame changed.
+
+### 8.3 Firmware update types (firmware ≥ 0.3.0)
+
+GET_UPDATE_STATUS (0xB0) and START_UPDATE (0xB1) follow the same rule as GET_BATTERY (8.2): a
+client sends them only to firmware **0.3.0 or newer** (Info record), otherwise it shows "this
+firmware cannot be updated over the air (needs one USB installation)".
 
 ## 9. Examples
 
@@ -510,6 +538,35 @@ equals `oldest_seq`, is the last one. `newest_seq` / `oldest_seq`: the range the
   Events from before the firmware that introduced the log never existed and are never invented.
 - Malformed requests (`max` outside 1–4, wrong length) are rejected by the codec (`MALFORMED`); the
   history never contains credentials, setup codes, keys or Wi-Fi data, only the fields of 7.6.
+
+### 10.8 Firmware update (firmware ≥ 0.3.0, docs/FIRMWARE_UPDATE.md)
+
+START_UPDATE asks the device to install one published firmware release. The client never sends
+a URL: the device builds it from its compiled release base and the request,
+`<base><tag>/dispenser-firmware-<version>.bin` with base
+`https://github.com/Nowass/dispenser/releases/download/`.
+
+- `version`: strictly `X.Y.Z` (decimal, no leading zeros, each ≤ 65535); must be newer than the
+  running version. `tag`: the GitHub release tag, `[A-Za-z0-9._-]`. `size`: the asset size in bytes
+  (1–1,835,008, the OTA slot). `sha256`: SHA-256 of the asset file.
+- `verdict`: 0 ACCEPTED, 1 NOT_CAPABLE, 2 NOT_NEWER, 3 INVALID_REQUEST (version, tag, size), 4
+  DOSE_SOON (a scheduled dose is due within 15 minutes or the clock is not trusted), 5 BATTERY (no
+  VALID measurement of at least 3,800 mV in this wake, or a BATTERY_LOW episode is open), 6
+  NO_WIFI (no Wi-Fi credentials), 7 BUSY (an update is already pending or the device is degraded or
+  inhibited). Unknown values are refusals. Nothing is stored for a refusal.
+- ACCEPTED: the device sends the response, then ends the service session (as END_SESSION) and
+  starts the update after the BLE radio is down: Wi-Fi, verified HTTPS download (redirects to
+  GitHub's asset host allowed, certificate bundle), streamed into the inactive OTA slot. Before
+  activation the device checks: project name `dispenser`, chip, `esp_app_desc` version equal to
+  `version`, size equal to `size`, SHA-256 of the written image equal to `sha256`, and the
+  application signature (RSA-3072, the key of the running application). Then it reboots. The new
+  firmware confirms its boot at the end of its first complete wake (loaded, not degraded, pump
+  confirmed off); otherwise, or after a crash or reset before that, the bootloader returns to the
+  previous firmware (ROLLED_BACK). The outcome is visible with GET_UPDATE_STATUS after the next
+  connection. No progress is reported over BLE.
+- The download never starts while a dose is due within the margin; dosing does not run during the
+  download (the application task is busy) and resumes after the reboot (a missed slot follows the
+  normal late-dose rules).
 
 ## 11. Session security (M1.10c.2a)
 

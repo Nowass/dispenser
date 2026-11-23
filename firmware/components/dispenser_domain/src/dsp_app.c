@@ -2911,6 +2911,174 @@ __attribute__((noinline)) static void load_retained(dsp_app_t *app)
     }
 }
 
+/* ---- Firmware update (docs/FIRMWARE_UPDATE.md, docs/BLE_PROTOCOL.md 7.8, 10.8) ---------- */
+
+static bool ota_wired(const dsp_app_t *app)
+{
+    const dsp_ota_port_t *o = app->cfg->ota;
+    return o != NULL && o->running_version != NULL && o->capable != NULL && o->install != NULL &&
+           o->restart != NULL && o->pending_verify != NULL && o->confirm != NULL && o->last != NULL &&
+           o->record != NULL && app->cfg->ota_release_base != NULL;
+}
+
+static bool ota_wifi_configured(const dsp_app_t *app)
+{
+    const dsp_wifi_manager_t *w = app->cfg->wifi;
+    if (w == NULL || w->creds == NULL || w->creds->get == NULL) {
+        return false;
+    }
+    dsp_wifi_credentials_t c;
+    memset(&c, 0, sizeof c);
+    bool ok = w->creds->get(w->creds->ctx, &c) == DSP_CRED_OK && dsp_wifi_credentials_valid(&c);
+    dsp_secure_zero(&c, sizeof c);
+    return ok;
+}
+
+static dsp_ota_conditions_t ota_conditions(dsp_app_t *app)
+{
+    dsp_ota_conditions_t c;
+    memset(&c, 0, sizeof c);
+    c.capable = ota_wired(app) && app->cfg->ota->capable(app->cfg->ota->ctx);
+    c.busy = app->ota_pending || !app->loaded || app->inhibited || app->storage_fault ||
+             app->rep.pump_unconfirmed || dsp_dosing_degraded(&app->dosing);
+    c.wifi_configured = ota_wifi_configured(app);
+    dsp_clock_t clk = dose_clock(app);
+    c.clock_trusted = clk.valid;
+    c.now = clk.now;
+    dsp_utc_t at = 0;
+    c.next_dose_known = next_due(app, &at);
+    c.next_dose_at = at;
+    c.battery_valid = app->batt_measured && app->batt.state == DSP_BATT_VALID;
+    c.battery_mv = app->batt.battery_mv;
+    c.battery_low_open = (app->notify.s.cond[DSP_COND_BATTERY_LOW].flags & DSP_COND_F_ACTIVE) != 0;
+    return c;
+}
+
+static void ota_copy_id(dsp_ble_str_t *dst, const char *src, size_t max, const char *fallback)
+{
+    size_t n = src != NULL ? dsp_ota_strnlen(src, max + 1) : 0;
+    if (src == NULL || n > max || (n > 0 && !dsp_ota_id_ok((const uint8_t *)src, n, max))) {
+        src = fallback;
+        n = strlen(fallback);
+    }
+    dst->len = (uint8_t)n;
+    memcpy(dst->b, src, n);
+}
+
+dsp_app_op_result_t dsp_app_get_update_status(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                              dsp_ble_update_status_rsp_t *out)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK && g.status != DSP_OP_DEGRADED) {
+        return g; /* the status is readable even when degraded */
+    }
+    if (out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    memset(out, 0, sizeof *out);
+    const dsp_ota_port_t *o = app->cfg->ota;
+    if (!ota_wired(app)) {
+        ota_copy_id(&out->running_version, NULL, 31, "unknown");
+        return done(app, op(DSP_OP_OK, 0, 0));
+    }
+    ota_copy_id(&out->running_version, o->running_version(o->ctx), 31, "unknown");
+    out->capable = o->capable(o->ctx) && ota_wifi_configured(app);
+    char ver[DSP_OTA_VERSION_MAX + 1];
+    memset(ver, 0, sizeof ver);
+    dsp_ota_result_t r = o->last(o->ctx, ver);
+    ver[DSP_OTA_VERSION_MAX] = '\0';
+    out->last_result = (uint8_t)r;
+    if (r != DSP_OTA_NONE) {
+        ota_copy_id(&out->last_version, ver, DSP_OTA_VERSION_MAX, "");
+    }
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_start_update(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                         const dsp_ble_start_update_req_t *req, uint8_t *verdict)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK && g.status != DSP_OP_DEGRADED) {
+        return g;
+    }
+    if (req == NULL || verdict == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    dsp_ota_conditions_t c = ota_conditions(app); /* degraded: busy */
+    dsp_ota_verdict_t v;
+    dsp_ota_job_t job;
+    memset(&job, 0, sizeof job);
+    if (!c.capable) {
+        v = DSP_OTA_V_NOT_CAPABLE;
+    } else {
+        v = dsp_ota_prepare(app->cfg->ota_release_base, app->cfg->ota->running_version(app->cfg->ota->ctx),
+                            req->version.b, req->version.len, req->tag.b, req->tag.len, req->size,
+                            req->sha256, &job);
+        if (v == DSP_OTA_V_ACCEPTED) {
+            v = dsp_ota_check(&c);
+        }
+    }
+    if (v == DSP_OTA_V_ACCEPTED) {
+        app->ota_pending = true;
+        app->ota_job = job;
+        app->ss.end = DSP_BLE_END_COMMAND; /* the BLE loop ends after this item (as END_SESSION) */
+    }
+    *verdict = (uint8_t)v;
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+/* After the BLE stage: the accepted update, with the conditions checked again (the session may
+ * have changed them). Wi-Fi only for the download; INSTALLED restarts into the new image. */
+static void stage_update(dsp_app_t *app)
+{
+    if (!app->ota_pending) {
+        return;
+    }
+    trace(app, DSP_STAGE_UPDATE);
+    app->ota_pending = false;
+    app->rep.ota_attempted = true;
+    const dsp_ota_port_t *o = app->cfg->ota;
+    dsp_ota_conditions_t c = ota_conditions(app);
+    dsp_ota_result_t r;
+    if (app->ble_active || dsp_ota_check(&c) != DSP_OTA_V_ACCEPTED) {
+        r = DSP_OTA_CANCELLED;
+    } else if (dsp_wifi_connect(app->cfg->wifi) != DSP_NET_OK) {
+        r = DSP_OTA_WIFI_FAILED;
+        dsp_wifi_shutdown(app->cfg->wifi);
+    } else {
+        r = o->install(o->ctx, &app->ota_job);
+        dsp_wifi_shutdown(app->cfg->wifi);
+    }
+    app->rep.ota_result = (uint8_t)r;
+    o->record(o->ctx, r, app->ota_job.version);
+    if (r == DSP_OTA_INSTALLED) {
+        (void)dsp_dosing_port_safe_off(app->cfg->pump);
+        o->restart(o->ctx); /* does not return on hardware */
+    }
+}
+
+/* First boot of an updated image: confirmed at the end of its first complete wake (loaded, not
+ * degraded, pump confirmed off, no storage fault); otherwise rollback to the previous image. */
+static void stage_update_confirm(dsp_app_t *app)
+{
+    if (!ota_wired(app)) {
+        return;
+    }
+    const dsp_ota_port_t *o = app->cfg->ota;
+    if (!o->pending_verify(o->ctx)) {
+        return;
+    }
+    bool ok = app->loaded && !app->rep.degraded && !app->rep.pump_unconfirmed && !app->storage_fault;
+    if (ok) {
+        app->rep.ota_confirmed = true;
+        o->record(o->ctx, DSP_OTA_INSTALLED, o->running_version(o->ctx));
+        o->confirm(o->ctx, true);
+    } else {
+        app->rep.ota_rejected = true;
+        o->confirm(o->ctx, false); /* does not return on hardware */
+    }
+}
+
 dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg)
 {
     dsp_app_report_t empty;
@@ -2961,9 +3129,11 @@ dsp_app_report_t dsp_app_run_wake(dsp_app_t *app, const dsp_app_config_t *cfg)
             if (app->loaded && app->rep.ops > 0) {
                 stage_connect(app); /* e.g. a CRITICAL event from a manual dose */
             }
+            stage_update(app); /* an update accepted in the session (restarts when installed) */
         }
         stage_sync(app);
     }
+    stage_update_confirm(app); /* first boot of an updated image: confirm or roll back */
     stage_plan(app);
     stage_shutdown_and_sleep(app);
     return app->rep;

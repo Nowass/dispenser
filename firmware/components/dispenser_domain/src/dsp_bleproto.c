@@ -208,6 +208,18 @@ static const dsp_ble_field_t INVITE_RSP_F[] = {
     F_BYTES(dsp_ble_invite_create_rsp_t, token, 16), F_U16(dsp_ble_invite_create_rsp_t, expires_s),
 };
 LAYOUT(INVITE_RSP_L, INVITE_RSP_F);
+static const dsp_ble_field_t UPDATE_STATUS_F[] = {
+    F_STR(dsp_ble_update_status_rsp_t, running_version, DSP_BLES_ID, 1, 31), F_BOOL(dsp_ble_update_status_rsp_t, capable),
+    F_U8(dsp_ble_update_status_rsp_t, last_result), F_STR(dsp_ble_update_status_rsp_t, last_version, DSP_BLES_ID, 0, 17),
+};
+LAYOUT(UPDATE_STATUS_L, UPDATE_STATUS_F);
+static const dsp_ble_field_t START_UPDATE_REQ_F[] = {
+    F_STR(dsp_ble_start_update_req_t, version, DSP_BLES_ID, 5, 17), F_STR(dsp_ble_start_update_req_t, tag, DSP_BLES_ID, 1, 40),
+    F_U32(dsp_ble_start_update_req_t, size), F_BYTES(dsp_ble_start_update_req_t, sha256, 32),
+};
+LAYOUT(START_UPDATE_REQ_L, START_UPDATE_REQ_F);
+static const dsp_ble_field_t START_UPDATE_RSP_F[] = {F_U8(dsp_ble_start_update_rsp_t, verdict)};
+LAYOUT(START_UPDATE_RSP_L, START_UPDATE_RSP_F);
 static const dsp_ble_field_t FACTORY_F[] = {F_CONST32(dsp_ble_factory_reset_req_t, confirm, DSP_BLE_FACTORY_RESET_CONFIRM)};
 LAYOUT(FACTORY_L, FACTORY_F);
 static const dsp_ble_field_t EV_CLOSING_F[] = {
@@ -277,6 +289,8 @@ static const type_entry_t TYPES[] = {
     {DSP_BLE_T_FACTORY_RESET, EN, &FACTORY_L, &EMPTY_L, NULL},
     {DSP_BLE_T_END_SESSION, DSP_BLE_CLASS_EITHER, &EMPTY_L, &EMPTY_L, NULL},
     {DSP_BLE_T_GET_HISTORY, EN, &HIST_REQ_L, &HIST_RSP_L, NULL},
+    {DSP_BLE_T_GET_UPDATE_STATUS, EN, &EMPTY_L, &UPDATE_STATUS_L, NULL},
+    {DSP_BLE_T_START_UPDATE, EN, &START_UPDATE_REQ_L, &START_UPDATE_RSP_L, NULL},
     {DSP_BLE_T_EV_SESSION_CLOSING, EN, NULL, NULL, &EV_CLOSING_L},
     {DSP_BLE_T_EV_SUSPENDING_FOR_DOSE, EN, NULL, NULL, &EV_SUSPEND_L},
     {DSP_BLE_T_EV_BUSY, PL, NULL, NULL, &EMPTY_L},

@@ -468,6 +468,14 @@ static void app_runtime(void)
         ESP_LOGW(TAG, "app: connectivity unavailable (credentials=%d)", (int)secrets);
     }
 #endif
+#if CONFIG_DSP_OTA
+    /* Firmware update (docs/FIRMWARE_UPDATE.md): only with Wi-Fi; the release base is fixed at
+     * build time (dsp_endpoint_guard.cmake) and checked again by dsp_ota_prepare. */
+    if (s_cfg.wifi != NULL) {
+        s_cfg.ota = dsp_esp_ota_port();
+        s_cfg.ota_release_base = CONFIG_DSP_OTA_RELEASE_BASE;
+    }
+#endif
 #if CONFIG_DSP_APP_WIFI_TIME
     /* Bench MVP: Wi-Fi/SNTP time synchronization only (no HTTP client, no notification delivery,
      * no endpoint, no API token). dsp_connectivity runs time-only sessions when https is NULL. */

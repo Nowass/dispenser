@@ -40,6 +40,7 @@
 #include "dsp_bleproto.h"
 #include "dsp_dosing.h"
 #include "dsp_link.h"
+#include "dsp_ota.h"
 #include "dsp_owner.h"
 #include "dsp_power.h"
 #include "dsp_schedule_repo.h"
@@ -70,6 +71,7 @@ typedef enum {
     DSP_STAGE_SHUTDOWN,
     DSP_STAGE_SLEEP,
     DSP_STAGE_FAIL_SAFE,
+    DSP_STAGE_UPDATE, /* firmware update accepted in the service session */
 } dsp_app_stage_t;
 
 /* ---- Service-mode queue (bounded) ------------------------------------------------------- *
@@ -239,6 +241,11 @@ typedef struct {
      * that is not low < recover inside the credible window falls back to the defaults. */
     uint16_t battery_low_mv;
     uint16_t battery_recover_mv;
+    /* Firmware update (optional; NULL = GET_UPDATE_STATUS reports not capable, START_UPDATE
+     * answers NOT_CAPABLE). ota_release_base: "https://github.com/<owner>/<repo>/releases/download/"
+     * (docs/FIRMWARE_UPDATE.md). Needs wifi as well. */
+    const dsp_ota_port_t *ota;
+    const char *ota_release_base;
 } dsp_app_config_t;
 
 /* Defaults (bench proposal, see firmware/README.md "Battery voltage"): the temporary 5 V relay
@@ -317,6 +324,11 @@ typedef struct {
     size_t battery_reads;
     dsp_batt_sample_t battery;
     uint8_t battery_obs;        /* dsp_battery_status_t fed to the notification engine */
+    /* Firmware update in this wake: attempted, outcome; boot confirmation of a new image. */
+    bool ota_attempted;
+    uint8_t ota_result;         /* dsp_ota_result_t */
+    bool ota_confirmed;         /* a pending image confirmed its boot */
+    bool ota_rejected;          /* a pending image failed its boot check (rollback requested) */
     size_t trace_len;
     uint8_t trace[DSP_APP_TRACE_MAX]; /* dsp_app_stage_t in execution order */
 } dsp_app_report_t;
@@ -580,6 +592,14 @@ typedef struct {
 } dsp_app_battery_t;
 dsp_app_op_result_t dsp_app_get_battery(dsp_app_t *app, const dsp_app_auth_t *auth,
                                         dsp_app_battery_t *out);
+/* Firmware update (docs/BLE_PROTOCOL.md 7.8, 10.8). GET_UPDATE_STATUS: same preconditions as
+ * GET_STATUS, nothing stored. START_UPDATE: validates the request and the conditions; ACCEPTED
+ * ends the service session after this item and the update runs after the BLE stage of this
+ * wake. A refusal is an OK operation with a non-zero verdict (nothing stored). */
+dsp_app_op_result_t dsp_app_get_update_status(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                              dsp_ble_update_status_rsp_t *out);
+dsp_app_op_result_t dsp_app_start_update(dsp_app_t *app, const dsp_app_auth_t *auth,
+                                         const dsp_ble_start_update_req_t *req, uint8_t *verdict);
 /* Decision C10: ends the whole service window (BLE stops after the current item). Only with an
  * authorization issued for this connection (an unauthenticated END_SESSION closes only its own
  * connection, dsp_link). Allowed while a recovery confirmation is pending and without loaded
@@ -724,6 +744,9 @@ struct dsp_app {
     uint64_t batt_ms;     /* monotonic time of the measurement (0 without a monotonic clock) */
     bool pump_ran;        /* a pump run was attempted in this wake */
     uint64_t pump_ms;     /* monotonic time at the end of the last pump run */
+    /* Firmware update accepted in this session, run after the BLE stage (runtime only). */
+    bool ota_pending;
+    dsp_ota_job_t ota_job;
 };
 
 /* Runs one complete wake (ends with the sleep or fail-safe port call). */

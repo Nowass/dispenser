@@ -97,6 +97,11 @@ TYPES = {
     0x90: ("GET_HISTORY", [("before_seq", "u32", None), ("max", "enum", (1, 2, 3, 4))],
            [("newest_seq", "u32", None), ("oldest_seq", "u32", None), ("flags", "mask8", 0x01),
             ("items", "list", (4, HIST_EVENT))], None),
+    # Firmware update (sections 7.8, 10.8, firmware >= 0.3.0)
+    0xB0: ("GET_UPDATE_STATUS", [], [("running_version", "str", (1, 31, "id")), ("capable", "bool", None),
+                                     ("last_result", "u8", None), ("last_version", "str", (0, 17, "id"))], None),
+    0xB1: ("START_UPDATE", [("version", "str", (5, 17, "id")), ("tag", "str", (1, 40, "id")), ("size", "u32", None),
+                            ("sha256", "bytes", 32)], [("verdict", "u8", None)], None),
     0x80: ("EV_SESSION_CLOSING", None, None, [("reason", "enum", (1, 2, 3, 4)), ("seconds_left", "u16", None)]),
     0x81: ("EV_SUSPENDING_FOR_DOSE", None, None, [("seconds_until", "u16", None)]),
     0x82: ("EV_BUSY", None, None, []),
@@ -232,6 +237,13 @@ MSGS = [
     ("get_battery_response", 0x13, RESPONSE, 41, dict(battery=dict(state=0, battery_mv=3970, age_s=12))),
     ("get_battery_response_unavailable", 0x13, RESPONSE, 42, dict(battery=dict(state=3, battery_mv=0, age_s=0))),
     ("get_battery_response_extremes", 0x13, RESPONSE, 0xFFFF, dict(battery=dict(state=5, battery_mv=65535, age_s=4294967295))),
+    ("get_update_status_request", 0xB0, 0, 43, dict()),
+    ("get_update_status_response", 0xB0, RESPONSE, 43, dict(running_version=b("0.3.0"), capable=1, last_result=0, last_version=b(""))),
+    ("get_update_status_response_rolled_back", 0xB0, RESPONSE, 44, dict(running_version=b("0.3.0"), capable=1, last_result=2, last_version=b("0.3.1"))),
+    ("get_update_status_response_dev", 0xB0, RESPONSE, 0xFFFF, dict(running_version=b("0.3.0-dev"), capable=0, last_result=255, last_version=b("65535.65535.65535"))),
+    ("start_update_request", 0xB1, 0, 45, dict(version=b("0.3.1"), tag=b("firmware-v0.3.1"), size=1430528, sha256=bytes(range(32)))),
+    ("start_update_response_accepted", 0xB1, RESPONSE, 45, dict(verdict=0)),
+    ("start_update_response_dose_soon", 0xB1, RESPONSE, 46, dict(verdict=4)),
     ("get_config_response", 0x20, RESPONSE, 12, dict(config=CONFIG_V)),
     ("set_config_request", 0x21, 0, 13, dict(expected_revision=7, field_mask=0x03F0, config=CONFIG_V)),
     ("set_config_response", 0x21, RESPONSE, 13, dict(revision=8)),
@@ -397,6 +409,11 @@ def bad_vectors():
     out.append(("battery_state_6", frame(0x13, RESPONSE, 41, struct.pack("<BHI", 6, 0, 0)).hex(), "bad_enum"))
     out.append(("battery_truncated", frame(0x13, RESPONSE, 41, struct.pack("<BH", 0, 3970)).hex(), "truncated"))
     out.append(("battery_trailing", frame(0x13, RESPONSE, 41, struct.pack("<BHIB", 0, 3970, 0, 0)).hex(), "trailing"))
+    upd = b"\x050.3.1" + b"\x0ffirmware-v0.3.1" + struct.pack("<I", 1430528) + bytes(32)
+    out.append(("start_update_version_short", frame(0xB1, 0, 45, b"\x040.31" + upd[6:]).hex(), "bad_string"))
+    out.append(("start_update_tag_slash", frame(0xB1, 0, 45, upd[:6] + b"\x0ffirmware/v0.3.1" + upd[22:]).hex(), "bad_string"))
+    out.append(("start_update_sha_truncated", frame(0xB1, 0, 45, upd[:-1]).hex(), "truncated"))
+    out.append(("update_status_capable_2", frame(0xB0, RESPONSE, 43, b"\x050.3.0\x02\x00\x00").hex(), "bad_bool"))
     out.append(("battery_101", frame(0x10, RESPONSE, 9, sv[:44] + b"\x65" + sv[45:]).hex(), "bad_enum"))
     out.append(("error_code_0", frame(0x10, RESPONSE | ERRORF, 8, struct.pack("<BII", 0, 0, 0)).hex(), "bad_enum"))
     out.append(("error_code_21", frame(0x10, RESPONSE | ERRORF, 8, struct.pack("<BII", 21, 0, 0)).hex(), "bad_enum"))
