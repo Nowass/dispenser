@@ -167,10 +167,41 @@ static void (*pump_hook)(void); /* called while the pump runs (test-specific pro
  * them), not as scripted OP_MANUAL steps; the durable-decision oracle below still applies. */
 static bool manual_via_ble;
 
+/* fw 0.3.3 priming fake: the output and its independent cutoff on the monotonic clock. */
+static struct {
+    bool active, fired;
+    uint64_t cutoff_at;     /* monotonic ms */
+    int starts, stops, extends, offs;
+    bool fail_start, fail_extend, stop_unconfirmed;
+    uint64_t on_at, on_ms;  /* active time */
+    uint64_t max_on_ms;     /* longest single activation */
+} pr;
+static void pr_off_at(uint64_t t)
+{
+    uint64_t d = t > pr.on_at ? t - pr.on_at : 0;
+    pr.on_ms += d;
+    if (d > pr.max_on_ms) {
+        pr.max_on_ms = d;
+    }
+    pr.active = false;
+}
+static void pr_cutoff(void)
+{
+    if (pr.active && mono_ms >= pr.cutoff_at) {
+        pr_off_at(pr.cutoff_at);
+        pr.fired = true;
+    }
+}
+
 static dsp_pump_result_t pump_run(void *ctx, uint32_t runtime_ms)
 {
     (void)ctx;
     int i = pump.calls++;
+    pr_cutoff();
+    if (pr.active) {
+        pump.violations++;
+        fprintf(stderr, "dose pump run while priming\n");
+    }
     if (ble_on || (op_running && !op_allows_pump)) {
         pump.violations++;
         fprintf(stderr, "pump started while BLE is on (%d) or an operation runs (%d)\n", ble_on,
@@ -247,14 +278,67 @@ static dsp_pump_result_t pump_run(void *ctx, uint32_t runtime_ms)
 static void pump_off(void *ctx)
 {
     (void)ctx;
+    pr_cutoff();
+    if (pr.active) {
+        pr_off_at(mono_ms);
+    }
+    pr.offs++;
+}
+static dsp_pump_result_t pr_start(void *ctx, uint32_t cutoff_ms)
+{
+    (void)ctx;
+    pr_cutoff();
+    if (pr.active || pr.fail_start || cutoff_ms == 0) {
+        return DSP_PUMP_START_FAILED;
+    }
+    pr.starts++;
+    pr.active = true;
+    pr.fired = false;
+    pr.on_at = mono_ms;
+    pr.cutoff_at = mono_ms + cutoff_ms;
+    return DSP_PUMP_OK;
+}
+static bool pr_extend(void *ctx, uint32_t cutoff_ms)
+{
+    (void)ctx;
+    pr_cutoff();
+    if (!pr.active || pr.fail_extend) {
+        if (pr.active) {
+            pr_off_at(mono_ms);
+            pr.fired = true;
+        }
+        return false;
+    }
+    pr.extends++;
+    pr.cutoff_at = mono_ms + cutoff_ms;
+    return true;
+}
+static dsp_pump_result_t pr_stop(void *ctx)
+{
+    (void)ctx;
+    pr_cutoff();
+    if (pr.active) {
+        pr_off_at(mono_ms);
+    }
+    bool fired = pr.fired;
+    pr.fired = false;
+    pr.stops++;
+    return fired || pr.stop_unconfirmed ? DSP_PUMP_FAILED : DSP_PUMP_OK;
+}
+static bool pr_active(void *ctx)
+{
+    (void)ctx;
+    pr_cutoff();
+    return pr.active;
 }
 static bool pump_never_off; /* the pump-off confirmation fails (test_ota_app) */
 static bool pump_is_off(void *ctx)
 {
     (void)ctx;
-    return !pump_never_off;
+    pr_cutoff();
+    return !pump_never_off && !pr.active;
 }
-static const dsp_pump_port_t PUMP = {NULL, pump_run, pump_off, pump_is_off};
+static const dsp_pump_port_t PUMP = {NULL, pump_run, pump_off, pump_is_off, pr_start, pr_extend, pr_stop, pr_active};
 
 static int runs_of(const char *id)
 {
@@ -296,6 +380,11 @@ static bool pw_save(void *ctx, const uint8_t *buf, size_t len)
 }
 static void pw_sleep(void *ctx, int64_t s)
 {
+    pr_cutoff();
+    if (pr.active) {
+        pump.violations++;
+        fprintf(stderr, "deep sleep while priming\n");
+    }
     (void)ctx;
     (void)s;
     sleeps++;
@@ -336,6 +425,10 @@ enum {
     OP_BATTERY,    /* battery telemetry: dsp_app_get_battery */
     OP_UPDATE_STATUS, /* firmware update: dsp_app_get_update_status */
     OP_START_UPDATE,  /* firmware update: dsp_app_start_update (o.upd) */
+    OP_PRIME_START,   /* fw 0.3.3: dsp_app_prime_start */
+    OP_PRIME_STOP,
+    OP_PRIME_STATUS,
+    OP_DISCONNECT,    /* the phone's connection drops (the radio stays on) */
 };
 
 typedef struct {
@@ -376,6 +469,7 @@ typedef struct {
     dsp_app_battery_t batt; /* OP_BATTERY */
     dsp_ble_update_status_rsp_t ust; /* OP_UPDATE_STATUS */
     uint8_t verdict;                 /* OP_START_UPDATE */
+    dsp_ble_prime_rsp_t prime;       /* OP_PRIME_* */
     int pumps;   /* pump runs during the operation */
     long writes; /* KV sets during the operation */
 } res_t;
@@ -562,6 +656,19 @@ static void exec_op(int i)
         break;
     case OP_START_UPDATE:
         r->r = dsp_app_start_update(&app, auth, &o->upd, &r->verdict);
+        break;
+    case OP_PRIME_START:
+        r->r = dsp_app_prime_start(&app, auth, &r->prime);
+        break;
+    case OP_PRIME_STOP:
+        r->r = dsp_app_prime_stop(&app, auth, &r->prime);
+        break;
+    case OP_PRIME_STATUS:
+        r->r = dsp_app_prime_status(&app, auth, &r->prime);
+        break;
+    case OP_DISCONNECT:
+        ble_on = false; /* connected() reports false from now on */
+        (void)dsp_app_post_conn_event(&app, false, sc.gen, 0);
         break;
     default:
         break;
@@ -826,6 +933,7 @@ static void world(void)
     mono_ms = 0;
     ble_on = op_running = false;
     memset(&pump, 0, sizeof pump);
+    memset(&pr, 0, sizeof pr);
     g_cause = DSP_CAUSE_POWER_ON;
     memset(rtc, 0xA5, sizeof rtc);
     rtc_len = 0;

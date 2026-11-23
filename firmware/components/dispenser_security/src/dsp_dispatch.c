@@ -410,6 +410,15 @@ void dsp_dispatch(dsp_app_t *app, const dsp_app_auth_t *auth, const dsp_ble_msg_
         }
         break;
     }
+    case DSP_BLE_T_PRIME_START:
+        (void)ok_or_error(rsp, dsp_app_prime_start(app, auth, &out->prime_rsp));
+        break;
+    case DSP_BLE_T_PRIME_STOP:
+        (void)ok_or_error(rsp, dsp_app_prime_stop(app, auth, &out->prime_rsp));
+        break;
+    case DSP_BLE_T_PRIME_STATUS:
+        (void)ok_or_error(rsp, dsp_app_prime_status(app, auth, &out->prime_rsp));
+        break;
     case DSP_BLE_T_WIFI_SET:
     case DSP_BLE_T_WIFI_GET:
     case DSP_BLE_T_WIFI_CLEAR:

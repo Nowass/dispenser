@@ -306,6 +306,9 @@ static bool prepare_gates(dsp_dosing_t *d, dsp_clock_t clock, uint32_t volume, d
 {
     r->volume_ul = volume;
     r->gates = state_gates(d);
+    if (d->priming) {
+        r->gates |= DSP_DOSING_G_PRIMING; /* one owner: no dose while priming (nothing claimed) */
+    }
     if (!clock.valid) {
         r->gates |= DSP_DOSING_G_CLOCK;
     }
@@ -1182,6 +1185,78 @@ bool dsp_dosing_next_due(dsp_dosing_t *d, const dsp_schedule_t *schedules, size_
     return found;
 }
 
+/* ---- Pump priming (fw 0.3.3) ---------------------------------------------------------- */
+
+bool dsp_dosing_prime_capable(const dsp_dosing_t *d)
+{
+    const dsp_pump_port_t *p = d != NULL ? d->pump : NULL;
+    return p != NULL && p->prime_start != NULL && p->prime_extend != NULL && p->prime_stop != NULL &&
+           p->prime_active != NULL;
+}
+
+uint32_t dsp_dosing_prime_gates(dsp_dosing_t *d, bool *empty)
+{
+    if (empty != NULL) {
+        *empty = false;
+    }
+    if (d == NULL) {
+        return DSP_DOSING_G_NOT_LOADED;
+    }
+    /* readiness, the clock and the pump calibration are not required to prime the tubing */
+    uint32_t g = state_gates(d) & ~(uint32_t)DSP_DOSING_G_NOT_READY;
+    if (d->loaded) {
+        dsp_config_t cfg;
+        if (dsp_storage_load_config(d->st, &cfg) != DSP_STORAGE_OK) {
+            g |= DSP_DOSING_G_DEGRADED;
+        } else if (cfg.reservoir_capacity_ul == 0) {
+            g |= DSP_DOSING_G_RESERVOIR_UNCONFIGURED;
+        } else if (cfg.reservoir_remaining_ul == 0 && empty != NULL) {
+            *empty = true;
+        }
+    }
+    return g;
+}
+
+dsp_pump_result_t dsp_dosing_prime_start(dsp_dosing_t *d, uint32_t cutoff_ms)
+{
+    if (!dsp_dosing_prime_capable(d) || d->priming) {
+        return DSP_PUMP_START_FAILED;
+    }
+    dsp_pump_result_t r = d->pump->prime_start(d->pump->ctx, cutoff_ms);
+    if (r == DSP_PUMP_OK) {
+        d->priming = true;
+    } else {
+        d->pump->force_off(d->pump->ctx);
+    }
+    return r;
+}
+
+bool dsp_dosing_prime_extend(dsp_dosing_t *d, uint32_t cutoff_ms)
+{
+    return dsp_dosing_prime_capable(d) && d->priming && d->pump->prime_extend(d->pump->ctx, cutoff_ms);
+}
+
+bool dsp_dosing_prime_active(const dsp_dosing_t *d)
+{
+    return dsp_dosing_prime_capable(d) && d->priming && d->pump->prime_active(d->pump->ctx);
+}
+
+dsp_pump_result_t dsp_dosing_prime_stop(dsp_dosing_t *d)
+{
+    if (!dsp_dosing_prime_capable(d)) {
+        return DSP_PUMP_FAILED;
+    }
+    dsp_pump_result_t r = d->pump->prime_stop(d->pump->ctx);
+    d->pump->force_off(d->pump->ctx); /* every path ends OFF (idempotent) */
+    d->priming = false;
+    return r;
+}
+
+bool dsp_dosing_priming(const dsp_dosing_t *d)
+{
+    return d != NULL && d->priming;
+}
+
 bool dsp_dosing_port_safe_off(const dsp_pump_port_t *pump)
 {
     if (pump == NULL || pump->force_off == NULL) {
@@ -1193,6 +1268,9 @@ bool dsp_dosing_port_safe_off(const dsp_pump_port_t *pump)
 
 bool dsp_dosing_safe_off(dsp_dosing_t *d)
 {
+    if (d != NULL) {
+        d->priming = false; /* force_off ends priming in the driver as well */
+    }
     return d != NULL && dsp_dosing_port_safe_off(d->pump);
 }
 

@@ -7,6 +7,8 @@ CONFIG_DSP_PUMP_GPIO=y
 CONFIG_DSP_PUMP_GPIO_NUM=10
 CONFIG_DSP_PUMP_GPIO_ACTIVE_HIGH=y
 CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS=10000
+# Owner-started priming (fw 0.3.3): own maximum, provisional (not a thermal rating).
+CONFIG_DSP_PUMP_PRIME_MAX_MS=30000
 # Cutoff and reset guarantees required by the GPIO pump (the build refuses it otherwise):
 # the cutoff runs in the timer interrupt (IRAM), a starved scheduler panics (task watchdog 5 s),
 # and a panic always resets the chip, also with a debugger attached.

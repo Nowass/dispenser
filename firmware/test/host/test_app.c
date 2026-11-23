@@ -457,7 +457,7 @@ static bool pump_is_off(void *ctx)
     }
     return pump.confirm_fail_from == 0 || pump.is_off_calls < pump.confirm_fail_from;
 }
-static const dsp_pump_port_t PUMP = {NULL, pump_run, pump_off, pump_is_off};
+static const dsp_pump_port_t PUMP = {NULL, pump_run, pump_off, pump_is_off, NULL, NULL, NULL, NULL};
 
 /* ---- Bench GPIO pump control signal over the real scheduling path ----------------------------
  * The real driver (dsp_pump_gpio) on a fake pad; its wait while the output is active is the pump
@@ -532,7 +532,7 @@ static bool gp_wait(void *ctx, uint32_t ms)
     }
     return pump_run(NULL, ms) == DSP_PUMP_OK;
 }
-static const dsp_pump_gpio_hw_t GP_HW = {NULL, gp_configure, gp_set, gp_read, gp_hold, gp_arm, gp_disarm, gp_wait};
+static const dsp_pump_gpio_hw_t GP_HW = {NULL, gp_configure, gp_set, gp_read, gp_hold, gp_arm, gp_disarm, gp_wait, NULL, NULL};
 static dsp_pump_result_t gp_port_run(void *ctx, uint32_t ms)
 {
     (void)ctx;
@@ -549,7 +549,7 @@ static bool gp_port_is_off(void *ctx)
     (void)ctx;
     return gp_drv_port.is_off(gp_drv_port.ctx) && pump_is_off(NULL);
 }
-static const dsp_pump_port_t GP_PUMP = {NULL, gp_port_run, gp_port_off, gp_port_is_off};
+static const dsp_pump_port_t GP_PUMP = {NULL, gp_port_run, gp_port_off, gp_port_is_off, NULL, NULL, NULL, NULL};
 /* A reset: the driver's RAM is gone and the pad is an undriven input again (pull-down). */
 static void gp_reset(void)
 {

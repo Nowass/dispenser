@@ -17,6 +17,11 @@
  * debugger cannot turn a panic into a halt). After a reset the pad is an input again and only the
  * external resistor of the driver keeps the gate inactive. The build refuses the GPIO pump without
  * these settings (sdkconfig.pumpgpio.defaults sets them).
+ *
+ * Priming (fw 0.3.3, CONFIG_DSP_PUMP_PRIME_MAX_MS > 0): the same cutoff timer, armed at start and
+ * restarted with esp_timer_restart() on every lease extension (never past the priming maximum +
+ * 500 ms); once it has fired, a restart fails and the driver reports the fault. The callback is
+ * the same ISR-dispatched IRAM function, so a stalled application task cannot keep GPIO10 active.
  */
 
 #if !CONFIG_ESP_TIMER_SUPPORTS_ISR_DISPATCH_METHOD || !CONFIG_ESP_TIMER_IN_IRAM
@@ -132,6 +137,20 @@ static void hw_cutoff_disarm(void *ctx)
     }
 }
 
+/* Priming: restarts the still pending one-shot cutoff (esp_timer_restart fails with
+ * ESP_ERR_INVALID_STATE once it has fired, i.e. the pad is already inactive). */
+static bool hw_cutoff_rearm(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    return s_cutoff != NULL && esp_timer_restart(s_cutoff, (uint64_t)ms * 1000u) == ESP_OK;
+}
+
+static uint64_t hw_now_ms(void *ctx)
+{
+    (void)ctx;
+    return (uint64_t)esp_timer_get_time() / 1000u;
+}
+
 static bool hw_wait_ms(void *ctx, uint32_t ms)
 {
     (void)ctx;
@@ -146,16 +165,19 @@ static bool hw_wait_ms(void *ctx, uint32_t ms)
 }
 
 static const dsp_pump_gpio_hw_t HW = {NULL, hw_configure, hw_set_level, hw_read_level, hw_hold,
-                                      hw_cutoff_arm, hw_cutoff_disarm, hw_wait_ms};
+                                      hw_cutoff_arm, hw_cutoff_disarm, hw_wait_ms,
+                                      hw_cutoff_rearm, hw_now_ms};
 
 const dsp_pump_port_t *dsp_esp_pump_gpio(void)
 {
     if (!s_inited) {
         dsp_pump_gpio_init(&s_drv, &HW, ACTIVE_HIGH, (uint32_t)CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS);
+        dsp_pump_gpio_set_prime_max(&s_drv, (uint32_t)CONFIG_DSP_PUMP_PRIME_MAX_MS);
         dsp_pump_gpio_port(&s_drv, &s_port);
         s_inited = true;
-        ESP_LOGW(TAG, "BENCH pump control signal on GPIO%d, active-%s, max %u ms per run", PIN,
-                 ACTIVE_HIGH ? "high" : "low", (unsigned)CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS);
+        ESP_LOGW(TAG, "BENCH pump control signal on GPIO%d, active-%s, max %u ms per run, priming max %u ms",
+                 PIN, ACTIVE_HIGH ? "high" : "low", (unsigned)CONFIG_DSP_PUMP_GPIO_MAX_RUNTIME_MS,
+                 (unsigned)CONFIG_DSP_PUMP_PRIME_MAX_MS);
     }
     return &s_port;
 }

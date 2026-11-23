@@ -141,14 +141,17 @@ notification (device → client).
 | 0x90 | GET_HISTORY | enc | `before_seq u32, max u8 (1–4)` | `newest_seq u32, oldest_seq u32, flags u8 (bit 0 FAULTS), n u8 (0–4), n × HistoryEvent (7.6)` |
 | 0xB0 | GET_UPDATE_STATUS | enc | empty | UpdateStatus (7.8); firmware ≥ 0.3.0 only (section 8.3) |
 | 0xB1 | START_UPDATE | enc | `version str(5..17,id), tag str(1..40,id), size u32, sha256 bytes(32)` | `verdict u8` (section 10.8); firmware ≥ 0.3.0 only |
+| 0xB2 | PRIME_START | enc | empty | PrimeStatus (7.9); firmware ≥ 0.3.3 only (section 8.4) |
+| 0xB3 | PRIME_STOP | enc | empty | PrimeStatus (7.9); firmware ≥ 0.3.3 only |
+| 0xB4 | PRIME_STATUS | enc | empty | PrimeStatus (7.9), renews the priming lease (10.9); firmware ≥ 0.3.3 only |
 | 0x80 | EV_SESSION_CLOSING | event, enc | `reason u8, seconds_left u16` | — |
 | 0x81 | EV_SUSPENDING_FOR_DOSE | event, enc | `seconds_until u16` | — |
 | 0x82 | EV_BUSY | event, plain | empty | — (reserved: firmware v1 never sends it, section 3) |
 | 0x83 | EV_CONFIRM_ON_DEVICE | event, enc | `action u8, seconds u8` | — |
 
 Types 0x91–0x9F (journal; 0x90 is GET_HISTORY since Phase C) and 0xA0–0xAF
-(priming/calibration) are reserved; 0xB0–0xB1 are the firmware update (firmware ≥ 0.3.0), 0xB2–0xBF
-are reserved for it; all other unlisted types are unknown.
+(priming/calibration) are reserved; 0xB0–0xB1 are the firmware update (firmware ≥ 0.3.0), 0xB2–0xB4
+pump priming (firmware ≥ 0.3.3), 0xB5–0xBF are reserved; all other unlisted types are unknown.
 
 Error body (any type, flags `RESPONSE|ERROR`): `code u8, detail u32, aux u32`.
 
@@ -296,6 +299,23 @@ battery_mv u16 | age_s u32`.
   A client treats unknown values as "failed".
 - `last_version`: the version that `last_result` refers to (empty with NONE).
 
+### 7.9 PrimeStatus (13 bytes, firmware ≥ 0.3.3)
+
+`verdict u8 | running bool | elapsed_ms u32 | max_ms u32 | lease_ms u16 | stop_reason u8`.
+
+- `verdict`: PRIME_START's admission (10.9); always 0 for PRIME_STOP and PRIME_STATUS.
+- `running`: the pump output is active right now (pad readback on the device). A client shows
+  RUNNING only for `running = 1` in a response it just received; after a disconnect or a missing
+  response the state is UNKNOWN, never STOPPED.
+- `elapsed_ms`: running: time since the start; stopped: duration of the last run in this wake
+  (0 = none).
+- `max_ms`: maximum per activation (30,000 in 0.3.3; 0 = not capable). `lease_ms`: heartbeat
+  expiry (3,000).
+- `stop_reason` (last run, 0 while running): 0 NONE, 1 USER (PRIME_STOP), 2 MAX_TIME, 3 HEARTBEAT
+  (lease expired), 4 DISCONNECT, 5 SESSION (authorization or service window ended), 6 FAULT
+  (independent cutoff fired, readback or re-arm failed: no further pump use in this wake), 7 DOSE (a
+  scheduled dose became due). Unknown values are "stopped for an unknown reason".
+
 ## 8. Versioning and negotiation
 
 - `major` changes are incompatible. The client sends HELLO with the range of majors it supports;
@@ -344,6 +364,13 @@ existing record, body or frame changed.
 GET_UPDATE_STATUS (0xB0) and START_UPDATE (0xB1) follow the same rule as GET_BATTERY (8.2): a
 client sends them only to firmware **0.3.0 or newer** (Info record), otherwise it shows "this
 firmware cannot be updated over the air (needs one USB installation)".
+
+### 8.4 Pump priming types (firmware ≥ 0.3.3)
+
+PRIME_START (0xB2), PRIME_STOP (0xB3) and PRIME_STATUS (0xB4) are sent only to firmware **0.3.3 or
+newer**. The Info record carries the protocol minor only, so the client uses `running_version` from
+GET_UPDATE_STATUS (7.8, a semantic version ≥ 0.3.3). Older firmware answers an unknown type with
+an error; the client never offers priming there.
 
 ## 9. Examples
 
@@ -567,6 +594,35 @@ a URL: the device builds it from its compiled release base and the request,
 - The download never starts while a dose is due within the margin; dosing does not run during the
   download (the application task is busy) and resumes after the reboot (a missed slot follows the
   normal late-dose rules).
+
+### 10.9 Pump priming (firmware ≥ 0.3.3)
+
+Owner-started START/STOP of the pump to fill the tubing before service. No volume, no dose: nothing
+is claimed, nothing appears in the history (GET_HISTORY), the reservoir estimate is not changed
+(the client reminds the owner to check it afterwards).
+
+- PRIME_START `verdict`: 0 OK (running: started now, or already running, in which case it is NOT
+  restarted and only the lease is renewed), 1 NOT_CAPABLE, 2 BATTERY (no VALID measurement of at
+  least 3,800 mV in this wake, or a BATTERY_LOW episode open), 3 DOSE_SOON (a scheduled dose due
+  within 15 minutes; an untrusted clock does not refuse), 4 RESERVOIR (not configured, estimated
+  remaining 0, BLOCKED latch or refill pending), 5 FAULT (pump fault or OFF not confirmed in this
+  wake, storage degraded, inhibited, the start could not be confirmed, or no live connection), 6
+  BUSY (a firmware update is pending). Unknown values are refusals. Readiness, the clock and the
+  pump calibration are not required.
+- Lease: every PRIME_START / PRIME_STATUS of the authorization that started it renews the lease
+  for 3 s; the client sends PRIME_STATUS once per second while running. The device stops at the
+  first of: PRIME_STOP, lease expiry, `max_ms` since the start (30 s; another explicit PRIME_START
+  is needed afterwards, never restarted automatically), BLE disconnect, end of that authorization or
+  of the service window (END_SESSION, maximum, revocation), a pump fault, a scheduled dose becoming
+  due (the dose then runs as usual) and always before the BLE stage ends; never across a reset,
+  wake, reconnect or update.
+- Independent cutoff: armed before the output turns on and re-armed with each renewal to the
+  earlier of lease expiry and maximum plus 500 ms; it runs in the timer interrupt, so a stalled
+  application task cannot keep the pump on. Normal doses keep their own limit (10 s) and path.
+- PRIME_STOP is processed with the authorization check only (not rate limited, also when the device
+  is degraded) and stops the pump before anything else; PRIME_STATUS is not rate limited either.
+- While priming: MANUAL_DOSE answers BUSY (not consumed), START_UPDATE answers BUSY, no battery
+  measurement is taken (load), the BLE loop runs every 200 ms.
 
 ## 11. Session security (M1.10c.2a)
 

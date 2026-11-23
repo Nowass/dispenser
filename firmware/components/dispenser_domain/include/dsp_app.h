@@ -22,7 +22,10 @@
  *    a BLE session is suspended before any pump run (scheduled or manual) and resumed if
  *    its window remains; BLE commands are queued (bounded) and processed by this task only.
  *  - A pump fault or a storage failure ends dosing for the rest of the wake.
- *  - Wi-Fi, BLE and the pump are never active at the same time (sequential stages).
+ *  - Wi-Fi, BLE and the pump are never active at the same time (sequential stages), with ONE
+ *    exception: owner-started pump priming (fw 0.3.3, dsp_prime.h) runs the pump while the
+ *    authenticated BLE session is up, bound to it by a 3 s lease and its own maximum; the BLE
+ *    loop then ticks every 200 ms, never doses and stops priming before anything else ends.
  *  - SHUTDOWN: pump OFF confirmed, HTTPS ended, Wi-Fi DISABLED, BLE stopped (retried up to
  *    DSP_APP_SHUTDOWN_ATTEMPTS times), then the retained block is saved; sleep only if
  *    every item is confirmed, otherwise the fail-safe port (never sleep with an active pump
@@ -41,6 +44,7 @@
 #include "dsp_dosing.h"
 #include "dsp_link.h"
 #include "dsp_ota.h"
+#include "dsp_prime.h"
 #include "dsp_owner.h"
 #include "dsp_power.h"
 #include "dsp_schedule_repo.h"
@@ -246,6 +250,9 @@ typedef struct {
      * (docs/FIRMWARE_UPDATE.md). Needs wifi as well. */
     const dsp_ota_port_t *ota;
     const char *ota_release_base;
+    /* Pump priming (fw 0.3.3, dsp_prime.h): maximum per activation, capped at
+     * DSP_PRIME_HARD_MAX_MS; 0 or a pump port without priming = PRIME_START answers NOT_CAPABLE. */
+    uint32_t prime_max_ms;
 } dsp_app_config_t;
 
 /* Defaults (bench proposal, see firmware/README.md "Battery voltage"): the temporary 5 V relay
@@ -329,6 +336,10 @@ typedef struct {
     uint8_t ota_result;         /* dsp_ota_result_t */
     bool ota_confirmed;         /* a pending image confirmed its boot */
     bool ota_rejected;          /* a pending image failed its boot check (rollback requested) */
+    /* Pump priming in this wake (never a dose, never in the history). */
+    size_t primes;              /* activations started */
+    uint32_t prime_ms;          /* total active time */
+    uint8_t prime_stop;         /* dsp_prime_stop_t of the last run */
     size_t trace_len;
     uint8_t trace[DSP_APP_TRACE_MAX]; /* dsp_app_stage_t in execution order */
 } dsp_app_report_t;
@@ -600,6 +611,14 @@ dsp_app_op_result_t dsp_app_get_update_status(dsp_app_t *app, const dsp_app_auth
                                               dsp_ble_update_status_rsp_t *out);
 dsp_app_op_result_t dsp_app_start_update(dsp_app_t *app, const dsp_app_auth_t *auth,
                                          const dsp_ble_start_update_req_t *req, uint8_t *verdict);
+/* Pump priming (docs/BLE_PROTOCOL.md 7.9, 10.9; dsp_prime.h). PRIME_START: GET_STATUS
+ * preconditions, then dsp_prime_check; starts (or, already running, only renews the lease: never
+ * restarted). PRIME_STOP: stops first, with only the authorization check (never rate limited,
+ * allowed while degraded). PRIME_STATUS: renews the lease while running and reports. STOP and
+ * STATUS do not count against session_ops_max. A refusal is an OK operation with a verdict. */
+dsp_app_op_result_t dsp_app_prime_start(dsp_app_t *app, const dsp_app_auth_t *auth, dsp_ble_prime_rsp_t *out);
+dsp_app_op_result_t dsp_app_prime_stop(dsp_app_t *app, const dsp_app_auth_t *auth, dsp_ble_prime_rsp_t *out);
+dsp_app_op_result_t dsp_app_prime_status(dsp_app_t *app, const dsp_app_auth_t *auth, dsp_ble_prime_rsp_t *out);
 /* Decision C10: ends the whole service window (BLE stops after the current item). Only with an
  * authorization issued for this connection (an unauthenticated END_SESSION closes only its own
  * connection, dsp_link). Allowed while a recovery confirmation is pending and without loaded
@@ -747,6 +766,13 @@ struct dsp_app {
     /* Firmware update accepted in this session, run after the BLE stage (runtime only). */
     bool ota_pending;
     dsp_ota_job_t ota_job;
+    /* Pump priming (runtime only; never restarted after a reset or in another session). */
+    bool prime_active;
+    uint64_t prime_t0_ms;      /* monotonic start */
+    uint64_t prime_lease_ms;   /* monotonic lease expiry */
+    uint32_t prime_last_ms;    /* duration of the last run */
+    uint8_t prime_last_stop;   /* dsp_prime_stop_t */
+    dsp_app_auth_t prime_auth; /* the authorization that started it (lease owner) */
 };
 
 /* Runs one complete wake (ends with the sleep or fail-safe port call). */

@@ -41,7 +41,7 @@ static bool sim_is_off(void *ctx)
     return !s_stats.running;
 }
 
-static const dsp_pump_port_t SIM = {NULL, sim_run, sim_force_off, sim_is_off};
+static const dsp_pump_port_t SIM = {NULL, sim_run, sim_force_off, sim_is_off, NULL, NULL, NULL, NULL}; /* no priming */
 
 const dsp_pump_port_t *dsp_esp_pump_sim(void)
 {

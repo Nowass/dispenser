@@ -103,6 +103,8 @@ target_compile_options(test_manual PRIVATE -Wno-unused-function)
 dsp_add_host_test(test_battery_app test_battery_app.c support/fake_kv.c)
 dsp_add_host_test(test_ota_app test_ota_app.c support/fake_kv.c)
 target_compile_options(test_ota_app PRIVATE -Wno-unused-function)
+dsp_add_host_test(test_prime_app test_prime_app.c support/fake_kv.c)
+target_compile_options(test_prime_app PRIVATE -Wno-unused-function)
 target_compile_options(test_battery_app PRIVATE -Wno-unused-function)
 # Incident 2026-11-20 (F1): READY dosing floor (same harness).
 dsp_add_host_test(test_ready_floor test_ready_floor.c support/fake_kv.c)

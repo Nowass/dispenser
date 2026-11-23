@@ -245,7 +245,7 @@ static bool p_is_off(void *ctx)
     (void)ctx;
     return true;
 }
-static const dsp_pump_port_t PUMP = {NULL, p_run, p_off, p_is_off};
+static const dsp_pump_port_t PUMP = {NULL, p_run, p_off, p_is_off, NULL, NULL, NULL, NULL};
 static dsp_wake_cause_t pw_cause(void *ctx)
 {
     (void)ctx;

@@ -28,6 +28,7 @@ set(DSP_DOMAIN_SRCS
     "src/dsp_notify_proto.c"
     "src/dsp_notify_state.c"
     "src/dsp_ota.c"
+    "src/dsp_prime.c"
     "src/dsp_owner.c"
     "src/dsp_power.c"
     "src/dsp_recurrence.c"

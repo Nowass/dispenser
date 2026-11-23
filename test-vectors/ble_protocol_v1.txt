@@ -54,6 +54,14 @@ msg name=get_update_status_response_dev kind=rsp type=0xb0 txn=65535 running_ver
 msg name=start_update_request kind=req type=0xb1 txn=45 version=x:302e332e31 tag=x:6669726d776172652d76302e332e31 size=1430528 sha256=x:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f frame=0100b1002d003a0005302e332e310f6669726d776172652d76302e332e3100d41500000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 msg name=start_update_response_accepted kind=rsp type=0xb1 txn=45 verdict=0 frame=0100b1012d00010000
 msg name=start_update_response_dose_soon kind=rsp type=0xb1 txn=46 verdict=4 frame=0100b1012e00010004
+msg name=prime_start_request kind=req type=0xb2 txn=47 - frame=0100b2002f000000
+msg name=prime_start_response_running kind=rsp type=0xb2 txn=47 verdict=0 running=1 elapsed_ms=0 max_ms=30000 lease_ms=3000 stop_reason=0 frame=0100b2012f000d0000010000000030750000b80b00
+msg name=prime_start_response_battery kind=rsp type=0xb2 txn=48 verdict=2 running=0 elapsed_ms=0 max_ms=30000 lease_ms=3000 stop_reason=0 frame=0100b20130000d0002000000000030750000b80b00
+msg name=prime_status_request kind=req type=0xb4 txn=49 - frame=0100b40031000000
+msg name=prime_status_response_running kind=rsp type=0xb4 txn=49 verdict=0 running=1 elapsed_ms=12345 max_ms=30000 lease_ms=3000 stop_reason=0 frame=0100b40131000d0000013930000030750000b80b00
+msg name=prime_status_response_max_time kind=rsp type=0xb4 txn=50 verdict=0 running=0 elapsed_ms=30000 max_ms=30000 lease_ms=3000 stop_reason=2 frame=0100b40132000d0000003075000030750000b80b02
+msg name=prime_stop_request kind=req type=0xb3 txn=51 - frame=0100b30033000000
+msg name=prime_stop_response kind=rsp type=0xb3 txn=51 verdict=0 running=0 elapsed_ms=7000 max_ms=30000 lease_ms=3000 stop_reason=1 frame=0100b30133000d000000581b000030750000b80b01
 msg name=get_config_response kind=rsp type=0x20 txn=12 config.revision=7 config.reservoir_capacity_ul=100000 config.reservoir_remaining_ul=73500 config.low_stock_percent=20 config.time_sync_interval_h=24 config.notify_mask=31 config.pump_flow_ul_per_s=1200 config.calibrated_at=1795071600 config.max_dose_ul=20000 config.max_daily_ul=60000 config.max_runtime_ms=30000 config.min_interval_s=60 config.hw_max_runtime_ms=60000 frame=010020010c00300007000000a08601001c1f01001418001fb0040000709efe6a00000000204e000060ea0000307500003c00000060ea0000
 msg name=set_config_request kind=req type=0x21 txn=13 expected_revision=7 field_mask=1008 config.revision=7 config.reservoir_capacity_ul=100000 config.reservoir_remaining_ul=73500 config.low_stock_percent=20 config.time_sync_interval_h=24 config.notify_mask=31 config.pump_flow_ul_per_s=1200 config.calibrated_at=1795071600 config.max_dose_ul=20000 config.max_daily_ul=60000 config.max_runtime_ms=30000 config.min_interval_s=60 config.hw_max_runtime_ms=60000 frame=010021000d00360007000000f00307000000a08601001c1f01001418001fb0040000709efe6a00000000204e000060ea0000307500003c00000060ea0000
 msg name=set_config_response kind=rsp type=0x21 txn=13 revision=8 frame=010021010d00040008000000
@@ -149,6 +157,9 @@ bad name=start_update_version_short frame=0100b1002d00390004302e33310f6669726d77
 bad name=start_update_tag_slash frame=0100b1002d003a0005302e332e310f6669726d776172652f76302e332e3100d415000000000000000000000000000000000000000000000000000000000000000000 expect=bad_string
 bad name=start_update_sha_truncated frame=0100b1002d00390005302e332e310f6669726d776172652d76302e332e3100d4150000000000000000000000000000000000000000000000000000000000000000 expect=truncated
 bad name=update_status_capable_2 frame=0100b0012b00090005302e332e30020000 expect=bad_bool
+bad name=prime_status_running_2 frame=0100b40131000d0000020000000000000000000000 expect=bad_bool
+bad name=prime_status_truncated frame=0100b40131000c00000100000000000000000000 expect=truncated
+bad name=prime_start_nonempty frame=0100b2002f00010000 expect=trailing
 bad name=battery_101 frame=0100100109003a0001000000000000000000a08601001c1f010014000100f0efff6a000000000100feff6a00000000020101ab00652b000000000000000000000000 expect=bad_enum
 bad name=error_code_0 frame=0100100308000900000000000000000000 expect=bad_enum
 bad name=error_code_21 frame=0100100308000900150000000000000000 expect=bad_enum

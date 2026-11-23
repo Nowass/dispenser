@@ -220,6 +220,11 @@ static const dsp_ble_field_t START_UPDATE_REQ_F[] = {
 LAYOUT(START_UPDATE_REQ_L, START_UPDATE_REQ_F);
 static const dsp_ble_field_t START_UPDATE_RSP_F[] = {F_U8(dsp_ble_start_update_rsp_t, verdict)};
 LAYOUT(START_UPDATE_RSP_L, START_UPDATE_RSP_F);
+static const dsp_ble_field_t PRIME_RSP_F[] = {
+    F_U8(dsp_ble_prime_rsp_t, verdict), F_BOOL(dsp_ble_prime_rsp_t, running), F_U32(dsp_ble_prime_rsp_t, elapsed_ms),
+    F_U32(dsp_ble_prime_rsp_t, max_ms), F_U16(dsp_ble_prime_rsp_t, lease_ms), F_U8(dsp_ble_prime_rsp_t, stop_reason),
+};
+LAYOUT(PRIME_RSP_L, PRIME_RSP_F);
 static const dsp_ble_field_t FACTORY_F[] = {F_CONST32(dsp_ble_factory_reset_req_t, confirm, DSP_BLE_FACTORY_RESET_CONFIRM)};
 LAYOUT(FACTORY_L, FACTORY_F);
 static const dsp_ble_field_t EV_CLOSING_F[] = {
@@ -291,6 +296,9 @@ static const type_entry_t TYPES[] = {
     {DSP_BLE_T_GET_HISTORY, EN, &HIST_REQ_L, &HIST_RSP_L, NULL},
     {DSP_BLE_T_GET_UPDATE_STATUS, EN, &EMPTY_L, &UPDATE_STATUS_L, NULL},
     {DSP_BLE_T_START_UPDATE, EN, &START_UPDATE_REQ_L, &START_UPDATE_RSP_L, NULL},
+    {DSP_BLE_T_PRIME_START, EN, &EMPTY_L, &PRIME_RSP_L, NULL},
+    {DSP_BLE_T_PRIME_STOP, EN, &EMPTY_L, &PRIME_RSP_L, NULL},
+    {DSP_BLE_T_PRIME_STATUS, EN, &EMPTY_L, &PRIME_RSP_L, NULL},
     {DSP_BLE_T_EV_SESSION_CLOSING, EN, NULL, NULL, &EV_CLOSING_L},
     {DSP_BLE_T_EV_SUSPENDING_FOR_DOSE, EN, NULL, NULL, &EV_SUSPEND_L},
     {DSP_BLE_T_EV_BUSY, PL, NULL, NULL, &EMPTY_L},

@@ -606,6 +606,65 @@ static bool handle_item(dsp_app_t *app, dsp_app_session_t *ss)
     }
 }
 
+/* ---- Pump priming (fw 0.3.3, dsp_prime.h) ---------------------------------------------- */
+
+static uint32_t prime_max(const dsp_app_t *app)
+{
+    return dsp_dosing_prime_capable(&app->dosing) ? dsp_prime_max_ms(app->cfg->prime_max_ms) : 0;
+}
+
+/* Independent cutoff distance for the current lease/maximum (from now). */
+static uint32_t prime_cutoff(const dsp_app_t *app, uint64_t now)
+{
+    uint64_t end = app->prime_t0_ms + prime_max(app);
+    if (app->prime_lease_ms < end) {
+        end = app->prime_lease_ms;
+    }
+    uint64_t left = end > now ? end - now : 0;
+    return (uint32_t)left + DSP_PRIME_CUTOFF_MARGIN_MS;
+}
+
+/* Stops a running priming (pump OFF on every path). A fault ends pump use for this wake. */
+static void prime_halt(dsp_app_t *app, dsp_prime_stop_t reason)
+{
+    if (!app->prime_active && !dsp_dosing_priming(&app->dosing)) {
+        return;
+    }
+    dsp_pump_result_t r = dsp_dosing_prime_stop(&app->dosing);
+    uint64_t now = mono_ms(app);
+    uint64_t d = now > app->prime_t0_ms ? now - app->prime_t0_ms : 0;
+    app->prime_active = false;
+    app->prime_last_ms = d > UINT32_MAX ? UINT32_MAX : (uint32_t)d;
+    if (r != DSP_PUMP_OK) {
+        reason = DSP_PRIME_STOP_FAULT;
+        app->pump_fault = true; /* cutoff fired or OFF not confirmed: no further pump use */
+        app->rep.pump_fault = true;
+    }
+    app->prime_last_stop = (uint8_t)reason;
+    app->rep.prime_stop = (uint8_t)reason;
+    app->rep.prime_ms += app->prime_last_ms;
+    pump_mark(app);
+}
+
+/* Every BLE loop iteration (and before each queued item): the stop conditions. */
+static void prime_tick(dsp_app_t *app, uint64_t now, bool conn)
+{
+    if (!app->prime_active) {
+        return;
+    }
+    if (!conn) {
+        prime_halt(app, DSP_PRIME_STOP_DISCONNECT);
+    } else if (!app->ss.conn_active || !issued_ok(app, &app->prime_auth)) {
+        prime_halt(app, DSP_PRIME_STOP_SESSION); /* the authorization that started it ended */
+    } else if (!dsp_dosing_prime_active(&app->dosing)) {
+        prime_halt(app, DSP_PRIME_STOP_FAULT);
+    } else if (now >= app->prime_t0_ms + prime_max(app)) {
+        prime_halt(app, DSP_PRIME_STOP_MAX_TIME);
+    } else if (now >= app->prime_lease_ms) {
+        prime_halt(app, DSP_PRIME_STOP_HEARTBEAT);
+    }
+}
+
 static void stage_ble(dsp_app_t *app)
 {
     trace(app, DSP_STAGE_BLE);
@@ -653,11 +712,15 @@ static void stage_ble(dsp_app_t *app)
             ss->was_connected = false; /* disconnected: the idle timeout restarts */
             ss->idle_deadline_ms = now + ss->idle_ms;
         }
+        prime_tick(app, now, conn); /* before anything else in this iteration */
         if (!conn && now >= ss->idle_deadline_ms) {
             ss->end = DSP_BLE_END_IDLE;
             break;
         }
         owner_confirm_tick(app); /* recovery confirmation deadline */
+        if (app->prime_active && dose_due_now(app)) {
+            prime_halt(app, DSP_PRIME_STOP_DOSE); /* one owner: the dose follows below */
+        }
         if (!stalled && dose_due_now(app)) {
             /* Q8: scheduled dosing first; BLE suspended for the pump, resumed afterwards. A
              * pending recovery confirmation is aborted (the session is interrupted). */
@@ -721,6 +784,9 @@ static void stage_ble(dsp_app_t *app)
         if (owner_confirm_pending(app) && wait_ms > 200u) {
             wait_ms = 200u; /* evaluate the confirmation deadline promptly */
         }
+        if (app->prime_active && wait_ms > DSP_PRIME_TICK_MS) {
+            wait_ms = DSP_PRIME_TICK_MS; /* lease, maximum, disconnect and STOP promptly */
+        }
         stalled = false;
         if (wait_ms > 3600000u) {
             wait_ms = 3600000u;
@@ -730,6 +796,7 @@ static void stage_ble(dsp_app_t *app)
     if (ss->end == DSP_BLE_END_NONE) {
         ss->end = DSP_BLE_END_MAX; /* iteration bound */
     }
+    prime_halt(app, ble_connected(app) ? DSP_PRIME_STOP_SESSION : DSP_PRIME_STOP_DISCONNECT);
     app->rep.ble_end = ss->end;
     conn_end(app);
     owner_session_end(app); /* handshake, authorization and confirmation end with the session */
@@ -824,6 +891,7 @@ static uint32_t checklist(dsp_app_t *app)
 __attribute__((noinline)) static void stage_shutdown_and_sleep(dsp_app_t *app)
 {
     trace(app, DSP_STAGE_SHUTDOWN);
+    prime_halt(app, DSP_PRIME_STOP_SESSION); /* never reached while priming; defensive */
     const dsp_power_port_t *power = app->cfg->power;
     uint32_t f = 0;
     do {
@@ -1425,6 +1493,10 @@ dsp_app_op_result_t dsp_app_manual_dose(dsp_app_t *app, const dsp_app_auth_t *au
         fill_manual(app, slot, out, DSP_MRES_NOT_DECIDED, 0);
         return op(DSP_OP_DEGRADED, 0, 0); /* nothing can be made durable in this wake */
     }
+    if (app->prime_active) {
+        fill_manual(app, slot, out, DSP_MRES_NOT_DECIDED, 0);
+        return op(DSP_OP_BUSY, 0, 0); /* one owner: stop priming first (not consumed) */
+    }
     /* Admission (M1.10b.3): after the decided lookup (retries are always answered), before
      * anything else; a refusal here writes nothing and leaves the request undecided. */
     uint16_t mmax = app->cfg->session_manual_max != 0 ? app->cfg->session_manual_max
@@ -1647,7 +1719,8 @@ dsp_app_op_result_t dsp_app_get_battery(dsp_app_t *app, const dsp_app_auth_t *au
     uint64_t now = mono_or_0(app);
     bool stale = !app->batt_measured || now < app->batt_ms ||
                  now - app->batt_ms >= DSP_APP_BATTERY_REFRESH_MS;
-    bool quiet = !app->pump_ran || (now >= app->pump_ms && now - app->pump_ms >= DSP_APP_BATTERY_PUMP_QUIET_MS);
+    bool quiet = !app->prime_active &&
+                 (!app->pump_ran || (now >= app->pump_ms && now - app->pump_ms >= DSP_APP_BATTERY_PUMP_QUIET_MS));
     if (stale && quiet) {
         battery_measure(app);
         now = app->batt_measured ? app->batt_ms : now;
@@ -2939,7 +3012,7 @@ static dsp_ota_conditions_t ota_conditions(dsp_app_t *app)
     dsp_ota_conditions_t c;
     memset(&c, 0, sizeof c);
     c.capable = ota_wired(app) && app->cfg->ota->capable(app->cfg->ota->ctx);
-    c.busy = app->ota_pending || !app->loaded || app->inhibited || app->storage_fault ||
+    c.busy = app->ota_pending || app->prime_active || !app->loaded || app->inhibited || app->storage_fault ||
              app->rep.pump_unconfirmed || dsp_dosing_degraded(&app->dosing);
     c.wifi_configured = ota_wifi_configured(app);
     dsp_clock_t clk = dose_clock(app);
@@ -3024,6 +3097,154 @@ dsp_app_op_result_t dsp_app_start_update(dsp_app_t *app, const dsp_app_auth_t *a
         app->ss.end = DSP_BLE_END_COMMAND; /* the BLE loop ends after this item (as END_SESSION) */
     }
     *verdict = (uint8_t)v;
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+/* ---- Pump priming operations (fw 0.3.3) ------------------------------------------------ */
+
+/* Authorization only (issued for this connection): STOP and STATUS are never rate limited. */
+static dsp_app_op_result_t prime_guard(dsp_app_t *app, const dsp_app_auth_t *auth)
+{
+    if (app == NULL || app->cfg == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    app->rep.ops++;
+    if (auth == NULL || auth->role != DSP_APP_ROLE_OWNER || auth->slot >= DSP_APP_PHONE_SLOTS ||
+        !issued_ok(app, auth)) {
+        return op(DSP_OP_FORBIDDEN, 0, 0);
+    }
+    return op(DSP_OP_OK, 0, 0);
+}
+
+static void prime_fill(dsp_app_t *app, dsp_ble_prime_rsp_t *out, uint8_t verdict)
+{
+    memset(out, 0, sizeof *out);
+    out->verdict = verdict;
+    out->max_ms = prime_max(app);
+    out->lease_ms = (uint16_t)DSP_PRIME_LEASE_MS;
+    if (app->prime_active) {
+        uint64_t now = mono_ms(app);
+        uint64_t d = now > app->prime_t0_ms ? now - app->prime_t0_ms : 0;
+        out->running = dsp_dosing_prime_active(&app->dosing);
+        out->elapsed_ms = d > UINT32_MAX ? UINT32_MAX : (uint32_t)d;
+    } else {
+        out->elapsed_ms = app->prime_last_ms;
+        out->stop_reason = app->prime_last_stop;
+    }
+}
+
+/* Renews the lease (only for the authorization that started it) and re-arms the independent
+ * cutoff; a failed re-arm stops (FAULT). */
+static void prime_renew(dsp_app_t *app, const dsp_app_auth_t *auth)
+{
+    uint64_t now = mono_ms(app);
+    prime_tick(app, now, ble_connected(app));
+    if (!app->prime_active || auth->token != app->prime_auth.token ||
+        auth->session_id != app->prime_auth.session_id) {
+        return;
+    }
+    app->prime_lease_ms = now + DSP_PRIME_LEASE_MS;
+    if (!dsp_dosing_prime_extend(&app->dosing, prime_cutoff(app, now))) {
+        prime_halt(app, DSP_PRIME_STOP_FAULT);
+    }
+}
+
+static dsp_prime_conditions_t prime_conditions(dsp_app_t *app)
+{
+    dsp_prime_conditions_t c;
+    memset(&c, 0, sizeof c);
+    c.capable = prime_max(app) != 0;
+    c.fault = app->pump_fault || app->rep.pump_unconfirmed || app->inhibited || app->storage_fault ||
+              !app->loaded || dsp_dosing_degraded(&app->dosing);
+    c.busy = app->ota_pending;
+    bool empty = false;
+    const uint32_t not_reservoir = DSP_DOSING_G_NOT_LOADED | DSP_DOSING_G_DEGRADED |
+                                   DSP_DOSING_G_MANUAL_ACTIVE | DSP_DOSING_G_CREDENTIALS;
+    uint32_t g = dsp_dosing_prime_gates(&app->dosing, &empty);
+    if (g & not_reservoir) {
+        c.fault = true;
+    }
+    /* BLOCKED, REFILL_PENDING, RESERVOIR_UNCONFIGURED or an estimated remaining volume of 0 */
+    c.reservoir_ok = (g & ~not_reservoir) == 0 && !empty;
+    c.battery_valid = app->batt_measured && app->batt.state == DSP_BATT_VALID;
+    c.battery_mv = app->batt.battery_mv;
+    c.battery_low_open = (app->notify.s.cond[DSP_COND_BATTERY_LOW].flags & DSP_COND_F_ACTIVE) != 0;
+    dsp_clock_t clk = dose_clock(app);
+    c.clock_trusted = clk.valid;
+    c.now = clk.now;
+    dsp_utc_t at = 0;
+    c.next_dose_known = next_due(app, &at);
+    c.next_dose_at = at;
+    return c;
+}
+
+dsp_app_op_result_t dsp_app_prime_start(dsp_app_t *app, const dsp_app_auth_t *auth, dsp_ble_prime_rsp_t *out)
+{
+    dsp_app_op_result_t g = guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    if (app->prime_active) {
+        prime_renew(app, auth); /* repeated START: never restarted, only the lease renewed */
+        prime_fill(app, out, app->prime_active ? DSP_PRIME_V_OK : DSP_PRIME_V_FAULT);
+        return done(app, op(DSP_OP_OK, 0, 0));
+    }
+    dsp_prime_conditions_t c = prime_conditions(app);
+    dsp_prime_verdict_t v = dsp_prime_check(&c);
+    if (v == DSP_PRIME_V_OK && (!ble_connected(app) || !app->ss.conn_active)) {
+        v = DSP_PRIME_V_FAULT; /* only inside a live authenticated connection */
+    }
+    if (v == DSP_PRIME_V_OK) {
+        uint64_t now = mono_ms(app);
+        app->prime_t0_ms = now;
+        app->prime_lease_ms = now + DSP_PRIME_LEASE_MS;
+        dsp_pump_result_t r = dsp_dosing_prime_start(&app->dosing, prime_cutoff(app, now));
+        if (r == DSP_PUMP_OK) {
+            app->prime_active = true;
+            app->prime_auth = *auth; /* the lease is bound to this connection's authorization */
+            app->prime_last_stop = DSP_PRIME_STOP_NONE;
+            app->rep.primes++;
+        } else {
+            v = DSP_PRIME_V_FAULT;
+            pump_mark(app);
+            if (r == DSP_PUMP_FAILED) {
+                app->pump_fault = true; /* activated but not confirmed: no further pump use */
+                app->rep.pump_fault = true;
+            }
+        }
+    }
+    prime_fill(app, out, (uint8_t)v);
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_prime_stop(dsp_app_t *app, const dsp_app_auth_t *auth, dsp_ble_prime_rsp_t *out)
+{
+    dsp_app_op_result_t g = prime_guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    prime_halt(app, DSP_PRIME_STOP_USER); /* first, before anything that could fail */
+    if (out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    prime_fill(app, out, DSP_PRIME_V_OK);
+    return done(app, op(DSP_OP_OK, 0, 0));
+}
+
+dsp_app_op_result_t dsp_app_prime_status(dsp_app_t *app, const dsp_app_auth_t *auth, dsp_ble_prime_rsp_t *out)
+{
+    dsp_app_op_result_t g = prime_guard(app, auth);
+    if (g.status != DSP_OP_OK) {
+        return g;
+    }
+    if (out == NULL) {
+        return op(DSP_OP_INVALID, 0, 0);
+    }
+    prime_renew(app, auth);
+    prime_fill(app, out, DSP_PRIME_V_OK);
     return done(app, op(DSP_OP_OK, 0, 0));
 }
 

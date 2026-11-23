@@ -202,6 +202,17 @@ config DSP_PUMP_GPIO_MAX_RUNTIME_MS
         max_runtime_ms is refused (PUMP_CONFIG gate) and the driver refuses longer runs. The
         independent cutoff fires at runtime + 100 ms.
 
+config DSP_PUMP_PRIME_MAX_MS
+    int "Pump priming: maximum active time per activation (ms, 0 = no priming)"
+    range 0 30000
+    default 0
+    depends on DSP_PUMP_GPIO
+    help
+        Separate maximum of the owner-started priming mode (PRIME_START, docs/BLE_PROTOCOL.md
+        10.9); normal doses keep DSP_PUMP_GPIO_MAX_RUNTIME_MS. Priming also stops 3 s after the
+        last heartbeat; the independent cutoff fires at most 500 ms after this maximum.
+        Provisional value 30000: NOT a thermal rating of the motor or the switching device.
+
 config DSP_APP_SIM_HW_MAX_RUNTIME_MS
     int "Simulated pump hardware runtime maximum (ms, 0 = never actuate)"
     range 0 60000

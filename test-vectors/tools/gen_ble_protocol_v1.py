@@ -50,6 +50,9 @@ HIST_EVENT = [("seq", "u32", None), ("type", "enum", (1, 2, 3, 4, 5)), ("result"
               ("schedule_id", "str", (0, 64, "id"))]
 
 # type: (name, request_fields or None, response_fields or None, event_fields or None)
+PRIME_RSP = [("verdict", "u8", None), ("running", "bool", None), ("elapsed_ms", "u32", None),
+             ("max_ms", "u32", None), ("lease_ms", "u16", None), ("stop_reason", "u8", None)]
+
 TYPES = {
     0x01: ("HELLO", [("proto_min", "u8", None), ("proto_max", "u8", None)],
            [("proto", "u8", None), ("claim_state", "enum", (0, 1)), ("flags", "mask8", 0x03),
@@ -102,6 +105,10 @@ TYPES = {
                                      ("last_result", "u8", None), ("last_version", "str", (0, 17, "id"))], None),
     0xB1: ("START_UPDATE", [("version", "str", (5, 17, "id")), ("tag", "str", (1, 40, "id")), ("size", "u32", None),
                             ("sha256", "bytes", 32)], [("verdict", "u8", None)], None),
+    # Pump priming (sections 7.9, 10.9, firmware >= 0.3.3): empty requests, one response layout
+    0xB2: ("PRIME_START", [], PRIME_RSP, None),
+    0xB3: ("PRIME_STOP", [], PRIME_RSP, None),
+    0xB4: ("PRIME_STATUS", [], PRIME_RSP, None),
     0x80: ("EV_SESSION_CLOSING", None, None, [("reason", "enum", (1, 2, 3, 4)), ("seconds_left", "u16", None)]),
     0x81: ("EV_SUSPENDING_FOR_DOSE", None, None, [("seconds_until", "u16", None)]),
     0x82: ("EV_BUSY", None, None, []),
@@ -244,6 +251,14 @@ MSGS = [
     ("start_update_request", 0xB1, 0, 45, dict(version=b("0.3.1"), tag=b("firmware-v0.3.1"), size=1430528, sha256=bytes(range(32)))),
     ("start_update_response_accepted", 0xB1, RESPONSE, 45, dict(verdict=0)),
     ("start_update_response_dose_soon", 0xB1, RESPONSE, 46, dict(verdict=4)),
+    ("prime_start_request", 0xB2, 0, 47, dict()),
+    ("prime_start_response_running", 0xB2, RESPONSE, 47, dict(verdict=0, running=1, elapsed_ms=0, max_ms=30000, lease_ms=3000, stop_reason=0)),
+    ("prime_start_response_battery", 0xB2, RESPONSE, 48, dict(verdict=2, running=0, elapsed_ms=0, max_ms=30000, lease_ms=3000, stop_reason=0)),
+    ("prime_status_request", 0xB4, 0, 49, dict()),
+    ("prime_status_response_running", 0xB4, RESPONSE, 49, dict(verdict=0, running=1, elapsed_ms=12345, max_ms=30000, lease_ms=3000, stop_reason=0)),
+    ("prime_status_response_max_time", 0xB4, RESPONSE, 50, dict(verdict=0, running=0, elapsed_ms=30000, max_ms=30000, lease_ms=3000, stop_reason=2)),
+    ("prime_stop_request", 0xB3, 0, 51, dict()),
+    ("prime_stop_response", 0xB3, RESPONSE, 51, dict(verdict=0, running=0, elapsed_ms=7000, max_ms=30000, lease_ms=3000, stop_reason=1)),
     ("get_config_response", 0x20, RESPONSE, 12, dict(config=CONFIG_V)),
     ("set_config_request", 0x21, 0, 13, dict(expected_revision=7, field_mask=0x03F0, config=CONFIG_V)),
     ("set_config_response", 0x21, RESPONSE, 13, dict(revision=8)),
@@ -414,6 +429,9 @@ def bad_vectors():
     out.append(("start_update_tag_slash", frame(0xB1, 0, 45, upd[:6] + b"\x0ffirmware/v0.3.1" + upd[22:]).hex(), "bad_string"))
     out.append(("start_update_sha_truncated", frame(0xB1, 0, 45, upd[:-1]).hex(), "truncated"))
     out.append(("update_status_capable_2", frame(0xB0, RESPONSE, 43, b"\x050.3.0\x02\x00\x00").hex(), "bad_bool"))
+    out.append(("prime_status_running_2", frame(0xB4, RESPONSE, 49, b"\x00\x02" + bytes(11)).hex(), "bad_bool"))
+    out.append(("prime_status_truncated", frame(0xB4, RESPONSE, 49, b"\x00\x01" + bytes(10)).hex(), "truncated"))
+    out.append(("prime_start_nonempty", frame(0xB2, 0, 47, b"\x00").hex(), "trailing"))
     out.append(("battery_101", frame(0x10, RESPONSE, 9, sv[:44] + b"\x65" + sv[45:]).hex(), "bad_enum"))
     out.append(("error_code_0", frame(0x10, RESPONSE | ERRORF, 8, struct.pack("<BII", 0, 0, 0)).hex(), "bad_enum"))
     out.append(("error_code_21", frame(0x10, RESPONSE | ERRORF, 8, struct.pack("<BII", 21, 0, 0)).hex(), "bad_enum"))

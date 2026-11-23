@@ -66,6 +66,22 @@ typedef struct {
     /* M1.9b: confirms the output is OFF (driver state / gate readback). NULL = cannot be
      * confirmed: safe-off is then reported unconfirmed (fail-safe, see dsp_power.h). */
     bool (*is_off)(void *ctx);
+    /* Pump priming (firmware 0.3.3; all four NULL = not capable). Nonblocking, used only by the
+     * Dosing Service's priming functions, never by run():
+     *  prime_start:  activates the output with the independent cutoff armed at now + cutoff_ms
+     *                (the driver refuses more than its own priming maximum + margin);
+     *  prime_extend: re-arms the independent cutoff to now + cutoff_ms, capped so the output is
+     *                never active longer than the driver's priming maximum + margin since
+     *                prime_start; false = no longer active (cutoff fired, cap reached, readback
+     *                or re-arm error: the output is then driven OFF);
+     *  prime_stop:   drives the output OFF (idempotent); DSP_PUMP_FAILED if the cutoff fired,
+     *                an extension failed or the readback does not confirm OFF;
+     *  prime_active: the output is active (pad readback, not a remembered flag).
+     * force_off() also ends priming. */
+    dsp_pump_result_t (*prime_start)(void *ctx, uint32_t cutoff_ms);
+    bool (*prime_extend)(void *ctx, uint32_t cutoff_ms);
+    dsp_pump_result_t (*prime_stop)(void *ctx);
+    bool (*prime_active)(void *ctx);
 } dsp_pump_port_t;
 
 /* Reads the current clock (for doses executed one after another in one wake). */
@@ -101,6 +117,8 @@ enum {
     DSP_DOSING_G_CREDENTIALS = 1u << 9, /* M1.10b.3: credentials damaged (CRED_DEGRADED) or an
                                            identity key fault in this wake: no dosing until
                                            recovery or maintenance */
+    DSP_DOSING_G_PRIMING = 1u << 10,    /* fw 0.3.3: pump priming active (doses only; never in
+                                           dsp_dosing_gates/GET_STATUS) */
 };
 
 /* Safety limits violated. */
@@ -139,6 +157,7 @@ typedef struct {
     dsp_evlog_t *log;      /* Phase C: user-visible event history (NULL = none); written only
                               after each durable transition, never read by this service */
     uint8_t ev_pump_flags; /* DSP_EVF_PUMP_SIMULATED / DSP_EVF_PUMP_BENCH_GPIO for dose events */
+    bool priming;          /* fw 0.3.3: priming active (RAM only; never restarted after a reset) */
 } dsp_dosing_t;
 
 #define DSP_MANUAL_DECISIONS_PER_DAY_DEFAULT 32 /* approved starting policy (O10) */
@@ -313,6 +332,25 @@ bool dsp_dosing_next_due(dsp_dosing_t *d, const dsp_schedule_t *schedules, size_
 
 /* force_off() then the is_off() confirmation. The port variant serves SAFE_OFF before the
  * service is initialized (the port is only passed through, never driven by the caller). */
+/*
+ * Pump priming (fw 0.3.3): owner-started, nonblocking, outside dose accounting. Nothing is claimed,
+ * logged or subtracted from the reservoir estimate; doses are refused (DSP_DOSING_G_PRIMING) while
+ * it runs. The Application Service owns the lease/maximum timing; the driver's independent cutoff
+ * (re-armed by prime_extend) enforces it without the calling task.
+ *  prime_gates: refusals for priming: NOT_LOADED, DEGRADED, BLOCKED, REFILL_PENDING, MANUAL_ACTIVE,
+ *               CREDENTIALS, RESERVOIR_UNCONFIGURED (readiness, clock and calibration not needed);
+ *               *empty = configured reservoir with an estimated remaining volume of 0.
+ *  prime_start: the driver's prime_start (only when capable and not priming); a failure forces OFF.
+ *  prime_stop:  OFF on every path; the driver's result (FAILED = cutoff fired or not confirmed).
+ */
+bool dsp_dosing_prime_capable(const dsp_dosing_t *d);
+uint32_t dsp_dosing_prime_gates(dsp_dosing_t *d, bool *empty);
+dsp_pump_result_t dsp_dosing_prime_start(dsp_dosing_t *d, uint32_t cutoff_ms);
+bool dsp_dosing_prime_extend(dsp_dosing_t *d, uint32_t cutoff_ms);
+bool dsp_dosing_prime_active(const dsp_dosing_t *d);
+dsp_pump_result_t dsp_dosing_prime_stop(dsp_dosing_t *d);
+bool dsp_dosing_priming(const dsp_dosing_t *d);
+
 bool dsp_dosing_port_safe_off(const dsp_pump_port_t *pump);
 bool dsp_dosing_safe_off(dsp_dosing_t *d);
 

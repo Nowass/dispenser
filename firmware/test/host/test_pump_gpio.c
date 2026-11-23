@@ -22,7 +22,7 @@ static struct {
     bool cutoff_armed;
     uint32_t cutoff_at;
     /* faults */
-    bool fail_configure, fail_set, fail_arm, wait_interrupt, stuck_active, read_error;
+    bool fail_configure, fail_set, fail_arm, wait_interrupt, stuck_active, read_error, fail_rearm;
     int read_override;     /* -2 = none, else the value read back once while active */
     /* timeline of electrical activity */
     uint32_t active_since;
@@ -145,7 +145,24 @@ static bool f_wait(void *ctx, uint32_t ms)
     advance_to(pad.now + ms + wait_extra);
     return true;
 }
-static const dsp_pump_gpio_hw_t HW = {NULL, f_configure, f_set, f_read, f_hold, f_arm, f_disarm, f_wait};
+static bool f_rearm(void *ctx, uint32_t ms)
+{
+    (void)ctx;
+    if (pad.fail_rearm || !pad.cutoff_armed) {
+        return false; /* esp_timer_restart: ESP_ERR_INVALID_STATE once the one-shot has fired */
+    }
+    pad.cutoff_at = pad.now + ms;
+    return true;
+}
+static uint64_t f_now(void *ctx)
+{
+    (void)ctx;
+    return pad.now;
+}
+static const dsp_pump_gpio_hw_t HW = {NULL, f_configure, f_set, f_read, f_hold, f_arm, f_disarm, f_wait,
+                                      f_rearm, f_now};
+static const dsp_pump_gpio_hw_t HW_NO_PRIME = {NULL, f_configure, f_set, f_read, f_hold, f_arm, f_disarm,
+                                               f_wait, NULL, NULL};
 
 static dsp_pump_port_t port;
 
@@ -339,8 +356,163 @@ static void test_tick_rounded_pulse_bounds(void)
     DSP_CHECK_EQ_INT(UINT32_MAX, dsp_pump_gpio_delay_ticks(UINT32_MAX, 1));
 }
 
+/* ---- Priming (fw 0.3.3) ---------------------------------------------------------------- */
+
+static void prime_power_on(uint32_t prime_max)
+{
+    power_on(true, 0);
+    dsp_pump_gpio_set_prime_max(&drv, prime_max);
+    dsp_pump_gpio_port(&drv, &port);
+    port.force_off(port.ctx); /* the Dosing Service's safe-off at init */
+}
+
+static void test_prime_capability(void)
+{
+    /* not enabled (max 0) or no re-arm/clock in the hardware interface: no priming functions */
+    power_on(true, 0);
+    DSP_CHECK(port.prime_start == NULL && port.prime_stop == NULL);
+    dsp_pump_gpio_init(&drv, &HW_NO_PRIME, true, 10000);
+    dsp_pump_gpio_set_prime_max(&drv, 30000);
+    dsp_pump_gpio_port(&drv, &port);
+    DSP_CHECK(port.prime_start == NULL && port.prime_extend == NULL && port.prime_active == NULL);
+    prime_power_on(30000);
+    DSP_CHECK(port.prime_start != NULL && port.prime_extend != NULL && port.prime_stop != NULL &&
+              port.prime_active != NULL);
+    DSP_CHECK(port.run != NULL); /* the dose path is unchanged */
+}
+
+static void test_prime_start_stop(void)
+{
+    prime_power_on(30000);
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.prime_start(port.ctx, 3500));
+    DSP_CHECK(pad.active && !pad.held && pad.cutoff_armed);
+    DSP_CHECK_EQ_INT(4500, pad.cutoff_at); /* armed before the output is active */
+    DSP_CHECK(port.prime_active(port.ctx));
+    DSP_CHECK(!port.is_off(port.ctx));
+    /* a second start is refused and leaves the running output alone (never restarted) */
+    DSP_CHECK_EQ_INT(DSP_PUMP_START_FAILED, port.prime_start(port.ctx, 3500));
+    DSP_CHECK(pad.active);
+    /* a dose while priming is refused without touching the pad (one owner) */
+    DSP_CHECK_EQ_INT(DSP_PUMP_START_FAILED, port.run(port.ctx, 1000));
+    DSP_CHECK(pad.active && port.prime_active(port.ctx));
+    advance_to(2000);
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.prime_stop(port.ctx));
+    check_off_and_held();
+    DSP_CHECK_EQ_INT(1000, pad.active_total);
+    DSP_CHECK_EQ_INT(1000, (long)drv.st.prime_ms);
+    DSP_CHECK(!port.prime_active(port.ctx));
+    /* stop again: idempotent, OK */
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.prime_stop(port.ctx));
+    check_off_and_held();
+    /* normal doses work again with their own 10 s limit */
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.run(port.ctx, 1000));
+    DSP_CHECK_EQ_INT(DSP_PUMP_START_FAILED, port.run(port.ctx, 10001));
+    check_off_and_held();
+}
+
+static void test_prime_limits(void)
+{
+    prime_power_on(30000);
+    /* cutoff 0 or beyond max + margin: never activates */
+    DSP_CHECK_EQ_INT(DSP_PUMP_START_FAILED, port.prime_start(port.ctx, 0));
+    DSP_CHECK_EQ_INT(DSP_PUMP_START_FAILED, port.prime_start(port.ctx, 30000 + DSP_PUMP_GPIO_PRIME_MARGIN_MS + 1));
+    DSP_CHECK_EQ_INT(0, pad.activations);
+    /* extensions are capped at max + margin since the start, whatever the caller asks */
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.prime_start(port.ctx, 3500));
+    uint32_t t0 = pad.now;
+    for (uint32_t t = 1000; t <= 29000; t += 1000) {
+        advance_to(t0 + t);
+        DSP_CHECK(port.prime_extend(port.ctx, 60000));
+        DSP_CHECK(pad.cutoff_at <= t0 + 30000 + DSP_PUMP_GPIO_PRIME_MARGIN_MS);
+    }
+    advance_to(t0 + 31000); /* the caller "forgot" to stop: the cutoff fired at max + margin */
+    DSP_CHECK(!pad.active);
+    DSP_CHECK_EQ_INT(t0 + 30000 + DSP_PUMP_GPIO_PRIME_MARGIN_MS, pad.last_off);
+    DSP_CHECK(!port.prime_active(port.ctx));
+    DSP_CHECK(!port.prime_extend(port.ctx, 3500));
+    DSP_CHECK_EQ_INT(DSP_PUMP_FAILED, port.prime_stop(port.ctx)); /* cutoff = fault */
+    check_off_and_held();
+    DSP_CHECK_EQ_INT(1, drv.st.cutoffs);
+}
+
+static void test_prime_lease_cutoff_without_task(void)
+{
+    /* the application task stops renewing (stalled): the independent cutoff turns GPIO off */
+    prime_power_on(30000);
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.prime_start(port.ctx, 3500));
+    uint32_t t0 = pad.now;
+    advance_to(t0 + 1000);
+    DSP_CHECK(port.prime_extend(port.ctx, 3500));
+    advance_to(t0 + 10000); /* no further renewal */
+    DSP_CHECK(!pad.active);
+    DSP_CHECK_EQ_INT(t0 + 4500, pad.last_off);
+    DSP_CHECK(!port.prime_active(port.ctx));
+    DSP_CHECK_EQ_INT(DSP_PUMP_FAILED, port.prime_stop(port.ctx));
+    check_off_and_held();
+}
+
+static void test_prime_faults(void)
+{
+    /* activation not confirmed by readback: off, FAILED */
+    prime_power_on(30000);
+    pad.read_override = 0;
+    DSP_CHECK_EQ_INT(DSP_PUMP_FAILED, port.prime_start(port.ctx, 3500));
+    check_off_and_held();
+    /* no cutoff could be armed: never activates */
+    prime_power_on(30000);
+    pad.fail_arm = true;
+    DSP_CHECK_EQ_INT(DSP_PUMP_START_FAILED, port.prime_start(port.ctx, 3500));
+    DSP_CHECK_EQ_INT(0, pad.activations);
+    check_off_and_held();
+    /* re-arm fails: driven off at once, the stop reports the fault */
+    prime_power_on(30000);
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.prime_start(port.ctx, 3500));
+    pad.fail_rearm = true;
+    DSP_CHECK(!port.prime_extend(port.ctx, 3500));
+    DSP_CHECK(!pad.active && !pad.cutoff_armed);
+    DSP_CHECK(!port.prime_active(port.ctx));
+    DSP_CHECK_EQ_INT(DSP_PUMP_FAILED, port.prime_stop(port.ctx));
+    check_off_and_held();
+    /* output drops while running (readback): the next extension fails and drives it off */
+    prime_power_on(30000);
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.prime_start(port.ctx, 3500));
+    pad.read_override = 0;
+    DSP_CHECK(!port.prime_extend(port.ctx, 3500));
+    DSP_CHECK_EQ_INT(DSP_PUMP_FAILED, port.prime_stop(port.ctx));
+    check_off_and_held();
+    /* force_off (safe-off, shutdown) ends priming */
+    prime_power_on(30000);
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.prime_start(port.ctx, 3500));
+    port.force_off(port.ctx);
+    check_off_and_held();
+    DSP_CHECK(!port.prime_active(port.ctx));
+    DSP_CHECK(!port.prime_extend(port.ctx, 3500));
+}
+
+static void test_prime_reset(void)
+{
+    /* reset while priming: RAM gone, pad undriven (pull-down keeps it off), nothing restarts */
+    prime_power_on(30000);
+    DSP_CHECK_EQ_INT(DSP_PUMP_OK, port.prime_start(port.ctx, 3500));
+    DSP_CHECK(pad.active);
+    power_on(true, 0);
+    dsp_pump_gpio_set_prime_max(&drv, 30000);
+    dsp_pump_gpio_port(&drv, &port);
+    DSP_CHECK(!pad.active);
+    DSP_CHECK(!port.prime_active(port.ctx));
+    DSP_CHECK(!port.prime_extend(port.ctx, 3500));
+    port.force_off(port.ctx);
+    check_off_and_held();
+}
+
 int main(void)
 {
+    DSP_RUN(test_prime_capability);
+    DSP_RUN(test_prime_start_stop);
+    DSP_RUN(test_prime_limits);
+    DSP_RUN(test_prime_lease_cutoff_without_task);
+    DSP_RUN(test_prime_faults);
+    DSP_RUN(test_prime_reset);
     DSP_RUN(test_tick_rounded_pulse_bounds);
     DSP_RUN(test_activation_timing_and_hold);
     DSP_RUN(test_active_low_polarity);

@@ -79,6 +79,9 @@ typedef enum {
     DSP_BLE_T_GET_HISTORY = 0x90, /* Phase C: first type of the journal range 0x90-0x9F */
     DSP_BLE_T_GET_UPDATE_STATUS = 0xB0, /* firmware >= 0.3.0 (docs/BLE_PROTOCOL.md 7.8, 10.8) */
     DSP_BLE_T_START_UPDATE = 0xB1,      /* firmware >= 0.3.0 */
+    DSP_BLE_T_PRIME_START = 0xB2,       /* firmware >= 0.3.3 (docs/BLE_PROTOCOL.md 7.9, 10.9) */
+    DSP_BLE_T_PRIME_STOP = 0xB3,        /* firmware >= 0.3.3 */
+    DSP_BLE_T_PRIME_STATUS = 0xB4,      /* firmware >= 0.3.3: status and lease heartbeat */
     DSP_BLE_T_EV_SESSION_CLOSING = 0x80,
     DSP_BLE_T_EV_SUSPENDING_FOR_DOSE = 0x81,
     DSP_BLE_T_EV_BUSY = 0x82,
@@ -331,6 +334,15 @@ typedef struct {
     uint8_t sha256[32];
 } dsp_ble_start_update_req_t;
 typedef struct { uint8_t verdict; } dsp_ble_start_update_rsp_t; /* dsp_ota_verdict_t */
+/* Pump priming (protocol 7.9, 10.9): one response for PRIME_START / PRIME_STOP / PRIME_STATUS. */
+typedef struct {
+    uint8_t verdict;     /* dsp_prime_verdict_t (DSP_PRIME_V_*) */
+    bool running;        /* the output is active right now (pad readback) */
+    uint32_t elapsed_ms; /* running: since start; stopped: duration of the last run (0 = none) */
+    uint32_t max_ms;     /* maximum per activation (0 = not capable) */
+    uint16_t lease_ms;   /* heartbeat expiry */
+    uint8_t stop_reason; /* last run's DSP_PRIME_STOP_* (0 while running or none) */
+} dsp_ble_prime_rsp_t;
 
 typedef union {
     dsp_ble_hello_req_t hello_req;
@@ -374,6 +386,7 @@ typedef union {
     dsp_ble_update_status_rsp_t update_status_rsp;
     dsp_ble_start_update_req_t start_update_req;
     dsp_ble_start_update_rsp_t start_update_rsp;
+    dsp_ble_prime_rsp_t prime_rsp;
     dsp_ble_error_body_t error;
 } dsp_ble_body_t;
 
