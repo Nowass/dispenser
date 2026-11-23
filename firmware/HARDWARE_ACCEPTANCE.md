@@ -208,6 +208,25 @@ app-only writes at 0x30000 with backups (`backup-20261122-combined/`), evidence
   TLS-wake heap minimum and stack mark (log lost before sleep), R4 RECOVERY and distinct
   ephemerals/session IDs, R8, energy measurements.
 
+### 8j. OTA bootstrap 0.3.0 over USB (**BENCH VERIFIED** 2026-11-23)
+
+One-time USB installation of the OTA-capable firmware (docs/FIRMWARE_UPDATE.md 6), motor disconnected
+(owner-confirmed), private backups in `backup-ota-bootstrap/` (nvs, nvs_sec, otadata, bootloader
+region), evidence `~/dispenser-hw-evidence/ota-bootstrap-0.3.0/flash.log`.
+
+- Preflight: device held bootloader db7e593, the partition table and the production app e217c16
+  (verified); state READY, 7 daily schedules (rev 63), reservoir 8 %, LOW episodes open.
+- Written: rollback bootloader `93a08955…` at 0x0 and the signed app 0.3.0 `a347ca23…` (1,511,424 B,
+  RSA-3072 key digest `9e187d83…e1ba37ed`) at 0x30000, both verified by read-back; partition table,
+  `otadata` (ota_0 VALID), NVS and `nvs_sec` byte-identical afterwards.
+- Boot (owner RESET): `App version 0.3.0`, battery VALID 4,074 mV, GPIO10 never active (the 08:00
+  dose was not run late), Wi-Fi 1.6 s, SNTP 4.5 s, radio off, button wake armed, deep sleep
+  21,600 s; no error, no panic.
+- APK `f43c189` (versionCode 6, same signer) installed in place by the owner; button wake, BLE
+  session, battery refreshes (VALID 4,072 mV), Settings → Firmware zařízení shows 0.3.0 and the
+  update check works (no firmware release published yet); the device slept after the window.
+- Not covered yet: an actual over-the-air update (0.3.1), the rollback test, the RTC clock change.
+
 ### 8i. First PRODUCTION e-mail from the normal pilot firmware (**BENCH VERIFIED** 2026-11-23)
 
 Image `normal-pilot-production-e217c16` (`0f0708f0…50276708`, 1,426,016 B, pilot profile, endpoint
